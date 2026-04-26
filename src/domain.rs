@@ -1,0 +1,608 @@
+use std::{collections::HashMap, str::FromStr};
+
+use async_trait::async_trait;
+use reqwest::Client;
+use rust_decimal::Decimal;
+use thiserror::Error;
+
+use crate::config::{NamecheapConfig, NamecheapContactConfig};
+
+const NAMECHEAP_SANDBOX_URL: &str = "https://api.sandbox.namecheap.com/xml.response";
+const NAMECHEAP_PRODUCTION_URL: &str = "https://api.namecheap.com/xml.response";
+
+#[derive(Clone, Debug)]
+pub struct DomainQuoteRequest {
+    pub domain: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct DomainQuote {
+    pub domain: String,
+    pub tld: String,
+    pub available: bool,
+    pub is_premium: bool,
+    pub price_usd: Decimal,
+    pub years: i32,
+}
+
+#[derive(Clone, Debug)]
+pub struct DomainPurchaseRequest {
+    pub domain: String,
+    pub years: i32,
+    pub privacy_enabled: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct DomainPurchaseResult {
+    pub namecheap_order_id: String,
+    pub namecheap_transaction_id: String,
+}
+
+#[derive(Debug, Error)]
+pub enum DomainError {
+    #[error("unsupported tld")]
+    UnsupportedTld,
+    #[error("domain unavailable")]
+    Unavailable,
+    #[error("premium or EAP domain requires manual handling")]
+    PremiumRejected,
+    #[error("missing Namecheap configuration: {0}")]
+    MissingConfig(String),
+    #[error("namecheap http error: {0}")]
+    Http(String),
+    #[error("namecheap parse error: {0}")]
+    Parse(String),
+    #[error("namecheap error: {0}")]
+    Namecheap(String),
+    #[error("cloudflare dns error: {0}")]
+    Cloudflare(String),
+}
+
+#[async_trait]
+pub trait DomainRegistrar: Send + Sync {
+    async fn quote(&self, request: &DomainQuoteRequest) -> Result<DomainQuote, DomainError>;
+
+    async fn purchase(
+        &self,
+        request: &DomainPurchaseRequest,
+    ) -> Result<DomainPurchaseResult, DomainError>;
+}
+
+pub struct NamecheapRegistrar {
+    config: NamecheapConfig,
+    client: Client,
+    allowed_tlds: Vec<String>,
+}
+
+impl NamecheapRegistrar {
+    pub fn new(config: NamecheapConfig) -> Self {
+        Self {
+            config,
+            client: Client::new(),
+            allowed_tlds: vec![
+                "com".to_string(),
+                "xyz".to_string(),
+                "fun".to_string(),
+                "site".to_string(),
+                "online".to_string(),
+            ],
+        }
+    }
+
+    fn endpoint(&self) -> &'static str {
+        if self.config.sandbox {
+            NAMECHEAP_SANDBOX_URL
+        } else {
+            NAMECHEAP_PRODUCTION_URL
+        }
+    }
+
+    fn tld_for(domain: &str) -> Option<String> {
+        domain
+            .rsplit_once('.')
+            .map(|(_, tld)| tld.to_ascii_lowercase())
+    }
+
+    fn validate_tld(&self, domain: &str) -> Result<String, DomainError> {
+        let tld = Self::tld_for(domain).ok_or(DomainError::UnsupportedTld)?;
+        if self.allowed_tlds.contains(&tld) {
+            Ok(tld)
+        } else {
+            Err(DomainError::UnsupportedTld)
+        }
+    }
+
+    fn validate_api_config(&self) -> Result<(), DomainError> {
+        let missing = [
+            ("NAMECHEAP_API_USER", &self.config.api_user),
+            ("NAMECHEAP_API_KEY", &self.config.api_key),
+            ("NAMECHEAP_USERNAME", &self.config.username),
+            ("NAMECHEAP_CLIENT_IP", &self.config.client_ip),
+        ]
+        .iter()
+        .filter_map(|(name, value)| value.trim().is_empty().then_some(*name))
+        .collect::<Vec<_>>();
+
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(DomainError::MissingConfig(missing.join(", ")))
+        }
+    }
+
+    fn validate_contact_config(&self) -> Result<(), DomainError> {
+        let contact = &self.config.contact;
+        let missing = [
+            ("NAMECHEAP_CONTACT_FIRST_NAME", &contact.first_name),
+            ("NAMECHEAP_CONTACT_LAST_NAME", &contact.last_name),
+            ("NAMECHEAP_CONTACT_ADDRESS1", &contact.address1),
+            ("NAMECHEAP_CONTACT_CITY", &contact.city),
+            ("NAMECHEAP_CONTACT_STATE", &contact.state_province),
+            ("NAMECHEAP_CONTACT_POSTAL_CODE", &contact.postal_code),
+            ("NAMECHEAP_CONTACT_COUNTRY", &contact.country),
+            ("NAMECHEAP_CONTACT_PHONE", &contact.phone),
+            ("NAMECHEAP_CONTACT_EMAIL", &contact.email),
+        ]
+        .iter()
+        .filter_map(|(name, value)| value.trim().is_empty().then_some(*name))
+        .collect::<Vec<_>>();
+
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(DomainError::MissingConfig(missing.join(", ")))
+        }
+    }
+
+    async fn call_namecheap(
+        &self,
+        command: &str,
+        extra_params: Vec<(String, String)>,
+    ) -> Result<String, DomainError> {
+        self.validate_api_config()?;
+
+        let mut params = vec![
+            ("ApiUser".to_string(), self.config.api_user.clone()),
+            ("ApiKey".to_string(), self.config.api_key.clone()),
+            ("UserName".to_string(), self.config.username.clone()),
+            ("ClientIp".to_string(), self.config.client_ip.clone()),
+            ("Command".to_string(), command.to_string()),
+        ];
+        params.extend(extra_params);
+
+        let response = self
+            .client
+            .post(self.endpoint())
+            .form(&params)
+            .send()
+            .await
+            .map_err(|error| DomainError::Http(error.to_string()))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| DomainError::Http(error.to_string()))?;
+
+        if !status.is_success() {
+            return Err(DomainError::Http(format!("{status}: {body}")));
+        }
+
+        if let Some(error) = first_tag_text(&body, "Error") {
+            return Err(DomainError::Namecheap(error));
+        }
+
+        Ok(body)
+    }
+
+    async fn check_domain(&self, domain: &str) -> Result<NamecheapCheckResult, DomainError> {
+        let xml = self
+            .call_namecheap(
+                "namecheap.domains.check",
+                vec![("DomainList".to_string(), domain.to_string())],
+            )
+            .await?;
+        let attrs = first_tag_attrs(&xml, "DomainCheckResult")
+            .ok_or_else(|| DomainError::Parse("missing DomainCheckResult".to_string()))?;
+
+        Ok(NamecheapCheckResult {
+            available: attr_bool(&attrs, "Available")?,
+            is_premium: attr_bool(&attrs, "IsPremiumName").unwrap_or(false),
+            premium_registration_price: attr_decimal(&attrs, "PremiumRegistrationPrice").ok(),
+            eap_fee: attr_decimal(&attrs, "EapFee").ok(),
+        })
+    }
+
+    async fn registration_price(&self, tld: &str, years: i32) -> Result<Decimal, DomainError> {
+        let xml = self
+            .call_namecheap(
+                "namecheap.users.getPricing",
+                vec![
+                    ("ProductType".to_string(), "DOMAIN".to_string()),
+                    ("ProductCategory".to_string(), "REGISTER".to_string()),
+                    ("ActionName".to_string(), "REGISTER".to_string()),
+                    ("ProductName".to_string(), tld.to_string()),
+                ],
+            )
+            .await?;
+
+        parse_price_for_years(&xml, tld, years)
+    }
+
+    fn create_contact_params(&self) -> Vec<(String, String)> {
+        let contact = &self.config.contact;
+        let mut params = Vec::new();
+        append_contact_params(&mut params, "Registrant", contact);
+        append_contact_params(&mut params, "Admin", contact);
+        append_contact_params(&mut params, "Tech", contact);
+        append_contact_params(&mut params, "AuxBilling", contact);
+        params
+    }
+}
+
+#[async_trait]
+impl DomainRegistrar for NamecheapRegistrar {
+    async fn quote(&self, request: &DomainQuoteRequest) -> Result<DomainQuote, DomainError> {
+        let domain = request.domain.to_ascii_lowercase();
+        let tld = self.validate_tld(&domain)?;
+        let check = self.check_domain(&domain).await?;
+
+        if !check.available {
+            return Ok(DomainQuote {
+                domain,
+                tld,
+                available: false,
+                is_premium: check.is_premium,
+                price_usd: Decimal::ZERO,
+                years: 1,
+            });
+        }
+
+        if check.is_premium || check.eap_fee.unwrap_or(Decimal::ZERO) > Decimal::ZERO {
+            return Ok(DomainQuote {
+                domain,
+                tld,
+                available: true,
+                is_premium: true,
+                price_usd: check.premium_registration_price.unwrap_or(Decimal::ZERO),
+                years: 1,
+            });
+        }
+
+        let price_usd = self.registration_price(&tld, 1).await?;
+        Ok(DomainQuote {
+            domain,
+            tld,
+            available: true,
+            is_premium: false,
+            price_usd,
+            years: 1,
+        })
+    }
+
+    async fn purchase(
+        &self,
+        request: &DomainPurchaseRequest,
+    ) -> Result<DomainPurchaseResult, DomainError> {
+        let domain = request.domain.to_ascii_lowercase();
+        self.validate_tld(&domain)?;
+        self.validate_contact_config()?;
+
+        let check = self.check_domain(&domain).await?;
+        if !check.available {
+            return Err(DomainError::Unavailable);
+        }
+        if check.is_premium || check.eap_fee.unwrap_or(Decimal::ZERO) > Decimal::ZERO {
+            return Err(DomainError::PremiumRejected);
+        }
+
+        let mut params = vec![
+            ("DomainName".to_string(), domain.clone()),
+            ("Years".to_string(), request.years.max(1).to_string()),
+        ];
+        if request.privacy_enabled {
+            params.push(("AddFreeWhoisguard".to_string(), "yes".to_string()));
+            params.push(("WGEnabled".to_string(), "yes".to_string()));
+        }
+        params.extend(self.create_contact_params());
+
+        let xml = self
+            .call_namecheap("namecheap.domains.create", params)
+            .await?;
+        let attrs = first_tag_attrs(&xml, "DomainCreateResult")
+            .ok_or_else(|| DomainError::Parse("missing DomainCreateResult".to_string()))?;
+
+        if !attr_bool(&attrs, "Registered").unwrap_or(false) {
+            return Err(DomainError::Namecheap(format!(
+                "domain was not registered: {xml}"
+            )));
+        }
+
+        Ok(DomainPurchaseResult {
+            namecheap_order_id: attrs.get("OrderID").cloned().unwrap_or_default(),
+            namecheap_transaction_id: attrs.get("TransactionID").cloned().unwrap_or_default(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct NamecheapCheckResult {
+    available: bool,
+    is_premium: bool,
+    premium_registration_price: Option<Decimal>,
+    eap_fee: Option<Decimal>,
+}
+
+fn append_contact_params(
+    params: &mut Vec<(String, String)>,
+    prefix: &str,
+    contact: &NamecheapContactConfig,
+) {
+    params.push((
+        contact_param_name(prefix, "FirstName"),
+        contact.first_name.clone(),
+    ));
+    params.push((
+        contact_param_name(prefix, "LastName"),
+        contact.last_name.clone(),
+    ));
+    params.push((
+        contact_param_name(prefix, "Address1"),
+        contact.address1.clone(),
+    ));
+    params.push((contact_param_name(prefix, "City"), contact.city.clone()));
+    params.push((
+        contact_param_name(prefix, "StateProvince"),
+        contact.state_province.clone(),
+    ));
+    params.push((
+        contact_param_name(prefix, "PostalCode"),
+        contact.postal_code.clone(),
+    ));
+    params.push((
+        contact_param_name(prefix, "Country"),
+        contact.country.clone(),
+    ));
+    params.push((contact_param_name(prefix, "Phone"), contact.phone.clone()));
+    params.push((
+        contact_param_name(prefix, "EmailAddress"),
+        contact.email.clone(),
+    ));
+    if let Some(organization) = &contact.organization {
+        params.push((
+            contact_param_name(prefix, "OrganizationName"),
+            organization.clone(),
+        ));
+    }
+}
+
+fn contact_param_name(prefix: &str, field: &str) -> String {
+    format!("{prefix}{field}")
+}
+
+fn parse_price_for_years(xml: &str, tld: &str, years: i32) -> Result<Decimal, DomainError> {
+    let mut cursor = 0;
+    while let Some(start) = xml[cursor..].find("<Product ") {
+        let absolute_start = cursor + start;
+        let Some(end) = xml[absolute_start..].find('>') else {
+            break;
+        };
+        let product_tag = &xml[absolute_start..absolute_start + end + 1];
+        let product_attrs = parse_attrs(product_tag);
+        let product_name = product_attrs
+            .get("Name")
+            .map(|value| value.trim_start_matches('.').to_ascii_lowercase());
+
+        let product_close = "</Product>";
+        let content_start = absolute_start + end + 1;
+        let Some(close_offset) = xml[content_start..].find(product_close) else {
+            break;
+        };
+        let product_body = &xml[content_start..content_start + close_offset];
+
+        if product_name.as_deref() == Some(tld) {
+            return parse_price_in_product(product_body, years);
+        }
+        cursor = content_start + close_offset + product_close.len();
+    }
+
+    Err(DomainError::Parse(format!("missing pricing for .{tld}")))
+}
+
+fn parse_price_in_product(product_body: &str, years: i32) -> Result<Decimal, DomainError> {
+    let mut cursor = 0;
+    while let Some(start) = product_body[cursor..].find("<Price ") {
+        let absolute_start = cursor + start;
+        let Some(end) = product_body[absolute_start..].find('>') else {
+            break;
+        };
+        let tag = &product_body[absolute_start..absolute_start + end + 1];
+        let attrs = parse_attrs(tag);
+        let duration = attrs
+            .get("Duration")
+            .and_then(|value| value.parse::<i32>().ok());
+        let duration_type = attrs
+            .get("DurationType")
+            .map(|value| value.to_ascii_uppercase());
+
+        if duration == Some(years) && duration_type.as_deref() == Some("YEAR") {
+            return attr_decimal(&attrs, "Price");
+        }
+        cursor = absolute_start + end + 1;
+    }
+
+    Err(DomainError::Parse(format!(
+        "missing {years} year registration price"
+    )))
+}
+
+fn first_tag_text(xml: &str, tag: &str) -> Option<String> {
+    let open_start = xml.find(&format!("<{tag}"))?;
+    let open_end = xml[open_start..].find('>')? + open_start;
+    let close_start = xml[open_end + 1..].find(&format!("</{tag}>"))? + open_end + 1;
+    Some(xml[open_end + 1..close_start].trim().to_string())
+}
+
+fn first_tag_attrs(xml: &str, tag: &str) -> Option<HashMap<String, String>> {
+    let start = xml.find(&format!("<{tag} "))?;
+    let end = xml[start..].find('>')? + start;
+    Some(parse_attrs(&xml[start..=end]))
+}
+
+fn parse_attrs(tag: &str) -> HashMap<String, String> {
+    let mut attrs = HashMap::new();
+    let bytes = tag.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        while index < bytes.len() && !bytes[index].is_ascii_alphabetic() {
+            index += 1;
+        }
+        let key_start = index;
+        while index < bytes.len()
+            && (bytes[index].is_ascii_alphanumeric()
+                || bytes[index] == b'_'
+                || bytes[index] == b'-')
+        {
+            index += 1;
+        }
+        if key_start == index {
+            break;
+        }
+        let key = &tag[key_start..index];
+
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() || bytes[index] != b'=' {
+            continue;
+        }
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() || bytes[index] != b'"' {
+            continue;
+        }
+        index += 1;
+        let value_start = index;
+        while index < bytes.len() && bytes[index] != b'"' {
+            index += 1;
+        }
+        if index <= bytes.len() {
+            attrs.insert(key.to_string(), xml_unescape(&tag[value_start..index]));
+        }
+        index += 1;
+    }
+
+    attrs
+}
+
+fn attr_bool(attrs: &HashMap<String, String>, name: &str) -> Result<bool, DomainError> {
+    attrs
+        .get(name)
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "true" | "yes" | "1"))
+        .ok_or_else(|| DomainError::Parse(format!("missing {name}")))
+}
+
+fn attr_decimal(attrs: &HashMap<String, String>, name: &str) -> Result<Decimal, DomainError> {
+    let value = attrs
+        .get(name)
+        .ok_or_else(|| DomainError::Parse(format!("missing {name}")))?;
+    Decimal::from_str(value).map_err(|error| DomainError::Parse(error.to_string()))
+}
+
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+#[derive(Clone, Debug)]
+pub struct CloudflareZoneResult {
+    pub zone_id: String,
+    pub nameservers: Vec<String>,
+}
+
+#[async_trait]
+pub trait DnsProvisioner: Send + Sync {
+    async fn create_zone(&self, domain: &str) -> Result<CloudflareZoneResult, DomainError>;
+
+    async fn set_namecheap_nameservers(
+        &self,
+        domain: &str,
+        nameservers: &[String],
+    ) -> Result<(), DomainError>;
+}
+
+pub struct DryRunDnsProvisioner;
+
+#[async_trait]
+impl DnsProvisioner for DryRunDnsProvisioner {
+    async fn create_zone(&self, domain: &str) -> Result<CloudflareZoneResult, DomainError> {
+        Ok(CloudflareZoneResult {
+            zone_id: format!("dry-run-zone-{domain}"),
+            nameservers: vec![
+                "ns1.cloudflare.com".to_string(),
+                "ns2.cloudflare.com".to_string(),
+            ],
+        })
+    }
+
+    async fn set_namecheap_nameservers(
+        &self,
+        _domain: &str,
+        _nameservers: &[String],
+    ) -> Result<(), DomainError> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_domain_check_attrs() {
+        let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainCheckResult Domain="pepe.xyz" Available="true" IsPremiumName="false" EapFee="0.0" /></CommandResponse></ApiResponse>"#;
+        let attrs = first_tag_attrs(xml, "DomainCheckResult").unwrap();
+        assert!(attr_bool(&attrs, "Available").unwrap());
+        assert!(!attr_bool(&attrs, "IsPremiumName").unwrap());
+    }
+
+    #[test]
+    fn parses_one_year_price() {
+        let xml = r#"
+        <ApiResponse Status="OK">
+          <CommandResponse>
+            <UserGetPricingResult>
+              <ProductType Name="DOMAIN">
+                <ProductCategory Name="REGISTER">
+                  <Product Name="xyz">
+                    <Price Duration="1" DurationType="YEAR" Price="12.34" />
+                    <Price Duration="2" DurationType="YEAR" Price="24.68" />
+                  </Product>
+                </ProductCategory>
+              </ProductType>
+            </UserGetPricingResult>
+          </CommandResponse>
+        </ApiResponse>
+        "#;
+        assert_eq!(
+            parse_price_for_years(xml, "xyz", 1).unwrap(),
+            Decimal::from_str("12.34").unwrap()
+        );
+    }
+
+    #[test]
+    fn parses_domain_create_result() {
+        let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainCreateResult Domain="pepe.xyz" Registered="true" OrderID="123" TransactionID="456" /></CommandResponse></ApiResponse>"#;
+        let attrs = first_tag_attrs(xml, "DomainCreateResult").unwrap();
+        assert!(attr_bool(&attrs, "Registered").unwrap());
+        assert_eq!(attrs.get("OrderID").unwrap(), "123");
+        assert_eq!(attrs.get("TransactionID").unwrap(), "456");
+    }
+}
