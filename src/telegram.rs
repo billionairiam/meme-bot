@@ -9,8 +9,8 @@ use teloxide::{
     dptree,
     prelude::*,
     types::{
-        CallbackQuery, ChatId, InlineKeyboardButton, InlineKeyboardMarkup, Message, ParseMode,
-        Recipient, UserId,
+        CallbackQuery, ChatId, InlineKeyboardButton, InlineKeyboardMarkup, Message, MessageId,
+        ParseMode, Recipient, UserId,
     },
     utils::client_from_env,
 };
@@ -52,6 +52,12 @@ struct TemplateOption {
     id: &'static str,
     name: &'static str,
     price_usdt: i64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UiMessage {
+    chat_id: ChatId,
+    message_id: MessageId,
 }
 
 impl TemplateOption {
@@ -287,37 +293,31 @@ async fn handle_callback(
         return Ok(());
     };
     let chat_id = message.chat().id;
+    let target = UiMessage {
+        chat_id,
+        message_id: message.id(),
+    };
 
     if !ensure_group_member_for_user(&bot, chat_id, query.from.id, &config).await? {
         return Ok(());
     }
 
     match query.data.as_deref() {
-        Some("main") => show_main_menu(&bot, chat_id, &config).await,
-        Some("create") => show_create_menu(&bot, chat_id).await,
-        Some("template_mode") => show_template_mode(&bot, chat_id).await,
+        Some("main") => edit_main_menu(&bot, target, &config).await,
+        Some("create") => edit_create_menu(&bot, target).await,
+        Some("template_mode") => edit_template_mode(&bot, target).await,
         Some("ai_mode") => {
+            clear_screen_keyboard(&bot, target).await?;
             set_session(query.from.id, OrderDraft::new_ai(), &sessions);
-            ask_logo(&bot, chat_id).await
+            edit_ask_logo(&bot, target).await
         }
-        Some("pay_menu") => show_payment_chain_menu(&bot, chat_id).await,
-        Some("status") => show_status(&bot, chat_id, query.from.id, &sessions).await,
-        Some("contact_admin") => bot
-            .send_message(
-                chat_id,
-                format!(
-                    "<b>Contact admin</b>\n\n{}",
-                    html_escape(&config.admin_contact)
-                ),
-            )
-            .parse_mode(ParseMode::Html)
-            .reply_markup(main_menu_keyboard())
-            .await
-            .map(|_| ()),
+        Some("pay_menu") => edit_payment_chain_menu(&bot, target).await,
+        Some("status") => edit_status(&bot, target, query.from.id, &sessions).await,
+        Some("contact_admin") => edit_contact_admin(&bot, target, &config).await,
         Some("pay_erc20") => {
-            set_payment_chain_and_ask_tx(
+            edit_payment_chain_and_ask_tx(
                 &bot,
-                chat_id,
+                target,
                 query.from.id,
                 PaymentChain::Erc20,
                 &config.usdt_erc20_address,
@@ -326,9 +326,9 @@ async fn handle_callback(
             .await
         }
         Some("pay_tron") => {
-            set_payment_chain_and_ask_tx(
+            edit_payment_chain_and_ask_tx(
                 &bot,
-                chat_id,
+                target,
                 query.from.id,
                 PaymentChain::Tron,
                 &config.usdt_tron_address,
@@ -337,9 +337,9 @@ async fn handle_callback(
             .await
         }
         Some("pay_sol") => {
-            set_payment_chain_and_ask_tx(
+            edit_payment_chain_and_ask_tx(
                 &bot,
-                chat_id,
+                target,
                 query.from.id,
                 PaymentChain::Sol,
                 &config.usdt_sol_address,
@@ -349,30 +349,37 @@ async fn handle_callback(
         }
         Some(data) if data.starts_with("select_tpl:") => {
             let template_id = data.trim_start_matches("select_tpl:");
-            show_template_confirmation(&bot, chat_id, template_id).await
+            edit_template_confirmation(&bot, target, template_id).await
         }
         Some(data) if data.starts_with("confirm_tpl:") => {
             match find_template(data.trim_start_matches("confirm_tpl:")) {
                 Some(template) => {
+                    clear_screen_keyboard(&bot, target).await?;
                     set_session(query.from.id, OrderDraft::new_template(template), &sessions);
-                    ask_logo(&bot, chat_id).await
+                    edit_ask_logo(&bot, target).await
                 }
-                None => bot
-                    .send_message(chat_id, "Template not found. Please choose again.")
-                    .reply_markup(template_keyboard())
+                None => {
+                    edit_screen(
+                        &bot,
+                        target,
+                        "<b>Template not found.</b>\n\nPlease choose again.",
+                        template_keyboard(),
+                    )
                     .await
-                    .map(|_| ()),
+                }
             }
         }
         Some("cancel") => {
             remove_session(query.from.id, &sessions);
-            bot.send_message(chat_id, "<b>Order cancelled.</b>")
-                .parse_mode(ParseMode::Html)
-                .reply_markup(main_menu_keyboard())
-                .await
-                .map(|_| ())
+            edit_screen(
+                &bot,
+                target,
+                "🛑 <b>Order cancelled</b>\n\nYou can start a new meme website order anytime.",
+                main_menu_keyboard(),
+            )
+            .await
         }
-        _ => show_main_menu(&bot, chat_id, &config).await,
+        _ => edit_main_menu(&bot, target, &config).await,
     }
 }
 
@@ -747,38 +754,128 @@ async fn ensure_group_member_for_user(
     }
 }
 
+async fn send_screen(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: impl Into<String>,
+    reply_markup: InlineKeyboardMarkup,
+) -> ResponseResult<()> {
+    bot.send_message(chat_id, text)
+        .parse_mode(ParseMode::Html)
+        .reply_markup(reply_markup)
+        .await
+        .map(|_| ())
+}
+
+async fn edit_screen(
+    bot: &Bot,
+    target: UiMessage,
+    text: impl Into<String>,
+    reply_markup: InlineKeyboardMarkup,
+) -> ResponseResult<()> {
+    match bot
+        .edit_message_text(target.chat_id, target.message_id, text)
+        .parse_mode(ParseMode::Html)
+        .reply_markup(reply_markup)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) if is_message_not_modified(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+async fn clear_screen_keyboard(bot: &Bot, target: UiMessage) -> ResponseResult<()> {
+    match bot
+        .edit_message_reply_markup(target.chat_id, target.message_id)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) if is_message_not_modified(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn is_message_not_modified(error: &teloxide::RequestError) -> bool {
+    error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("message is not modified")
+}
+
+fn main_menu_text(config: &TelegramUiConfig) -> String {
+    format!(
+        "🚀 <b>Auto Meme Web Bot</b>\n\n<b>Create meme websites in minutes</b>\nTemplate mode, AI mode, domain check, payment, generation, and launch.\n\n<b>Access group</b>\nhttps://t.me/MeMe_Web_Support\n\n<b>Template catalog</b>\n{}",
+        html_escape(&config.template_catalog_url)
+    )
+}
+
+fn create_menu_text() -> &'static str {
+    "🧩 <b>Create Website</b>\n\nChoose how the website should be built.\n\n<b>Template Mode</b>\nFast launch with fixed visual templates.\n\n<b>AI Free Creation</b>\nCustom style generated by agent."
+}
+
+fn template_mode_text() -> &'static str {
+    "📦 <b>Template Mode</b>\n\nSelect one template below.\n\nPrices are shown in USDT. After confirmation, I will ask for logo, token info, links, and domain."
+}
+
+fn template_confirmation_text(template: TemplateOption) -> String {
+    format!(
+        "📦 <b>Template Selected</b>\n\n<b>{}</b>\nPrice: <b>{}</b> USDT\n\nConfirm this template to continue to Step 1: logo upload.",
+        html_escape(template.name),
+        template.price_usdt
+    )
+}
+
+fn ask_logo_text() -> &'static str {
+    "🖼 <b>Step 1/7 · Logo</b>\n\nUpload your token logo image.\n\nAfter receiving the logo, I will ask for ticker."
+}
+
+fn status_text(user_id: UserId, sessions: &Sessions) -> String {
+    match get_session(user_id, sessions) {
+        Some(draft) => format!(
+            "📊 <b>Current Order</b>\n\nStatus: <code>{:?}</code>\nMode: <b>{}</b>\nWebsite price: <b>{}</b> USDT",
+            draft.step,
+            build_mode_label(&draft.build_mode),
+            draft.site_price_usdt
+        ),
+        None => "📊 <b>Order Status</b>\n\nNo active frontend test order.".to_string(),
+    }
+}
+
+fn payment_chain_text() -> &'static str {
+    "💳 <b>Payment</b>\n\nChoose the USDT chain you will use.\n\nAfter you choose a chain, I will show the address and ask you to paste the TX hash."
+}
+
 async fn show_main_menu(
     bot: &Bot,
     chat_id: ChatId,
     config: &TelegramUiConfig,
 ) -> ResponseResult<()> {
-    bot.send_message(
-        chat_id,
-        format!(
-            "🚀 <b>Auto Meme Web Bot</b>\n\nCreate and launch meme coin websites.\n\n<b>Required group</b>\nhttps://t.me/MeMe_Web_Support\n\n<b>Template catalog</b>\n{}",
-            html_escape(&config.template_catalog_url)
-        ),
-    )
-    .parse_mode(ParseMode::Html)
-    .reply_markup(main_menu_keyboard())
-    .await
-    .map(|_| ())
+    send_screen(bot, chat_id, main_menu_text(config), main_menu_keyboard()).await
+}
+
+async fn edit_main_menu(
+    bot: &Bot,
+    target: UiMessage,
+    config: &TelegramUiConfig,
+) -> ResponseResult<()> {
+    edit_screen(bot, target, main_menu_text(config), main_menu_keyboard()).await
 }
 
 async fn show_create_menu(bot: &Bot, chat_id: ChatId) -> ResponseResult<()> {
-    bot.send_message(chat_id, "🚀 <b>Create website</b>\n\nChoose creation mode:")
-        .parse_mode(ParseMode::Html)
-        .reply_markup(create_mode_keyboard())
-        .await
-        .map(|_| ())
+    send_screen(bot, chat_id, create_menu_text(), create_mode_keyboard()).await
+}
+
+async fn edit_create_menu(bot: &Bot, target: UiMessage) -> ResponseResult<()> {
+    edit_screen(bot, target, create_menu_text(), create_mode_keyboard()).await
 }
 
 async fn show_template_mode(bot: &Bot, chat_id: ChatId) -> ResponseResult<()> {
-    bot.send_message(chat_id, "📦 <b>Template mode</b>\n\nChoose one template:")
-        .parse_mode(ParseMode::Html)
-        .reply_markup(template_keyboard())
-        .await
-        .map(|_| ())
+    send_screen(bot, chat_id, template_mode_text(), template_keyboard()).await
+}
+
+async fn edit_template_mode(bot: &Bot, target: UiMessage) -> ResponseResult<()> {
+    edit_screen(bot, target, template_mode_text(), template_keyboard()).await
 }
 
 async fn show_template_confirmation(
@@ -787,46 +884,54 @@ async fn show_template_confirmation(
     template_id: &str,
 ) -> ResponseResult<()> {
     let Some(template) = find_template(template_id) else {
-        return bot
-            .send_message(
-                chat_id,
-                "<b>Template not found.</b>\n\nPlease choose again.",
-            )
-            .parse_mode(ParseMode::Html)
-            .reply_markup(template_keyboard())
-            .await
-            .map(|_| ());
+        return send_screen(
+            bot,
+            chat_id,
+            "<b>Template not found.</b>\n\nPlease choose again.",
+            template_keyboard(),
+        )
+        .await;
     };
 
-    bot.send_message(
+    send_screen(
+        bot,
         chat_id,
-        format!(
-            "📦 <b>Template selected</b>\n\n{}\n\nPrice: <b>{}</b> USDT\n\nConfirm this template?",
-            html_escape(template.name),
-            template.price_usdt
-        ),
+        template_confirmation_text(template),
+        template_confirmation_keyboard(template_id),
     )
-    .parse_mode(ParseMode::Html)
-    .reply_markup(InlineKeyboardMarkup::new(vec![
-        vec![InlineKeyboardButton::callback(
-            "✅ Confirm template",
-            format!("confirm_tpl:{template_id}"),
-        )],
-        vec![InlineKeyboardButton::callback("⬅ Back", "create")],
-    ]))
     .await
-    .map(|_| ())
+}
+
+async fn edit_template_confirmation(
+    bot: &Bot,
+    target: UiMessage,
+    template_id: &str,
+) -> ResponseResult<()> {
+    let Some(template) = find_template(template_id) else {
+        return edit_screen(
+            bot,
+            target,
+            "<b>Template not found.</b>\n\nPlease choose again.",
+            template_keyboard(),
+        )
+        .await;
+    };
+
+    edit_screen(
+        bot,
+        target,
+        template_confirmation_text(template),
+        template_confirmation_keyboard(template_id),
+    )
+    .await
 }
 
 async fn ask_logo(bot: &Bot, chat_id: ChatId) -> ResponseResult<()> {
-    bot.send_message(
-        chat_id,
-        "🖼 <b>Step 1/7</b>\n\nUpload your token logo image.",
-    )
-    .parse_mode(ParseMode::Html)
-    .reply_markup(cancel_keyboard())
-    .await
-    .map(|_| ())
+    send_screen(bot, chat_id, ask_logo_text(), cancel_keyboard()).await
+}
+
+async fn edit_ask_logo(bot: &Bot, target: UiMessage) -> ResponseResult<()> {
+    edit_screen(bot, target, ask_logo_text(), cancel_keyboard()).await
 }
 
 async fn show_status(
@@ -835,54 +940,81 @@ async fn show_status(
     user_id: UserId,
     sessions: &Sessions,
 ) -> ResponseResult<()> {
-    let text = match get_session(user_id, sessions) {
-        Some(draft) => format!(
-            "📊 <b>Current order status</b>\n\n<code>{:?}</code>",
-            draft.step
-        ),
-        None => "📊 <b>Status</b>\n\nNo active frontend test order.".to_string(),
-    };
-    bot.send_message(chat_id, text)
-        .parse_mode(ParseMode::Html)
-        .reply_markup(main_menu_keyboard())
-        .await
-        .map(|_| ())
+    send_screen(
+        bot,
+        chat_id,
+        status_text(user_id, sessions),
+        main_menu_keyboard(),
+    )
+    .await
+}
+
+async fn edit_status(
+    bot: &Bot,
+    target: UiMessage,
+    user_id: UserId,
+    sessions: &Sessions,
+) -> ResponseResult<()> {
+    edit_screen(
+        bot,
+        target,
+        status_text(user_id, sessions),
+        main_menu_keyboard(),
+    )
+    .await
 }
 
 async fn show_payment_chain_menu(bot: &Bot, chat_id: ChatId) -> ResponseResult<()> {
-    bot.send_message(chat_id, "💳 <b>Payment</b>\n\nChoose USDT payment chain:")
-        .parse_mode(ParseMode::Html)
-        .reply_markup(payment_chain_keyboard())
-        .await
-        .map(|_| ())
+    send_screen(bot, chat_id, payment_chain_text(), payment_chain_keyboard()).await
 }
 
-async fn set_payment_chain_and_ask_tx(
+async fn edit_payment_chain_menu(bot: &Bot, target: UiMessage) -> ResponseResult<()> {
+    edit_screen(bot, target, payment_chain_text(), payment_chain_keyboard()).await
+}
+
+async fn edit_contact_admin(
     bot: &Bot,
-    chat_id: ChatId,
+    target: UiMessage,
+    config: &TelegramUiConfig,
+) -> ResponseResult<()> {
+    edit_screen(
+        bot,
+        target,
+        format!(
+            "👤 <b>Contact admin</b>\n\nFor manual handling, quota issues, or premium domains:\n\n{}",
+            html_escape(&config.admin_contact)
+        ),
+        main_menu_keyboard(),
+    )
+    .await
+}
+
+async fn edit_payment_chain_and_ask_tx(
+    bot: &Bot,
+    target: UiMessage,
     user_id: UserId,
     chain: PaymentChain,
     address: &str,
     sessions: &Sessions,
 ) -> ResponseResult<()> {
     let Some(mut draft) = get_session(user_id, sessions) else {
-        return bot
-            .send_message(chat_id, "<b>No active order.</b>\n\nStart with /create.")
-            .parse_mode(ParseMode::Html)
-            .reply_markup(main_menu_keyboard())
-            .await
-            .map(|_| ());
+        return edit_screen(
+            bot,
+            target,
+            "<b>No active order.</b>\n\nStart with /create.",
+            main_menu_keyboard(),
+        )
+        .await;
     };
 
     let Some(total) = draft.total_usdt else {
-        return bot
-            .send_message(
-                chat_id,
-                "<b>Payment not ready.</b>\n\nComplete logo, token links, and website URL before payment.",
-            )
-            .parse_mode(ParseMode::Html)
-            .await
-            .map(|_| ());
+        return edit_screen(
+            bot,
+            target,
+            "<b>Payment not ready.</b>\n\nComplete logo, token links, and website URL before payment.",
+            cancel_keyboard(),
+        )
+        .await;
     };
 
     draft.payment_chain = Some(chain);
@@ -895,14 +1027,13 @@ async fn set_payment_chain_and_ask_tx(
         address
     };
 
-    bot.send_message(
-        chat_id,
+    edit_screen(
+        bot,
+        target,
         payment_instruction(Uuid::new_v4(), total, chain, display_address),
+        cancel_keyboard(),
     )
-    .parse_mode(ParseMode::Html)
-    .reply_markup(cancel_keyboard())
     .await
-    .map(|_| ())
 }
 
 fn set_session(user_id: UserId, draft: OrderDraft, sessions: &Sessions) {
@@ -1138,7 +1269,7 @@ fn template_keyboard() -> InlineKeyboardMarkup {
         for template in chunk {
             let number = template_number(template.id);
             row.push(InlineKeyboardButton::callback(
-                format!("{number}. {}", template.name),
+                format!("{number:02}. {} · {}U", template.name, template.price_usdt),
                 format!("select_tpl:{}", template.id),
             ));
         }
@@ -1148,11 +1279,26 @@ fn template_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(rows)
 }
 
+fn template_confirmation_keyboard(template_id: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![InlineKeyboardButton::callback(
+            "✅ Confirm Template",
+            format!("confirm_tpl:{template_id}"),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "📦 Choose Another",
+            "template_mode",
+        )],
+        vec![InlineKeyboardButton::callback("⬅ Back", "create")],
+    ])
+}
+
 fn payment_chain_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![InlineKeyboardButton::callback("💳 USDT ERC20", "pay_erc20")],
         vec![InlineKeyboardButton::callback("💳 USDT TRON", "pay_tron")],
         vec![InlineKeyboardButton::callback("💳 USDT SOL", "pay_sol")],
+        vec![InlineKeyboardButton::callback("⬅ Back", "pay_menu")],
     ])
 }
 
@@ -1168,9 +1314,16 @@ fn status_keyboard() -> InlineKeyboardMarkup {
 
 fn cancel_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
-        "Cancel Order",
+        "🛑 Cancel Order",
         "cancel",
     )]])
+}
+
+fn build_mode_label(build_mode: &BuildModeDraft) -> &'static str {
+    match build_mode {
+        BuildModeDraft::Template => "Template Mode",
+        BuildModeDraft::AiFree => "AI Free Creation",
+    }
 }
 
 pub fn payment_instruction(
