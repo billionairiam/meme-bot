@@ -70,7 +70,7 @@ pub fn validate_telegram_url(value: &str) -> Result<(), ValidationError> {
 }
 
 pub fn validate_domain(value: &str) -> Result<(), ValidationError> {
-    let re = Regex::new(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.(com|xyz|fun|site|online)$")
+    let re = Regex::new(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.(com|net|org|xyz|fun|site|online|io|co|me|cc|app|dev|world|space|club|store|shop)$")
         .expect("valid domain regex");
     re.is_match(&value.to_ascii_lowercase())
         .then_some(())
