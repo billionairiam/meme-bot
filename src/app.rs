@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::{
     config::Config,
-    deployment::CloudflarePagesDeployer,
+    deployment::{CloudflarePagesDeployer, HttpClientPagesDeployer, SiteDeployer},
     generation::{CliGenerationProvider, GenerationRouter},
     queue::GenerationQueue,
 };
@@ -34,15 +34,29 @@ impl App {
                 self.config.agent_timeout_seconds,
             )),
         ));
+
+        let deployer: Option<Arc<dyn SiteDeployer>> =
+            if let (Some(base_url), Some(api_key)) = (
+                self.config.api_service_base_url.as_deref(),
+                self.config.api_service_api_key.as_deref(),
+            ) {
+                Some(Arc::new(HttpClientPagesDeployer::new(
+                    base_url.to_string(),
+                    api_key.to_string(),
+                )))
+            } else {
+                Some(Arc::new(CloudflarePagesDeployer::new(
+                    self.config.cloudflare_account_id.clone(),
+                    self.config.cloudflare_api_token.clone(),
+                    self.config.cloudflare_wrangler_command.clone(),
+                    self.config.cloudflare_wrangler_args.clone(),
+                )))
+            };
+
         let queue = GenerationQueue::new(
             self.pool.clone(),
             router,
-            Some(Arc::new(CloudflarePagesDeployer::new(
-                self.config.cloudflare_account_id.clone(),
-                self.config.cloudflare_api_token.clone(),
-                self.config.cloudflare_wrangler_command.clone(),
-                self.config.cloudflare_wrangler_args.clone(),
-            ))),
+            deployer,
             self.config.generation_max_concurrency,
             "worker-1".to_string(),
         );

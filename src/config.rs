@@ -30,6 +30,8 @@ pub struct Config {
     pub cloudflare_api_token: String,
     pub cloudflare_wrangler_command: String,
     pub cloudflare_wrangler_args: String,
+    pub api_service_base_url: Option<String>,
+    pub api_service_api_key: Option<String>,
     pub namecheap: NamecheapConfig,
 }
 
@@ -124,6 +126,12 @@ impl Config {
                 "wrangler pages deploy {site_dir} --project-name={project_name} --branch={branch}"
                     .to_string()
             }),
+            api_service_base_url: env::var("API_SERVICE_BASE_URL")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            api_service_api_key: env::var("API_SERVICE_API_KEY")
+                .ok()
+                .filter(|v| !v.is_empty()),
             namecheap: NamecheapConfig {
                 api_user: env::var("NAMECHEAP_API_USER").unwrap_or_default(),
                 api_key: env::var("NAMECHEAP_API_KEY").unwrap_or_default(),

@@ -19,9 +19,12 @@ use uuid::Uuid;
 
 use crate::{
     config::{Config, GenerationProviderName, NamecheapConfig},
-    deployment::{CloudflarePagesDeployer, DeploymentRequest, SiteDeployer},
+    deployment::{
+        CloudflarePagesDeployer, DeploymentRequest, HttpClientPagesDeployer, SiteDeployer,
+    },
     domain::{
-        DomainError, DomainPurchaseRequest, DomainQuoteRequest, DomainRegistrar, NamecheapRegistrar,
+        DomainError, DomainPurchaseRequest, DomainQuoteRequest, DomainRegistrar,
+        HttpClientDomainRegistrar, NamecheapRegistrar,
     },
     generation::{CliGenerationProvider, GenerationRouter, SiteGenerationRequest},
     models::{PaymentChain, WebsiteInput},
@@ -86,6 +89,9 @@ pub struct TelegramUiConfig {
     pub cloudflare_api_token: String,
     pub cloudflare_wrangler_command: String,
     pub cloudflare_wrangler_args: String,
+    pub api_service_base_url: Option<String>,
+    pub api_service_api_key: Option<String>,
+    pub github_owner: String,
     pub template_catalog_url: String,
     pub admin_contact: String,
     pub usdt_erc20_address: String,
@@ -117,6 +123,9 @@ impl TelegramUiConfig {
             cloudflare_api_token: config.cloudflare_api_token.clone(),
             cloudflare_wrangler_command: config.cloudflare_wrangler_command.clone(),
             cloudflare_wrangler_args: config.cloudflare_wrangler_args.clone(),
+            api_service_base_url: config.api_service_base_url.clone(),
+            api_service_api_key: config.api_service_api_key.clone(),
+            github_owner: config.github_owner.clone(),
             template_catalog_url: config.template_catalog_url.clone(),
             admin_contact: config.admin_contact.clone(),
             usdt_erc20_address: config.usdt_erc20_address.clone(),
@@ -415,6 +424,9 @@ async fn handle_order_step(
                 cloudflare_api_token: config.cloudflare_api_token.clone(),
                 cloudflare_wrangler_command: config.cloudflare_wrangler_command.clone(),
                 cloudflare_wrangler_args: config.cloudflare_wrangler_args.clone(),
+                api_service_base_url: config.api_service_base_url.clone(),
+                api_service_api_key: config.api_service_api_key.clone(),
+                github_owner: config.github_owner.clone(),
             },
         )
         .await;
@@ -609,7 +621,18 @@ async fn handle_order_step(
                     .map(|_| ());
             }
 
-            let registrar = NamecheapRegistrar::new(config.namecheap.clone());
+            let registrar: Box<dyn DomainRegistrar> =
+                if let (Some(base_url), Some(api_key)) = (
+                    config.api_service_base_url.as_deref(),
+                    config.api_service_api_key.as_deref(),
+                ) {
+                    Box::new(HttpClientDomainRegistrar::new(
+                        base_url.to_string(),
+                        api_key.to_string(),
+                    ))
+                } else {
+                    Box::new(NamecheapRegistrar::new(config.namecheap.clone()))
+                };
             match registrar
                 .quote(&DomainQuoteRequest {
                     domain: domain.clone(),
@@ -683,7 +706,7 @@ async fn handle_order_step(
                     .await
                     .map(|_| ());
             }
-            let purchase_message = maybe_purchase_domain_after_tx(&config.namecheap, &draft).await;
+            let purchase_message = maybe_purchase_domain_after_tx(&config, &draft).await;
             let generation_message = maybe_run_agent_after_tx(&config, &draft).await;
             draft.step = DraftStep::PaymentConfirmed;
             set_session(user_id, draft, &sessions);
@@ -1055,8 +1078,8 @@ fn remove_session(user_id: UserId, sessions: &Sessions) {
     sessions.lock().expect("sessions lock").remove(&user_id);
 }
 
-async fn maybe_purchase_domain_after_tx(config: &NamecheapConfig, draft: &OrderDraft) -> String {
-    if !config.auto_purchase_after_tx {
+async fn maybe_purchase_domain_after_tx(config: &TelegramUiConfig, draft: &OrderDraft) -> String {
+    if !config.namecheap.auto_purchase_after_tx {
         return "\n\n<b>Domain purchase:</b> skipped. Set <code>NAMECHEAP_AUTO_PURCHASE_AFTER_TX=true</code> to enable automatic Namecheap purchase after TX.".to_string();
     }
 
@@ -1064,7 +1087,18 @@ async fn maybe_purchase_domain_after_tx(config: &NamecheapConfig, draft: &OrderD
         return "\n\n<b>Domain purchase:</b> skipped because no domain is attached.".to_string();
     };
 
-    let registrar = NamecheapRegistrar::new(config.clone());
+    let registrar: Box<dyn DomainRegistrar> =
+        if let (Some(base_url), Some(api_key)) = (
+            config.api_service_base_url.as_deref(),
+            config.api_service_api_key.as_deref(),
+        ) {
+            Box::new(HttpClientDomainRegistrar::new(
+                base_url.to_string(),
+                api_key.to_string(),
+            ))
+        } else {
+            Box::new(NamecheapRegistrar::new(config.namecheap.clone()))
+        };
     match registrar
         .purchase(&DomainPurchaseRequest {
             domain: domain.to_string(),
@@ -1157,15 +1191,26 @@ async fn maybe_deploy_after_agent(
     };
 
     let project_name = cloudflare_project_name(domain, order_id);
-    let deployer = CloudflarePagesDeployer::new(
-        config.cloudflare_account_id.clone(),
-        config.cloudflare_api_token.clone(),
-        config.cloudflare_wrangler_command.clone(),
-        config.cloudflare_wrangler_args.clone(),
-    );
+    let deployer: Box<dyn SiteDeployer> =
+        if let (Some(base_url), Some(api_key)) = (
+            config.api_service_base_url.as_deref(),
+            config.api_service_api_key.as_deref(),
+        ) {
+            Box::new(HttpClientPagesDeployer::new(
+                base_url.to_string(),
+                api_key.to_string(),
+            ))
+        } else {
+            Box::new(CloudflarePagesDeployer::new(
+                config.cloudflare_account_id.clone(),
+                config.cloudflare_api_token.clone(),
+                config.cloudflare_wrangler_command.clone(),
+                config.cloudflare_wrangler_args.clone(),
+            ))
+        };
     match deployer
         .deploy(&DeploymentRequest {
-            repo_owner: "direct-upload".to_string(),
+            repo_owner: config.github_owner.clone(),
             repo_name: project_name.clone(),
             github_token: String::new(),
             site_dir: output_dir.display().to_string(),

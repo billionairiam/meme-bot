@@ -1,12 +1,13 @@
-use std::{path::Path, process::Stdio};
+use std::{path::Path, process::Stdio, time::Duration};
 
 use async_trait::async_trait;
 use reqwest::{Client, StatusCode};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 use tokio::process::Command;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeploymentRequest {
     pub repo_owner: String,
     pub repo_name: String,
@@ -17,7 +18,7 @@ pub struct DeploymentRequest {
     pub custom_domain: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeploymentResult {
     pub github_repo_url: String,
     pub github_commit_sha: String,
@@ -349,6 +350,87 @@ impl SiteDeployer for DryRunDeployer {
             cloudflare_pages_url: format!("https://{}.pages.dev", request.cloudflare_project_name),
             custom_domain: request.custom_domain.clone(),
         })
+    }
+}
+
+// ---- HttpClientPagesDeployer ----
+
+pub struct HttpClientPagesDeployer {
+    base_url: String,
+    api_key: String,
+    client: Client,
+}
+
+impl HttpClientPagesDeployer {
+    pub fn new(base_url: String, api_key: String) -> Self {
+        Self {
+            base_url,
+            api_key,
+            client: Client::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PagesDeployResponse {
+    cloudflare_pages_url: String,
+    #[serde(default)]
+    custom_domain: Option<String>,
+}
+
+#[async_trait]
+impl SiteDeployer for HttpClientPagesDeployer {
+    async fn deploy(
+        &self,
+        request: &DeploymentRequest,
+    ) -> Result<DeploymentResult, DeploymentError> {
+        let response = self
+            .client
+            .post(format!("{}/api/v1/pages/deploy", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .json(&serde_json::json!({
+                "project_name": request.cloudflare_project_name,
+                "github_owner": request.repo_owner,
+                "github_repo": request.repo_name,
+                "production_branch": request.production_branch,
+                "custom_domain": request.custom_domain,
+            }))
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+            .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
+
+        if status.is_success() {
+            let deploy_response: PagesDeployResponse = serde_json::from_str(&body)
+                .map_err(|e| {
+                    DeploymentError::CloudflarePages(format!("parse response: {e}"))
+                })?;
+            Ok(DeploymentResult {
+                github_repo_url: format!(
+                    "https://github.com/{}/{}",
+                    request.repo_owner, request.repo_name
+                ),
+                github_commit_sha: "cloudflare-git".to_string(),
+                cloudflare_pages_url: deploy_response.cloudflare_pages_url,
+                custom_domain: deploy_response.custom_domain,
+            })
+        } else {
+            let err_msg = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| {
+                    v.get("message")
+                        .and_then(|m| m.as_str())
+                        .map(String::from)
+                })
+                .unwrap_or(body);
+            Err(DeploymentError::CloudflarePages(err_msg))
+        }
     }
 }
 
