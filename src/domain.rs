@@ -540,6 +540,43 @@ pub struct CloudflareZoneResult {
     pub nameservers: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct DnsRecord {
+    pub host_name: String,
+    pub record_type: DnsRecordType,
+    pub address: String,
+    pub ttl: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DnsRecordType {
+    A,
+    Aaaa,
+    Cname,
+    Txt,
+    Mx,
+    MxE,
+    Url,
+    Url301,
+    Frame,
+}
+
+impl DnsRecordType {
+    fn as_namecheap_str(self) -> &'static str {
+        match self {
+            Self::A => "A",
+            Self::Aaaa => "AAAA",
+            Self::Cname => "CNAME",
+            Self::Txt => "TXT",
+            Self::Mx => "MX",
+            Self::MxE => "MXE",
+            Self::Url => "URL",
+            Self::Url301 => "URL301",
+            Self::Frame => "FRAME",
+        }
+    }
+}
+
 #[async_trait]
 pub trait DnsProvisioner: Send + Sync {
     async fn create_zone(&self, domain: &str) -> Result<CloudflareZoneResult, DomainError>;
@@ -549,7 +586,15 @@ pub trait DnsProvisioner: Send + Sync {
         domain: &str,
         nameservers: &[String],
     ) -> Result<(), DomainError>;
+
+    async fn set_dns_records(
+        &self,
+        domain: &str,
+        records: &[DnsRecord],
+    ) -> Result<(), DomainError>;
 }
+
+// ---- DryRunDnsProvisioner ----
 
 pub struct DryRunDnsProvisioner;
 
@@ -571,6 +616,263 @@ impl DnsProvisioner for DryRunDnsProvisioner {
         _nameservers: &[String],
     ) -> Result<(), DomainError> {
         Ok(())
+    }
+
+    async fn set_dns_records(
+        &self,
+        _domain: &str,
+        _records: &[DnsRecord],
+    ) -> Result<(), DomainError> {
+        Ok(())
+    }
+}
+
+// ---- NamecheapDnsProvisioner (real API) ----
+
+pub struct NamecheapDnsProvisioner {
+    config: NamecheapConfig,
+    client: Client,
+}
+
+impl NamecheapDnsProvisioner {
+    pub fn new(config: NamecheapConfig) -> Self {
+        Self {
+            config,
+            client: Client::new(),
+        }
+    }
+
+    fn endpoint(&self) -> &'static str {
+        if self.config.sandbox {
+            NAMECHEAP_SANDBOX_URL
+        } else {
+            NAMECHEAP_PRODUCTION_URL
+        }
+    }
+
+    fn validate_api_config(&self) -> Result<(), DomainError> {
+        let missing = [
+            ("NAMECHEAP_API_USER", &self.config.api_user),
+            ("NAMECHEAP_API_KEY", &self.config.api_key),
+            ("NAMECHEAP_USERNAME", &self.config.username),
+            ("NAMECHEAP_CLIENT_IP", &self.config.client_ip),
+        ]
+        .iter()
+        .filter_map(|(name, value)| value.trim().is_empty().then_some(*name))
+        .collect::<Vec<_>>();
+
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(DomainError::MissingConfig(missing.join(", ")))
+        }
+    }
+
+    async fn call_namecheap(
+        &self,
+        command: &str,
+        extra_params: Vec<(String, String)>,
+    ) -> Result<String, DomainError> {
+        self.validate_api_config()?;
+
+        let mut params = vec![
+            ("ApiUser".to_string(), self.config.api_user.clone()),
+            ("ApiKey".to_string(), self.config.api_key.clone()),
+            ("UserName".to_string(), self.config.username.clone()),
+            ("ClientIp".to_string(), self.config.client_ip.clone()),
+            ("Command".to_string(), command.to_string()),
+        ];
+        params.extend(extra_params);
+
+        let response = self
+            .client
+            .post(self.endpoint())
+            .form(&params)
+            .send()
+            .await
+            .map_err(|error| DomainError::Http(error.to_string()))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| DomainError::Http(error.to_string()))?;
+
+        if !status.is_success() {
+            return Err(DomainError::Http(format!("{status}: {body}")));
+        }
+
+        if let Some(error) = first_tag_text(&body, "Error") {
+            return Err(DomainError::Namecheap(error));
+        }
+
+        Ok(body)
+    }
+}
+
+#[async_trait]
+impl DnsProvisioner for NamecheapDnsProvisioner {
+    async fn create_zone(&self, _domain: &str) -> Result<CloudflareZoneResult, DomainError> {
+        Err(DomainError::Cloudflare(
+            "create_zone not supported by Namecheap; use Cloudflare API directly".to_string(),
+        ))
+    }
+
+    async fn set_namecheap_nameservers(
+        &self,
+        domain: &str,
+        nameservers: &[String],
+    ) -> Result<(), DomainError> {
+        let ns_list = nameservers.join(",");
+        self.call_namecheap(
+            "namecheap.domains.dns.setCustom",
+            vec![
+                ("DomainName".to_string(), domain.to_ascii_lowercase()),
+                ("Nameservers".to_string(), ns_list),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn set_dns_records(
+        &self,
+        domain: &str,
+        records: &[DnsRecord],
+    ) -> Result<(), DomainError> {
+        let mut params = vec![("DomainName".to_string(), domain.to_ascii_lowercase())];
+        for (i, record) in records.iter().enumerate() {
+            let n = i + 1;
+            params.push((format!("HostName{n}"), record.host_name.clone()));
+            params.push((format!("RecordType{n}"), record.record_type.as_namecheap_str().to_string()));
+            params.push((format!("Address{n}"), record.address.clone()));
+            if let Some(ttl) = record.ttl {
+                params.push((format!("TTL{n}"), ttl.to_string()));
+            }
+        }
+        self.call_namecheap("namecheap.domains.dns.setHosts", params)
+            .await?;
+        Ok(())
+    }
+}
+
+// ---- CloudflareDnsProvisioner (real API) ----
+
+pub struct CloudflareDnsProvisioner {
+    account_id: String,
+    api_token: String,
+    client: Client,
+}
+
+impl CloudflareDnsProvisioner {
+    pub fn new(account_id: String, api_token: String) -> Self {
+        Self {
+            account_id,
+            api_token,
+            client: Client::new(),
+        }
+    }
+
+    fn validate_config(&self) -> Result<(), DomainError> {
+        let missing = [
+            ("CLOUDFLARE_ACCOUNT_ID", &self.account_id),
+            ("CLOUDFLARE_API_TOKEN", &self.api_token),
+        ]
+        .iter()
+        .filter_map(|(name, value)| value.trim().is_empty().then_some(*name))
+        .collect::<Vec<_>>();
+
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(DomainError::MissingConfig(missing.join(", ")))
+        }
+    }
+}
+
+#[async_trait]
+impl DnsProvisioner for CloudflareDnsProvisioner {
+    async fn create_zone(&self, domain: &str) -> Result<CloudflareZoneResult, DomainError> {
+        self.validate_config()?;
+
+        let url = format!(
+            "https://api.cloudflare.com/client/v4/zones"
+        );
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_token)
+            .json(&serde_json::json!({
+                "name": domain,
+                "account": { "id": self.account_id },
+                "jump_start": true,
+            }))
+            .send()
+            .await
+            .map_err(|error| DomainError::Cloudflare(error.to_string()))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| DomainError::Cloudflare(error.to_string()))?;
+
+        if !status.is_success() {
+            return Err(DomainError::Cloudflare(format!("{status}: {body}")));
+        }
+
+        let json: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|error| DomainError::Cloudflare(format!("parse response: {error}")))?;
+
+        if json.get("success").and_then(|v| v.as_bool()) != Some(true) {
+            let errors = json
+                .get("errors")
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown error".to_string());
+            return Err(DomainError::Cloudflare(format!("zone creation failed: {errors}")));
+        }
+
+        let result = json
+            .get("result")
+            .ok_or_else(|| DomainError::Cloudflare("missing result in response".to_string()))?;
+
+        let zone_id = result
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| DomainError::Cloudflare("missing zone id".to_string()))?
+            .to_string();
+
+        let nameservers: Vec<String> = result
+            .get("name_servers")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|ns| ns.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(CloudflareZoneResult { zone_id, nameservers })
+    }
+
+    async fn set_namecheap_nameservers(
+        &self,
+        _domain: &str,
+        _nameservers: &[String],
+    ) -> Result<(), DomainError> {
+        Err(DomainError::Cloudflare(
+            "set_namecheap_nameservers not supported by Cloudflare; use NamecheapDnsProvisioner".to_string(),
+        ))
+    }
+
+    async fn set_dns_records(
+        &self,
+        _domain: &str,
+        _records: &[DnsRecord],
+    ) -> Result<(), DomainError> {
+        Err(DomainError::Cloudflare(
+            "set_dns_records not supported by Cloudflare; use NamecheapDnsProvisioner".to_string(),
+        ))
     }
 }
 
@@ -880,6 +1182,69 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[tokio::test]
+    async fn dry_run_set_dns_records_succeeds() {
+        let provisioner = DryRunDnsProvisioner;
+        let result = provisioner
+            .set_dns_records(
+                "pepe.xyz",
+                &[
+                    DnsRecord {
+                        host_name: "@".to_string(),
+                        record_type: DnsRecordType::A,
+                        address: "192.0.2.1".to_string(),
+                        ttl: Some(1800),
+                    },
+                    DnsRecord {
+                        host_name: "www".to_string(),
+                        record_type: DnsRecordType::Cname,
+                        address: "pepe.xyz".to_string(),
+                        ttl: None,
+                    },
+                ],
+            )
+            .await;
+        assert!(result.is_ok());
+    }
+
+    // ---- DnsRecordType tests ----
+
+    #[test]
+    fn dns_record_type_namecheap_str() {
+        assert_eq!(DnsRecordType::A.as_namecheap_str(), "A");
+        assert_eq!(DnsRecordType::Aaaa.as_namecheap_str(), "AAAA");
+        assert_eq!(DnsRecordType::Cname.as_namecheap_str(), "CNAME");
+        assert_eq!(DnsRecordType::Txt.as_namecheap_str(), "TXT");
+        assert_eq!(DnsRecordType::Mx.as_namecheap_str(), "MX");
+        assert_eq!(DnsRecordType::MxE.as_namecheap_str(), "MXE");
+        assert_eq!(DnsRecordType::Url.as_namecheap_str(), "URL");
+        assert_eq!(DnsRecordType::Url301.as_namecheap_str(), "URL301");
+        assert_eq!(DnsRecordType::Frame.as_namecheap_str(), "FRAME");
+    }
+
+    // ---- XML parsing for DNS responses ----
+
+    #[test]
+    fn parses_dns_get_hosts_empty() {
+        let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainDNSGetHostsResult Domain="pepe.xyz" EmailType="FWD" IsUsingOurDNS="true"><host /></DomainDNSGetHostsResult></CommandResponse></ApiResponse>"#;
+        let attrs = first_tag_attrs(xml, "DomainDNSGetHostsResult").unwrap();
+        assert_eq!(attrs.get("Domain").unwrap(), "pepe.xyz");
+    }
+
+    #[test]
+    fn parses_dns_set_custom_result() {
+        let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainDNSSetCustomResult Domain="pepe.xyz" Updated="true" /></CommandResponse></ApiResponse>"#;
+        let attrs = first_tag_attrs(xml, "DomainDNSSetCustomResult").unwrap();
+        assert!(attr_bool(&attrs, "Updated").unwrap());
+    }
+
+    #[test]
+    fn parses_dns_set_hosts_result() {
+        let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainDNSSetHostsResult Domain="pepe.xyz" IsSuccess="true" /></CommandResponse></ApiResponse>"#;
+        let attrs = first_tag_attrs(xml, "DomainDNSSetHostsResult").unwrap();
+        assert!(attr_bool(&attrs, "IsSuccess").unwrap());
+    }
+
     // ---- Real Namecheap sandbox API tests ----
     //
     // These call the real Namecheap sandbox API. Run with:
@@ -1079,5 +1444,166 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::MissingConfig(_)));
+    }
+
+    // ---- Real Namecheap sandbox DNS API tests ----
+    //
+    // Run with: cargo test domain -- --ignored
+    // Same prerequisites as the domain quote/purchase tests above.
+
+    #[tokio::test]
+    #[ignore]
+    async fn real_sandbox_set_nameservers() {
+        let config = sandbox_config().expect("Namecheap API credentials not set in env");
+        let provisioner = NamecheapDnsProvisioner::new(config);
+        let result = provisioner
+            .set_namecheap_nameservers(
+                "test-meme.xyz",
+                &[
+                    "ns1.cloudflare.com".to_string(),
+                    "ns2.cloudflare.com".to_string(),
+                ],
+            )
+            .await;
+        match result {
+            Ok(()) => {}
+            Err(DomainError::Namecheap(ref msg)) if msg.contains("not found") => {
+                eprintln!("Namecheap sandbox domain not registered: {msg}");
+            }
+            Err(e) => panic!("set_nameservers failed: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn real_sandbox_set_dns_records() {
+        let config = sandbox_config().expect("Namecheap API credentials not set in env");
+        let provisioner = NamecheapDnsProvisioner::new(config);
+        let result = provisioner
+            .set_dns_records(
+                "test-meme.xyz",
+                &[
+                    DnsRecord {
+                        host_name: "@".to_string(),
+                        record_type: DnsRecordType::A,
+                        address: "192.0.2.1".to_string(),
+                        ttl: Some(1800),
+                    },
+                    DnsRecord {
+                        host_name: "www".to_string(),
+                        record_type: DnsRecordType::Cname,
+                        address: "test-meme.xyz".to_string(),
+                        ttl: None,
+                    },
+                ],
+            )
+            .await;
+        match result {
+            Ok(()) => {}
+            Err(DomainError::Namecheap(ref msg)) if msg.contains("not found") => {
+                eprintln!("Namecheap sandbox domain not registered: {msg}");
+            }
+            Err(e) => panic!("set_dns_records failed: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn real_sandbox_dns_create_zone_not_supported() {
+        let config = sandbox_config().expect("Namecheap API credentials not set in env");
+        let provisioner = NamecheapDnsProvisioner::new(config);
+        let err = provisioner.create_zone("test.xyz").await.unwrap_err();
+        assert!(matches!(err, DomainError::Cloudflare(_)));
+    }
+
+    // ---- Real Cloudflare API tests ----
+    //
+    // Run with: cargo test domain -- --ignored
+    // Requires CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in .env.
+
+    fn cloudflare_provisioner() -> Option<CloudflareDnsProvisioner> {
+        let account_id = std::env::var("CLOUDFLARE_ACCOUNT_ID").ok()?;
+        let api_token = std::env::var("CLOUDFLARE_API_TOKEN").ok()?;
+        if account_id.is_empty() || api_token.is_empty() {
+            return None;
+        }
+        Some(CloudflareDnsProvisioner::new(account_id, api_token))
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn real_cloudflare_create_zone() {
+        let provisioner = cloudflare_provisioner()
+            .expect("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN not set");
+        let result = provisioner.create_zone("test-meme-cloudflare.xyz").await;
+        match result {
+            Ok(zone) => {
+                assert!(!zone.zone_id.is_empty());
+                assert!(!zone.nameservers.is_empty());
+                assert!(zone.nameservers.iter().any(|ns| ns.contains("cloudflare.com")));
+            }
+            Err(DomainError::Cloudflare(ref msg)) if msg.contains("already exists") => {
+                eprintln!("zone already exists on Cloudflare");
+            }
+            Err(e) => panic!("create_zone failed: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn real_cloudflare_missing_config() {
+        let provisioner = CloudflareDnsProvisioner::new(String::new(), String::new());
+        let err = provisioner.create_zone("test.xyz").await.unwrap_err();
+        assert!(matches!(err, DomainError::MissingConfig(_)));
+    }
+
+    // ---- Full DNS flow test (Cloudflare zone → Namecheap nameservers) ----
+    //
+    // This test demonstrates the complete domain setup flow:
+    //   1. Create Cloudflare zone → get assigned nameservers
+    //   2. Update Namecheap domain's nameservers to point to Cloudflare
+    //
+    // Run with: cargo test domain -- --ignored
+    // Requires both Cloudflare and Namecheap credentials.
+
+    #[tokio::test]
+    #[ignore]
+    async fn real_full_dns_flow_cloudflare_zone_then_namecheap_nameservers() {
+        let cf_provisioner = cloudflare_provisioner()
+            .expect("Cloudflare credentials not set");
+        let nc_config = sandbox_config().expect("Namecheap API credentials not set in env");
+        let nc_provisioner = NamecheapDnsProvisioner::new(nc_config);
+
+        // Step 1: create zone on Cloudflare, get assigned nameservers
+        let zone = cf_provisioner
+            .create_zone("test-meme-fullflow.xyz")
+            .await;
+        let nameservers = match zone {
+            Ok(zone) => {
+                assert!(!zone.zone_id.is_empty());
+                assert!(!zone.nameservers.is_empty());
+                zone.nameservers
+            }
+            Err(DomainError::Cloudflare(ref msg)) if msg.contains("already exists") => {
+                eprintln!("zone already exists, using known nameservers");
+                vec![
+                    "lennon.ns.cloudflare.com".to_string(),
+                    "zoe.ns.cloudflare.com".to_string(),
+                ]
+            }
+            Err(e) => panic!("create_zone failed: {e}"),
+        };
+
+        // Step 2: update Namecheap nameservers to Cloudflare
+        let result = nc_provisioner
+            .set_namecheap_nameservers("test-meme-fullflow.xyz", &nameservers)
+            .await;
+        match result {
+            Ok(()) => {}
+            Err(DomainError::Namecheap(ref msg)) if msg.contains("not found") => {
+                eprintln!("domain not registered on Namecheap sandbox; skipping nameserver update");
+            }
+            Err(e) => panic!("set_nameservers failed: {e}"),
+        }
     }
 }
