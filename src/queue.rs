@@ -469,6 +469,10 @@ struct GenerationJobRow {
 
 impl GenerationJobRow {
     fn into_generation_request(self) -> SiteGenerationRequest {
+        let dir_name = self
+            .requested_domain
+            .clone()
+            .unwrap_or_else(|| format!("site-{}", &self.order_id.simple().to_string()[..8]));
         SiteGenerationRequest {
             order_id: self.order_id,
             build_mode: self.build_mode,
@@ -482,7 +486,7 @@ impl GenerationJobRow {
                 logo_asset_path: self.logo_asset_path,
                 requested_domain: self.requested_domain,
             },
-            output_dir: format!("./generated-sites/{}", self.website_id).into(),
+            output_dir: format!("/www/websites/{dir_name}").into(),
         }
     }
 }
