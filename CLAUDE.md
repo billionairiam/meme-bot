@@ -5,7 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build / Run / Test
 
 ```bash
-cargo run                          # runs migrations, then one generation queue tick
+cargo run                          # runs meme-bot (Telegram dispatcher + queue worker)
+cargo run --bin api-server         # start API server
 cargo test                         # run all tests
 ```
 
@@ -16,26 +17,44 @@ cargo test                         # run all tests
 rustup target add x86_64-unknown-linux-musl
 sudo apt-get install -y musl-tools
 
-# Build:
+# Build all binaries:
 cargo build-musl-release           # alias defined in .cargo/config.toml
 # or: cargo build --target x86_64-unknown-linux-musl --release
 
-# Output: target/x86_64-unknown-linux-musl/release/meme-bot
-# The binary is statically linked — copy it to any Linux x86_64 machine and run.
+# Output binaries:
+#   target/x86_64-unknown-linux-musl/release/meme-bot
+#   target/x86_64-unknown-linux-musl/release/api-server
 ```
 
-### Frontend-only mode (no PostgreSQL required)
+### Telegram bot
 
-Set `TELEGRAM_FRONTEND_ONLY=true` (or omit `DATABASE_URL`) to run just the Telegram bot UI with in-memory session state. Also needs `TELEGRAM_BOT_TOKEN` and `TEMPLATE_CATALOG_URL`. The bot starts a long-running dispatcher (`Dispatcher::dispatch()`) with inline keyboard navigation, not a single tick.
+The Telegram bot runs as part of the `meme-bot` binary. Requires `TELEGRAM_BOT_TOKEN`, `DATABASE_URL`, and `TEMPLATE_CATALOG_URL`. All orders are persisted to PostgreSQL — users select a payment chain → order written to DB, submit TX hash → order marked paid + generation job enqueued. The queue worker picks up jobs automatically.
 
 ## Architecture
 
 Rust (edition 2024) Telegram bot that sells meme coin websites. Users pay USDT on-chain, the bot generates a static site via AI agents (Gemini/Codex CLI), deploys to Cloudflare Pages, and registers a domain via Namecheap.
 
-### Two operating modes, decided in `main.rs`
+### Two binaries, one crate
 
-- **Full backend**: `DATABASE_URL` is set → PostgreSQL pool, runs SQLx migrations, then `App::run_once()` which does one generation queue tick.
-- **Frontend-only**: `TELEGRAM_FRONTEND_ONLY=true` or no `DATABASE_URL` → `telegram::run_frontend()` starts a teloxide `Dispatcher` with in-memory `HashMap<UserId, OrderDraft>` sessions. No database writes.
+All binaries live under `src/bin/` and import from the `meme_bot` library crate (`src/lib.rs`):
+
+| Binary | Entry point | Role |
+|--------|-------------|------|
+| `meme-bot` | `src/bin/meme-bot.rs` | Telegram bot + queue worker (two concurrent tasks, shared PgPool) |
+| `api-server` | `src/bin/api-server.rs` | REST API for Namecheap/Cloudflare |
+
+- **meme-bot**: `DATABASE_URL` is required → PostgreSQL pool, runs SQLx migrations, then spawns two concurrent tasks: the Telegram `Dispatcher` (long-running) and a queue worker loop (tick every 5s). The Telegram bot writes orders to DB at payment chain selection, marks them paid and enqueues generation jobs at TX submission. The queue worker picks up jobs via `FOR UPDATE SKIP LOCKED`.
+- **API server** (`api-server`): No DB required → axum HTTP server with `X-API-Key` auth, serves Namecheap and Cloudflare operations.
+
+### Data flow
+
+```
+Telegram user → /create → 7-step wizard → select payment chain
+  → DB: upsert_user + create_site_order + attach_payment_chain
+  → user submits TX hash
+  → DB: mark_order_paid + create_website + enqueue_generation_job
+  → queue worker: lock_next_job → generate → deploy → mark live
+```
 
 ### Module map
 
@@ -50,12 +69,12 @@ Rust (edition 2024) Telegram bot that sells meme coin websites. Users pay USDT o
 | `queue` | `GenerationQueue` with PostgreSQL-backed job locking (`FOR UPDATE SKIP LOCKED`). One `tick()` picks a queued job, generates, optionally deploys. Uses a `tokio::sync::Semaphore` for concurrency control. |
 | `deployment` | `SiteDeployer` trait. `CloudflarePagesDeployer` uses Cloudflare API (ensure project → wrangler direct upload → bind custom domain). `GitCliCloudflareDeployer` does git init/push to GitHub. `DryRunDeployer` for testing. |
 | `domain` | `DomainRegistrar` trait. `NamecheapRegistrar` calls Namecheap XML API (check → getPricing → create). `DnsProvisioner` trait with `DryRunDnsProvisioner`. Supported TLDs: `.com`, `.xyz`, `.fun`, `.site`, `.online`. |
-| `telegram` | teloxide-based bot with `dptree` dispatch. Inline keyboard UI flow: main menu → template/AI mode → 7-step form (logo, ticker, name, contract, X, TG, domain) → payment chain selection → TX hash submission. Template deep-links via `/start tpl_<id>`. |
-| `app` | Wires `GenerationRouter` + `GenerationQueue` + optional `CloudflarePagesDeployer` for the `run_once()` backend mode. |
+| `telegram` | teloxide-based bot with `dptree` dispatch. Inline keyboard UI flow: main menu → template/AI mode → 7-step form (logo, ticker, name, contract, X, TG, domain) → payment chain selection (writes order to DB) → TX hash submission (marks paid, enqueues generation job). Template deep-links via `/start tpl_<id>`. Uses `PgPool` via dptree dependency injection. |
+| `app` | Wires `GenerationRouter` + `GenerationQueue` + `SiteDeployer` for the queue worker. `build_queue()` creates a reusable `GenerationQueue` for the tick loop. |
 
 ### Key design patterns
 
-- **Traits for external boundaries**: `PaymentVerifier`, `SiteGenerationProvider`, `SiteDeployer`, `DomainRegistrar`, `DnsProvisioner` — each has a stub/dry-run impl for testing and a real impl behind the trait. This lets frontend-only mode skip real payment/chain verification.
+- **Traits for external boundaries**: `PaymentVerifier`, `SiteGenerationProvider`, `SiteDeployer`, `DomainRegistrar`, `DnsProvisioner` — each has a stub/dry-run impl for testing and a real impl behind the trait.
 - **Generation provider failover**: `GenerationRouter` iterates providers in configured order. Recoverable errors (`QuotaExhausted`, `RateLimited`, `ProviderUnavailable`) trigger failover; non-recoverable errors stop immediately.
 - **Config is flat env vars**: No config files. `Config::from_env()` reads everything. See `.env.example` for all supported vars.
 - **PostgreSQL schema** in `migrations/0001_init.sql`: `users`, `orders`, `websites`, `templates`, `payment_attempts`, `payment_transactions`, `generation_jobs`, `generation_attempts`, `domain_quotes`, `domain_registrations`, `deployment_attempts`.

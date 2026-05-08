@@ -13,28 +13,32 @@ Rust monorepo for a Telegram bot that sells meme coin websites. Users pay USDT o
                                │ direct API call
                                │
 ┌──────────────┐     ┌────────┴───────┐     ┌─────────────┐
-│  Telegram    │────▶│   api-server   │────▶│  Cloudflare │
+│  Telegram    │     │   api-server   │     │  Cloudflare │
 │  (user chat) │     │   (VPS)        │     │  (REST API) │
-└──────────────┘     └────────▲───────┘     └─────────────┘
-                              │
-                              │ X-API-Key (TLS)
-                              │
-                      ┌───────┴────────┐
-                      │    mem-bot     │
-                      │  (home server) │
-                      └────────────────┘
+└──────┬───────┘     └────────▲───────┘     └─────────────┘
+       │                      │
+       │ Bot API               │ X-API-Key (TLS)
+       │                      │
+┌──────┴──────────────────────┴───────┐     ┌─────────────┐
+│             meme-bot                │────▶│  PostgreSQL │
+│          (home server)              │     │  (DB)       │
+│  ┌────────────┐  ┌──────────────┐   │     └─────────────┘
+│  │  Telegram  │  │ Queue Worker │   │
+│  │ Dispatcher │  │  (tick loop) │   │
+│  └────────────┘  └──────────────┘   │
+└─────────────────────────────────────┘
 ```
 
 ### Two binaries, one crate
 
-| Binary | Role | Runs on |
-|--------|------|---------|
-| `meme-bot` | Telegram bot, generation queue worker | Home server |
-| `api-server` | REST API for Namecheap + Cloudflare operations | VPS |
+| Binary | Entry point | Role | Runs on |
+|--------|-------------|------|---------|
+| `meme-bot` | `src/bin/meme-bot.rs` | Telegram bot + queue worker (all-in-one) | Home server |
+| `api-server` | `src/bin/api-server.rs` | REST API for Namecheap + Cloudflare operations | VPS |
 
-Both compile from the same crate (`src/lib.rs`). The API server exposes domain and DNS operations behind `X-API-Key` auth, keeping Namecheap/Cloudflare credentials off the bot server.
+Both compile from the same crate (`src/lib.rs`). The `meme-bot` binary runs the Telegram dispatcher and generation queue worker concurrently in a single process. All user orders are persisted to PostgreSQL — no in-memory state that could be lost on restart.
 
-When `API_SERVICE_BASE_URL` is set, the bot calls the API server via HTTP. When omitted, it falls back to direct API calls — backward compatible for single-server deployments.
+When `API_SERVICE_BASE_URL` is set, meme-bot calls the API server via HTTP. When omitted, it falls back to direct API calls — backward compatible for single-server deployments.
 
 ### Module map
 
@@ -52,13 +56,15 @@ When `API_SERVICE_BASE_URL` is set, the bot calls the API server via HTTP. When 
 | `telegram` | teloxide-based bot with `dptree` dispatch. Inline keyboard UI for 7-step order form, template deep-links (`/start tpl_<id>`). |
 | `app` | Wires `GenerationRouter` + `GenerationQueue` + deployer into `run_once()` for backend mode. |
 
-### Operating modes
+### Data flow
 
-**Full backend** — `DATABASE_URL` is set:
-- PostgreSQL pool, runs SQLx migrations, then `App::run_once()` processes one generation queue tick.
+1. User interacts with Telegram bot → 7-step order wizard
+2. User selects payment chain → order written to PostgreSQL (`orders` table, status: `pending`)
+3. User submits TX hash → order marked `paid`, website created, generation job enqueued
+4. Queue worker picks up job (`FOR UPDATE SKIP LOCKED`) → runs AI agent → deploys to Cloudflare Pages
+5. User checks `/status` → reads order status from PostgreSQL
 
-**Frontend-only** — `TELEGRAM_FRONTEND_ONLY=true` or no `DATABASE_URL`:
-- teloxide `Dispatcher` with in-memory `HashMap<UserId, OrderDraft>` sessions. No database writes. Useful for UI development.
+All state is persisted in PostgreSQL. If the server restarts, orders already written to DB survive. In-progress wizard steps (before payment chain selection) are lost, but no payment has occurred at that point.
 
 ## Quick Start
 
@@ -78,22 +84,23 @@ rustup target add x86_64-unknown-linux-musl
 sudo apt-get install -y musl-tools
 cargo build-musl-release   # alias in .cargo/config.toml
 # Output: target/x86_64-unknown-linux-musl/release/meme-bot
+#         target/x86_64-unknown-linux-musl/release/api-server
 ```
 
 ```bash
 cargo test    # run all tests
 ```
 
-### Run the bot
+### Run
 
 ```bash
 cp .env.example .env   # edit with your values
 
-# Full backend mode
+# Main binary (Telegram bot + queue worker, requires DATABASE_URL)
 cargo run
 
-# Or frontend-only (no PostgreSQL needed)
-TELEGRAM_FRONTEND_ONLY=true cargo run
+# API server
+cargo run --bin api-server
 ```
 
 ## API Server
@@ -379,22 +386,22 @@ The app considers the agent finished when:
 - `.agent_done.json` exists with `"status": "completed"`
 - the output directory contains `index.html`, `package.json`, or `dist/index.html`
 
-## Frontend-Only Test Setup
+## Telegram Bot Setup
+
+The Telegram bot runs as part of the `meme-bot` binary. It requires:
 
 ```bash
-TELEGRAM_FRONTEND_ONLY=true
+# Required
 TELEGRAM_BOT_TOKEN=<bot token>
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/meme_bot
 TEMPLATE_CATALOG_URL=https://your-template-site.example
 ADMIN_CONTACT=@your_admin
+
 # Optional, if api.telegram.org is unreachable:
 TELOXIDE_PROXY=http://127.0.0.1:7890
-
-# Optional: run agent + deploy after TX submission
-FRONTEND_RUN_AGENT_AFTER_TX=true
-FRONTEND_DEPLOY_AFTER_AGENT=true
 ```
 
-The bot starts a long-running dispatcher with inline keyboard navigation, template deep-links, and TX hash input handling. No database writes in this mode.
+The bot uses a 7-step inline keyboard wizard to collect order details, persists orders to PostgreSQL when the user selects a payment chain, and enqueues generation jobs when the TX hash is submitted. The queue worker picks up and processes jobs automatically.
 
 ## Test
 
@@ -408,10 +415,10 @@ cargo test
 mem-bot/
 ├── migrations/          # SQLx migration files
 ├── src/
-│   ├── main.rs          # Bot binary entry point
 │   ├── lib.rs           # Library root (shared modules)
 │   ├── bin/
-│   │   └── api-server.rs  # API server binary
+│   │   ├── meme-bot.rs      # Telegram bot + queue worker
+│   │   └── api-server.rs    # API server binary
 │   ├── app.rs           # App wiring (queue + deployer)
 │   ├── config.rs        # Env var configuration
 │   ├── db.rs            # Database queries

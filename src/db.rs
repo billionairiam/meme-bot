@@ -182,3 +182,44 @@ pub async fn queue_position(pool: &PgPool, job_id: Uuid) -> anyhow::Result<i64> 
     let ahead: i64 = row.get("position");
     Ok(ahead + 1)
 }
+
+pub async fn get_user_order(
+    pool: &PgPool,
+    telegram_user_id: i64,
+) -> anyhow::Result<Option<UserOrderStatus>> {
+    let row = sqlx::query(
+        r#"
+        SELECT o.payment_status, o.site_status, o.amount_usdt, o.payment_chain,
+               w.requested_domain
+        FROM orders o
+        JOIN users u ON o.user_id = u.id
+        LEFT JOIN websites w ON w.order_id = o.id
+        WHERE u.telegram_user_id = $1
+        ORDER BY o.created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(telegram_user_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| {
+        use sqlx::Row;
+        UserOrderStatus {
+            payment_status: r.get("payment_status"),
+            site_status: r.get("site_status"),
+            amount_usdt: r.get("amount_usdt"),
+            payment_chain: r.get("payment_chain"),
+            requested_domain: r.get("requested_domain"),
+        }
+    }))
+}
+
+#[derive(Debug, Clone)]
+pub struct UserOrderStatus {
+    pub payment_status: String,
+    pub site_status: String,
+    pub amount_usdt: rust_decimal::Decimal,
+    pub payment_chain: Option<String>,
+    pub requested_domain: Option<String>,
+}

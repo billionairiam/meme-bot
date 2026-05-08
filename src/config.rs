@@ -7,9 +7,6 @@ pub struct Config {
     pub database_url: Option<String>,
     pub telegram_bot_token: String,
     pub telegram_required_group_id: String,
-    pub telegram_frontend_only: bool,
-    pub frontend_run_agent_after_tx: bool,
-    pub frontend_deploy_after_agent: bool,
     pub template_catalog_url: String,
     pub admin_contact: String,
     pub usdt_erc20_address: String,
@@ -82,9 +79,6 @@ impl Config {
             telegram_bot_token: env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default(),
             telegram_required_group_id: env::var("TELEGRAM_REQUIRED_GROUP_ID")
                 .unwrap_or_else(|_| "@MeMe_Web_Support".to_string()),
-            telegram_frontend_only: env_bool("TELEGRAM_FRONTEND_ONLY", true),
-            frontend_run_agent_after_tx: env_bool("FRONTEND_RUN_AGENT_AFTER_TX", false),
-            frontend_deploy_after_agent: env_bool("FRONTEND_DEPLOY_AFTER_AGENT", false),
             template_catalog_url: env::var("TEMPLATE_CATALOG_URL")
                 .unwrap_or_else(|_| "https://example.com/templates".to_string()),
             admin_contact: env::var("ADMIN_CONTACT").unwrap_or_else(|_| "@admin".to_string()),

@@ -4,6 +4,7 @@ use std::{
 };
 
 use rust_decimal::Decimal;
+use sqlx::PgPool;
 use teloxide::{
     dispatching::UpdateFilterExt,
     dptree,
@@ -14,19 +15,16 @@ use teloxide::{
     },
     utils::client_from_env,
 };
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
     config::{Config, GenerationProviderName, NamecheapConfig},
-    deployment::{
-        CloudflarePagesDeployer, DeploymentRequest, HttpClientPagesDeployer, SiteDeployer,
-    },
+    db,
     domain::{
         DomainError, DomainPurchaseRequest, DomainQuoteRequest, DomainRegistrar,
         HttpClientDomainRegistrar, NamecheapRegistrar,
     },
-    generation::{CliGenerationProvider, GenerationRouter, SiteGenerationRequest},
     models::{PaymentChain, WebsiteInput},
     validation::{
         validate_contract_address, validate_domain, validate_telegram_url, validate_x_url,
@@ -76,8 +74,6 @@ impl TemplateOption {
 #[derive(Clone)]
 pub struct TelegramUiConfig {
     pub required_group: Option<RequiredGroup>,
-    pub frontend_run_agent_after_tx: bool,
-    pub frontend_deploy_after_agent: bool,
     pub generation_primary_provider: GenerationProviderName,
     pub agent_timeout_seconds: u64,
     pub gemini_agent_command: String,
@@ -110,8 +106,6 @@ impl TelegramUiConfig {
     pub fn from_config(config: &Config) -> Self {
         Self {
             required_group: parse_required_group(&config.telegram_required_group_id),
-            frontend_run_agent_after_tx: config.frontend_run_agent_after_tx,
-            frontend_deploy_after_agent: config.frontend_deploy_after_agent,
             generation_primary_provider: config.generation_primary_provider,
             agent_timeout_seconds: config.agent_timeout_seconds,
             gemini_agent_command: config.gemini_agent_command.clone(),
@@ -152,6 +146,8 @@ struct OrderDraft {
     domain_price_usdt: Option<Decimal>,
     total_usdt: Option<Decimal>,
     payment_chain: Option<PaymentChain>,
+    order_id: Option<Uuid>,
+    db_user_id: Option<Uuid>,
 }
 
 #[derive(Clone, Debug)]
@@ -207,13 +203,15 @@ impl OrderDraft {
             domain_price_usdt: None,
             total_usdt: None,
             payment_chain: None,
+            order_id: None,
+            db_user_id: None,
         }
     }
 }
 
-pub async fn run_frontend(config: Config) -> anyhow::Result<()> {
+pub async fn run_bot(config: Config, pool: PgPool) -> anyhow::Result<()> {
     if config.telegram_bot_token.trim().is_empty() {
-        anyhow::bail!("TELEGRAM_BOT_TOKEN is required to run the Telegram frontend");
+        anyhow::bail!("TELEGRAM_BOT_TOKEN is required to run the Telegram bot");
     }
 
     let proxy = configured_proxy();
@@ -241,7 +239,7 @@ pub async fn run_frontend(config: Config) -> anyhow::Result<()> {
         .branch(Update::filter_callback_query().endpoint(handle_callback));
 
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![ui_config, sessions])
+        .dependencies(dptree::deps![ui_config, sessions, pool])
         .enable_ctrlc_handler()
         .build()
         .dispatch()
@@ -255,6 +253,7 @@ async fn handle_message(
     msg: Message,
     config: Arc<TelegramUiConfig>,
     sessions: Sessions,
+    pool: PgPool,
 ) -> ResponseResult<()> {
     if !ensure_group_member(&bot, &msg, &config).await? {
         return Ok(());
@@ -273,7 +272,7 @@ async fn handle_message(
         match text.trim() {
             "/start" | "/help" => return show_main_menu(&bot, msg.chat.id, &config).await,
             "/create" => return show_create_menu(&bot, msg.chat.id).await,
-            "/status" => return show_status(&bot, msg.chat.id, user_id, &sessions).await,
+            "/status" => return show_status(&bot, msg.chat.id, user_id, &sessions, &pool).await,
             "/cancel" => {
                 remove_session(user_id, &sessions);
                 return bot
@@ -287,7 +286,7 @@ async fn handle_message(
         }
     }
 
-    handle_order_step(bot, msg, user_id, config, sessions).await
+    handle_order_step(bot, msg, user_id, config, sessions, &pool).await
 }
 
 async fn handle_callback(
@@ -295,6 +294,7 @@ async fn handle_callback(
     query: CallbackQuery,
     config: Arc<TelegramUiConfig>,
     sessions: Sessions,
+    pool: PgPool,
 ) -> ResponseResult<()> {
     bot.answer_callback_query(query.id.clone()).await?;
 
@@ -321,7 +321,7 @@ async fn handle_callback(
             edit_ask_logo(&bot, target).await
         }
         Some("pay_menu") => edit_payment_chain_menu(&bot, target).await,
-        Some("status") => edit_status(&bot, target, query.from.id, &sessions).await,
+        Some("status") => edit_status(&bot, target, query.from.id, &sessions, &pool).await,
         Some("contact_admin") => edit_contact_admin(&bot, target, &config).await,
         Some("pay_erc20") => {
             edit_payment_chain_and_ask_tx(
@@ -331,6 +331,7 @@ async fn handle_callback(
                 PaymentChain::Erc20,
                 &config.usdt_erc20_address,
                 &sessions,
+                &pool,
             )
             .await
         }
@@ -342,6 +343,7 @@ async fn handle_callback(
                 PaymentChain::Tron,
                 &config.usdt_tron_address,
                 &sessions,
+                &pool,
             )
             .await
         }
@@ -353,6 +355,7 @@ async fn handle_callback(
                 PaymentChain::Sol,
                 &config.usdt_sol_address,
                 &sessions,
+                &pool,
             )
             .await
         }
@@ -398,6 +401,7 @@ async fn handle_order_step(
     user_id: UserId,
     config: Arc<TelegramUiConfig>,
     sessions: Sessions,
+    pool: &PgPool,
 ) -> ResponseResult<()> {
     let Some(mut draft) = get_session(user_id, &sessions) else {
         return show_main_menu(
@@ -411,8 +415,6 @@ async fn handle_order_step(
                 usdt_tron_address: String::new(),
                 usdt_sol_address: String::new(),
                 namecheap: config.namecheap.clone(),
-                frontend_run_agent_after_tx: config.frontend_run_agent_after_tx,
-                frontend_deploy_after_agent: config.frontend_deploy_after_agent,
                 generation_primary_provider: config.generation_primary_provider,
                 agent_timeout_seconds: config.agent_timeout_seconds,
                 gemini_agent_command: config.gemini_agent_command.clone(),
@@ -706,15 +708,53 @@ async fn handle_order_step(
                     .await
                     .map(|_| ());
             }
+
+            let mut status_parts: Vec<String> = vec![];
+
+            // Mark order paid in DB
+            if let Some(order_id) = draft.order_id {
+                let chain = draft.payment_chain.unwrap_or(PaymentChain::Erc20);
+                if let Err(e) = db::mark_order_paid(pool, order_id, chain, text).await {
+                    warn!(?e, order_id = %order_id, "failed to mark order paid");
+                    status_parts.push("⚠️ Failed to record payment. Contact admin.".to_string());
+                } else {
+                    status_parts.push("Payment recorded.".to_string());
+
+                    // Create website + enqueue generation job
+                    if let (Some(db_uid), Some(input)) = (draft.db_user_id, website_input_from_draft(&draft)) {
+                        match db::create_website(pool, db_uid, order_id, &input).await {
+                            Ok(website_id) => {
+                                if let Err(e) = db::enqueue_generation_job(pool, order_id, website_id).await {
+                                    warn!(?e, order_id = %order_id, "failed to enqueue generation job");
+                                    status_parts.push("⚠️ Failed to queue generation.".to_string());
+                                } else {
+                                    status_parts.push("Website queued for generation.".to_string());
+                                }
+                            }
+                            Err(e) => {
+                                warn!(?e, order_id = %order_id, "failed to create website record");
+                                status_parts.push("⚠️ Failed to create website record.".to_string());
+                            }
+                        }
+                    }
+                }
+            } else {
+                status_parts.push("⚠️ No order found. Please restart with /create.".to_string());
+            }
+
+            // Domain purchase (if enabled)
             let purchase_message = maybe_purchase_domain_after_tx(&config, &draft).await;
-            let generation_message = maybe_run_agent_after_tx(&config, &draft).await;
+            if !purchase_message.is_empty() {
+                status_parts.push(purchase_message.trim().to_string());
+            }
+
             draft.step = DraftStep::PaymentConfirmed;
             set_session(user_id, draft, &sessions);
             bot.send_message(
                 msg.chat.id,
                 format!(
-                    "✅ <b>TX received.</b>\n\nPayment check is bypassed in this test build.\n\n<b>Payment confirmed.</b>\nYour website is queued for generation.{}{}",
-                    purchase_message, generation_message
+                    "✅ <b>TX received.</b>\n\n<b>Payment confirmed.</b>\n\n{}",
+                    status_parts.join("\n")
                 ),
             )
             .parse_mode(ParseMode::Html)
@@ -853,15 +893,26 @@ fn ask_logo_text() -> &'static str {
     "🖼 <b>Step 1/7 · Logo</b>\n\nUpload your token logo image.\n\nAfter receiving the logo, I will ask for ticker."
 }
 
-fn status_text(user_id: UserId, sessions: &Sessions) -> String {
-    match get_session(user_id, sessions) {
-        Some(draft) => format!(
+async fn status_text(user_id: UserId, sessions: &Sessions, pool: &PgPool) -> String {
+    if let Some(draft) = get_session(user_id, sessions) {
+        return format!(
             "📊 <b>Current Order</b>\n\nStatus: <code>{:?}</code>\nMode: <b>{}</b>\nWebsite price: <b>{}</b> USDT",
             draft.step,
             build_mode_label(&draft.build_mode),
             draft.site_price_usdt
+        );
+    }
+    match db::get_user_order(pool, user_id.0 as i64).await {
+        Ok(Some(order)) => format!(
+            "📊 <b>Order Status</b>\n\nPayment: {}\nSite: {}\nAmount: {} USDT\nChain: {}\nDomain: {}",
+            order.payment_status,
+            order.site_status,
+            order.amount_usdt,
+            order.payment_chain.as_deref().unwrap_or("—"),
+            order.requested_domain.as_deref().unwrap_or("—"),
         ),
-        None => "📊 <b>Order Status</b>\n\nNo active frontend test order.".to_string(),
+        Ok(None) => "📊 <b>Order Status</b>\n\nNo active order. Start with /create.".to_string(),
+        Err(_) => "📊 <b>Order Status</b>\n\nUnable to check order status. Please try again later.".to_string(),
     }
 }
 
@@ -962,11 +1013,12 @@ async fn show_status(
     chat_id: ChatId,
     user_id: UserId,
     sessions: &Sessions,
+    pool: &PgPool,
 ) -> ResponseResult<()> {
     send_screen(
         bot,
         chat_id,
-        status_text(user_id, sessions),
+        status_text(user_id, sessions, pool).await,
         main_menu_keyboard(),
     )
     .await
@@ -977,11 +1029,12 @@ async fn edit_status(
     target: UiMessage,
     user_id: UserId,
     sessions: &Sessions,
+    pool: &PgPool,
 ) -> ResponseResult<()> {
     edit_screen(
         bot,
         target,
-        status_text(user_id, sessions),
+        status_text(user_id, sessions, pool).await,
         main_menu_keyboard(),
     )
     .await
@@ -1019,6 +1072,7 @@ async fn edit_payment_chain_and_ask_tx(
     chain: PaymentChain,
     address: &str,
     sessions: &Sessions,
+    pool: &PgPool,
 ) -> ResponseResult<()> {
     let Some(mut draft) = get_session(user_id, sessions) else {
         return edit_screen(
@@ -1040,8 +1094,48 @@ async fn edit_payment_chain_and_ask_tx(
         .await;
     };
 
+    // Persist order to DB
+    let db_user_id = match db::upsert_user(pool, user_id.0 as i64, None, None, None, true).await {
+        Ok(id) => id,
+        Err(e) => {
+            warn!(?e, user_id = user_id.0 as i64, "failed to upsert user");
+            return edit_screen(
+                bot,
+                target,
+                "<b>Internal error.</b>\n\nFailed to create user record. Please try again.",
+                main_menu_keyboard(),
+            )
+            .await;
+        }
+    };
+
+    let build_mode = match draft.build_mode {
+        BuildModeDraft::Template => crate::models::BuildMode::Template,
+        BuildModeDraft::AiFree => crate::models::BuildMode::AiFree,
+    };
+    let template_id = draft.template_id.as_deref();
+    let order_id = match db::create_site_order(pool, db_user_id, build_mode, template_id, total).await {
+        Ok(id) => id,
+        Err(e) => {
+            warn!(?e, "failed to create site order");
+            return edit_screen(
+                bot,
+                target,
+                "<b>Internal error.</b>\n\nFailed to create order. Please try again.",
+                main_menu_keyboard(),
+            )
+            .await;
+        }
+    };
+
+    if let Err(e) = db::attach_payment_chain(pool, order_id, chain).await {
+        warn!(?e, order_id = %order_id, "failed to attach payment chain");
+    }
+
     draft.payment_chain = Some(chain);
     draft.step = DraftStep::WaitingTx;
+    draft.order_id = Some(order_id);
+    draft.db_user_id = Some(db_user_id);
     set_session(user_id, draft, sessions);
 
     let display_address = if address.trim().is_empty() {
@@ -1053,7 +1147,7 @@ async fn edit_payment_chain_and_ask_tx(
     edit_screen(
         bot,
         target,
-        payment_instruction(Uuid::new_v4(), total, chain, display_address),
+        payment_instruction(order_id, total, chain, display_address),
         cancel_keyboard(),
     )
     .await
@@ -1119,119 +1213,6 @@ async fn maybe_purchase_domain_after_tx(config: &TelegramUiConfig, draft: &Order
     }
 }
 
-async fn maybe_run_agent_after_tx(config: &TelegramUiConfig, draft: &OrderDraft) -> String {
-    if !config.frontend_run_agent_after_tx {
-        return "\n\n<b>Agent generation:</b> skipped. Set <code>FRONTEND_RUN_AGENT_AFTER_TX=true</code> to run the agent after TX in frontend test mode.".to_string();
-    }
-
-    let Some(input) = website_input_from_draft(draft) else {
-        return "\n\n<b>Agent generation failed.</b>\nOrder data is incomplete.".to_string();
-    };
-
-    let order_id = Uuid::new_v4();
-    let output_dir = std::path::PathBuf::from(&config.generated_sites_dir)
-        .join(format!("frontend-test-{order_id}"));
-    let router = GenerationRouter::new(
-        config.generation_primary_provider,
-        Box::new(CliGenerationProvider::gemini(
-            config.gemini_agent_command.clone(),
-            config.gemini_agent_args.clone(),
-            config.agent_timeout_seconds,
-        )),
-        Box::new(CliGenerationProvider::codex(
-            config.codex_agent_command.clone(),
-            config.codex_agent_args.clone(),
-            config.agent_timeout_seconds,
-        )),
-    );
-
-    let build_mode = match draft.build_mode {
-        BuildModeDraft::Template => "template",
-        BuildModeDraft::AiFree => "ai_free",
-    };
-
-    let request = SiteGenerationRequest {
-        order_id,
-        build_mode: build_mode.to_string(),
-        template_local_path: draft.template_id.clone(),
-        input,
-        output_dir,
-    };
-
-    match router.generate(&request).await {
-        Ok(result) => {
-            let deploy_message =
-                maybe_deploy_after_agent(config, draft, order_id, &result.output_dir).await;
-            format!(
-                "\n\n<b>Agent completed.</b>\nProvider: <code>{}</code>\nOutput:\n<code>{}</code>{}",
-                html_escape(&result.provider_name),
-                html_escape(&result.output_dir.display().to_string()),
-                deploy_message
-            )
-        }
-        Err(error) => format!(
-            "\n\n<b>Agent generation failed.</b>\n<code>{}</code>",
-            html_escape(&error.to_string())
-        ),
-    }
-}
-
-async fn maybe_deploy_after_agent(
-    config: &TelegramUiConfig,
-    draft: &OrderDraft,
-    order_id: Uuid,
-    output_dir: &std::path::Path,
-) -> String {
-    if !config.frontend_deploy_after_agent {
-        return "\n\n<b>Cloudflare deploy:</b> skipped. Set <code>FRONTEND_DEPLOY_AFTER_AGENT=true</code> to deploy after agent completion.".to_string();
-    }
-
-    let Some(domain) = draft.website_url.as_deref() else {
-        return "\n\n<b>Cloudflare deploy failed.</b>\nNo custom domain is attached.".to_string();
-    };
-
-    let project_name = cloudflare_project_name(domain, order_id);
-    let deployer: Box<dyn SiteDeployer> =
-        if let (Some(base_url), Some(api_key)) = (
-            config.api_service_base_url.as_deref(),
-            config.api_service_api_key.as_deref(),
-        ) {
-            Box::new(HttpClientPagesDeployer::new(
-                base_url.to_string(),
-                api_key.to_string(),
-            ))
-        } else {
-            Box::new(CloudflarePagesDeployer::new(
-                config.cloudflare_account_id.clone(),
-                config.cloudflare_api_token.clone(),
-                config.cloudflare_wrangler_command.clone(),
-                config.cloudflare_wrangler_args.clone(),
-            ))
-        };
-    match deployer
-        .deploy(&DeploymentRequest {
-            repo_owner: config.github_owner.clone(),
-            repo_name: project_name.clone(),
-            github_token: String::new(),
-            site_dir: output_dir.display().to_string(),
-            cloudflare_project_name: project_name,
-            production_branch: "main".to_string(),
-            custom_domain: Some(domain.to_string()),
-        })
-        .await
-    {
-        Ok(result) => format!(
-            "\n\n<b>Cloudflare Pages deployed.</b>\nPages URL:\n<code>{}</code>\nCustom domain:\n<code>{}</code>",
-            html_escape(&result.cloudflare_pages_url),
-            html_escape(result.custom_domain.as_deref().unwrap_or(domain))
-        ),
-        Err(error) => format!(
-            "\n\n<b>Cloudflare deploy failed.</b>\n<code>{}</code>",
-            html_escape(&error.to_string())
-        ),
-    }
-}
-
 fn website_input_from_draft(draft: &OrderDraft) -> Option<WebsiteInput> {
     Some(WebsiteInput {
         token_ticker: draft.ticker.clone()?,
@@ -1244,25 +1225,6 @@ fn website_input_from_draft(draft: &OrderDraft) -> Option<WebsiteInput> {
     })
 }
 
-fn cloudflare_project_name(domain: &str, order_id: Uuid) -> String {
-    let base = domain
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string();
-    let suffix = order_id.simple().to_string();
-    format!("{}-{}", base, &suffix[..8])
-        .chars()
-        .take(58)
-        .collect()
-}
 
 fn parse_required_group(value: &str) -> Option<RequiredGroup> {
     let value = value.trim();

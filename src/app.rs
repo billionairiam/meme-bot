@@ -20,7 +20,7 @@ impl App {
         Self { config, pool }
     }
 
-    pub async fn run_once(&self) -> anyhow::Result<()> {
+    pub fn build_queue(&self) -> GenerationQueue {
         let router = Arc::new(GenerationRouter::new(
             self.config.generation_primary_provider,
             Box::new(CliGenerationProvider::gemini(
@@ -53,21 +53,22 @@ impl App {
                 )))
             };
 
-        let queue = GenerationQueue::new(
-            self.pool.clone(),
-            router,
-            deployer,
-            self.config.generation_max_concurrency,
-            "worker-1".to_string(),
-        );
-
         info!(
             max_concurrency = self.config.generation_max_concurrency,
             primary_provider = self.config.generation_primary_provider.as_str(),
             "generation queue configured"
         );
 
-        queue.tick().await?;
-        Ok(())
+        GenerationQueue::new(
+            self.pool.clone(),
+            router,
+            deployer,
+            self.config.generation_max_concurrency,
+            "worker-1".to_string(),
+        )
+    }
+
+    pub async fn run_once(&self) -> anyhow::Result<()> {
+        self.build_queue().tick().await
     }
 }
