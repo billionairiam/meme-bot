@@ -882,18 +882,21 @@ async fn handle_order_step(
                 );
                 let service = PaymentService::new(verifier);
                 let tx_submitted_at = chrono::Utc::now();
+                let payment_expires_at = payment_info.payment_expires_at.unwrap_or_else(|| {
+                    warn!(order_id = %order_id, "payment_expires_at is NULL, falling back to created_at + payment window");
+                    payment_info.created_at + chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES)
+                });
+                let payment_started_at =
+                    payment_expires_at - chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES);
                 let verify_request = PaymentVerificationRequest {
                     order_id,
                     chain,
                     tx_hash: text.to_string(),
                     expected_to_address,
                     required_amount_usdt: payment_info.amount_usdt,
-                    order_created_at: payment_info.created_at,
+                    payment_started_at,
                     submitted_at: tx_submitted_at,
-                    expires_at: payment_info.payment_expires_at.unwrap_or_else(|| {
-                        warn!(order_id = %order_id, "payment_expires_at is NULL, falling back to created_at + 30min");
-                        payment_info.created_at + chrono::Duration::minutes(30)
-                    }),
+                    expires_at: payment_expires_at,
                 };
                 let verification = verify_payment_with_retries(&service, verify_request).await;
                 if let Err(e) = db::record_payment_attempt(
@@ -1409,6 +1412,13 @@ async fn edit_payment_chain_and_ask_tx(
 
     if let Err(e) = db::attach_payment_chain(pool, order_id, chain).await {
         warn!(?e, order_id = %order_id, "failed to attach payment chain");
+        return edit_screen(
+            bot,
+            target,
+            "<b>Internal error.</b>\n\nFailed to start payment window. Please try again.",
+            main_menu_keyboard(),
+        )
+        .await;
     }
 
     draft.payment_chain = Some(chain);
@@ -1970,7 +1980,7 @@ pub fn payment_instruction(
     address: &str,
 ) -> String {
     format!(
-        "💳 <b>Payment details</b>\n\nOrder: <code>{order_id}</code>\nAmount: <b>{amount_usdt}</b> USDT\nChain: <b>{}</b>\nAddress:\n<code>{}</code>\n\nSend your TX hash in the next message. I will verify amount, recipient, token, confirmations, and duplicate use.",
+        "💳 <b>Payment details</b>\n\nOrder: <code>{order_id}</code>\nAmount: <b>{amount_usdt}</b> USDT\nChain: <b>{}</b>\nAddress:\n<code>{}</code>\n\nThe 30-minute payment window starts now. Send your TX hash in the next message. I will verify amount, recipient, token, confirmations, timestamp, and duplicate use.",
         chain.as_str(),
         html_escape(address)
     )
@@ -2094,7 +2104,7 @@ fn payment_error_for_user(error: &PaymentVerificationError) -> String {
             "Payment window expired. Start a new order for a fresh quote.".to_string()
         }
         PaymentVerificationError::OldTransaction => {
-            "Transaction is older than this order.".to_string()
+            "Transaction is older than this payment request. Choose a payment chain and pay after the bot shows the address.".to_string()
         }
         PaymentVerificationError::TransactionAfterSubmission => {
             "Transaction timestamp is later than when you submitted the TX hash. Wait until the transaction is confirmed, then submit the TX hash again.".to_string()

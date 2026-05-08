@@ -16,7 +16,7 @@ pub struct PaymentVerificationRequest {
     pub tx_hash: String,
     pub expected_to_address: String,
     pub required_amount_usdt: Decimal,
-    pub order_created_at: DateTime<Utc>,
+    pub payment_started_at: DateTime<Utc>,
     pub submitted_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
@@ -47,7 +47,7 @@ pub enum PaymentVerificationError {
     AlreadyUsed,
     #[error("payment order expired")]
     ExpiredOrder,
-    #[error("transaction is older than order")]
+    #[error("transaction is older than payment request")]
     OldTransaction,
     #[error("transaction timestamp is after user submission")]
     TransactionAfterSubmission,
@@ -84,7 +84,7 @@ where
         }
 
         let outcome = self.verifier.verify(&request).await?;
-        if outcome.confirmed_at < request.order_created_at {
+        if outcome.confirmed_at < request.payment_started_at {
             return Err(PaymentVerificationError::OldTransaction);
         }
         if outcome.confirmed_at > request.submitted_at + Duration::minutes(2) {
@@ -702,7 +702,7 @@ mod tests {
             tx_hash: "valid_0xabc".to_string(),
             expected_to_address: "0x1111111111111111111111111111111111111111".to_string(),
             required_amount_usdt: Decimal::new(50, 0),
-            order_created_at: Utc::now() - Duration::minutes(1),
+            payment_started_at: Utc::now() - Duration::minutes(1),
             submitted_at: Utc::now(),
             expires_at: Utc::now() + Duration::minutes(29),
         };
@@ -719,7 +719,7 @@ mod tests {
             tx_hash: "valid_tx".to_string(),
             expected_to_address: "T111111111111111111111111111111111".to_string(),
             required_amount_usdt: Decimal::new(30, 0),
-            order_created_at: Utc::now() - Duration::hours(1),
+            payment_started_at: Utc::now() - Duration::hours(1),
             submitted_at: Utc::now(),
             expires_at: Utc::now() - Duration::minutes(1),
         };
@@ -727,6 +727,29 @@ mod tests {
         assert_eq!(
             service.verify_tx(request).await.unwrap_err(),
             PaymentVerificationError::ExpiredOrder
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_transactions_before_payment_window_started() {
+        let payment_started_at = Utc::now();
+        let service = PaymentService::new(FixedTimeVerifier {
+            confirmed_at: payment_started_at - Duration::seconds(1),
+        });
+        let request = PaymentVerificationRequest {
+            order_id: Uuid::new_v4(),
+            chain: PaymentChain::Erc20,
+            tx_hash: "valid_0xabc".to_string(),
+            expected_to_address: "0x1111111111111111111111111111111111111111".to_string(),
+            required_amount_usdt: Decimal::new(50, 0),
+            payment_started_at,
+            submitted_at: payment_started_at + Duration::minutes(1),
+            expires_at: payment_started_at + Duration::minutes(30),
+        };
+
+        assert_eq!(
+            service.verify_tx(request).await.unwrap_err(),
+            PaymentVerificationError::OldTransaction
         );
     }
 
@@ -742,7 +765,7 @@ mod tests {
             tx_hash: "valid_0xabc".to_string(),
             expected_to_address: "0x1111111111111111111111111111111111111111".to_string(),
             required_amount_usdt: Decimal::new(50, 0),
-            order_created_at: submitted_at - Duration::minutes(1),
+            payment_started_at: submitted_at - Duration::minutes(1),
             submitted_at,
             expires_at: submitted_at + Duration::minutes(29),
         };
@@ -765,7 +788,7 @@ mod tests {
             tx_hash: "valid_0xabc".to_string(),
             expected_to_address: "0x1111111111111111111111111111111111111111".to_string(),
             required_amount_usdt: Decimal::new(50, 0),
-            order_created_at: submitted_at - Duration::minutes(1),
+            payment_started_at: submitted_at - Duration::minutes(1),
             submitted_at,
             expires_at: submitted_at + Duration::minutes(29),
         };

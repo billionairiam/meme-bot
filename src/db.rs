@@ -8,6 +8,8 @@ use crate::domain::{CloudflareZoneResult, DomainPurchaseResult, DomainQuote};
 use crate::models::{BuildMode, OrderType, PaymentChain, WebsiteInput};
 use crate::payment::{PaymentVerificationError, PaymentVerificationOutcome};
 
+pub const PAYMENT_WINDOW_MINUTES: i64 = 30;
+
 pub async fn upsert_user(
     pool: &SqlitePool,
     telegram_user_id: i64,
@@ -55,14 +57,13 @@ pub async fn create_site_order(
     domain_quote_id: Option<Uuid>,
 ) -> anyhow::Result<Uuid> {
     let id = Uuid::new_v4();
-    let expires_at = (Utc::now() + Duration::minutes(30)).to_rfc3339();
     let row = sqlx::query(
         r#"
         INSERT INTO orders (
             id, user_id, order_type, build_mode, template_id, amount_usdt,
-            payment_status, site_status, payment_expires_at, domain_quote_id
+            payment_status, site_status, domain_quote_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', 'collecting_assets', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', 'collecting_assets', ?)
         RETURNING id
         "#,
     )
@@ -72,7 +73,6 @@ pub async fn create_site_order(
     .bind(build_mode.as_str())
     .bind(template_id)
     .bind(amount_usdt.to_string())
-    .bind(expires_at)
     .bind(domain_quote_id)
     .fetch_one(pool)
     .await?;
@@ -85,11 +85,25 @@ pub async fn attach_payment_chain(
     order_id: Uuid,
     chain: PaymentChain,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE orders SET payment_chain = ?, updated_at = datetime('now') WHERE id = ?")
-        .bind(chain.as_str())
-        .bind(order_id)
-        .execute(pool)
-        .await?;
+    let expires_at = (Utc::now() + Duration::minutes(PAYMENT_WINDOW_MINUTES)).to_rfc3339();
+    let result = sqlx::query(
+        r#"
+        UPDATE orders
+        SET payment_chain = ?,
+            payment_expires_at = ?,
+            updated_at = datetime('now')
+        WHERE id = ?
+          AND payment_status = 'pending'
+        "#,
+    )
+    .bind(chain.as_str())
+    .bind(expires_at)
+    .bind(order_id)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() != 1 {
+        anyhow::bail!("order is not pending or does not exist");
+    }
     Ok(())
 }
 
