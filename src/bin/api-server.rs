@@ -1,4 +1,4 @@
-use std::{env, net::SocketAddr, sync::Arc};
+use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
     Router,
@@ -17,7 +17,13 @@ use meme_bot::{
     },
 };
 use serde::Deserialize;
+use tokio::time::sleep;
 use tracing::{error, info, warn};
+
+const PAGES_DEPLOYMENT_POLL_ATTEMPTS: usize = 36;
+const PAGES_DEPLOYMENT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const PAGES_DOMAIN_POLL_ATTEMPTS: usize = 12;
+const PAGES_DOMAIN_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 struct AppState {
     registrar: NamecheapRegistrar,
@@ -284,8 +290,14 @@ struct PagesDeployRequest {
     github_owner: String,
     github_repo: String,
     production_branch: String,
+    #[serde(default = "default_pages_publish_dir")]
+    publish_dir: String,
     #[serde(default)]
     custom_domain: Option<String>,
+}
+
+fn default_pages_publish_dir() -> String {
+    "/".to_string()
 }
 
 async fn pages_deploy(
@@ -318,6 +330,28 @@ async fn pages_deploy(
         .await
         .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
     let project_exists = existing.status().is_success();
+    if project_exists {
+        let body = existing
+            .text()
+            .await
+            .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+        verify_existing_pages_project(
+            &body,
+            &request.github_owner,
+            &request.github_repo,
+            &request.production_branch,
+            &request.publish_dir,
+        )?;
+    } else if existing.status() != StatusCode::NOT_FOUND {
+        let status = existing.status();
+        let body = existing
+            .text()
+            .await
+            .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+        return Err(DomainError::Cloudflare(format!(
+            "get project failed: {status}: {body}"
+        )))?;
+    }
 
     if !project_exists {
         // Create Git-connected Pages project
@@ -334,9 +368,16 @@ async fn pages_deploy(
                         "owner": request.github_owner,
                         "repo_name": request.github_repo,
                         "production_branch": request.production_branch,
+                        "production_deployments_enabled": true,
+                        "preview_deployment_setting": "none",
                         "pr_comments_enabled": false,
                         "deployments_enabled": true,
                     }
+                },
+                "build_config": {
+                    "build_command": "",
+                    "destination_dir": request.publish_dir,
+                    "root_dir": ""
                 }
             }))
             .send()
@@ -370,40 +411,295 @@ async fn pages_deploy(
         }
     }
 
+    let deployment = trigger_pages_deployment(&state, &request.project_name).await?;
+    let deployment =
+        wait_pages_deployment_success(&state, &request.project_name, &deployment.id).await?;
+
     // Bind custom domain if requested
     if let Some(domain) = &request.custom_domain {
         info!(domain = %domain, project = %request.project_name, "binding custom domain");
-        let bind_url = format!("{cf_url}/{}/domains", request.project_name);
-        let bind_response = state
-            .cf_client
-            .post(&bind_url)
-            .bearer_auth(&state.cf_api_token)
-            .json(&serde_json::json!({"name": domain}))
-            .send()
-            .await
-            .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-
-        let bind_status = bind_response.status();
-        let bind_body = bind_response
-            .text()
-            .await
-            .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-
-        if !bind_status.is_success() {
-            warn!(status = %bind_status, body = %bind_body, "custom domain bind failed");
-            return Err(DomainError::Cloudflare(format!(
-                "custom domain bind failed: {bind_status}: {bind_body}"
-            )))?;
-        }
+        bind_pages_custom_domain(&state, &request.project_name, domain).await?;
     }
 
-    let pages_url = format!("https://{}.pages.dev", request.project_name);
+    let pages_url = deployment
+        .url
+        .unwrap_or_else(|| format!("https://{}.pages.dev", request.project_name));
     info!(url = %pages_url, "pages project created successfully");
 
     Ok(Json(serde_json::json!({
         "cloudflare_pages_url": pages_url,
         "custom_domain": request.custom_domain,
     })))
+}
+
+struct ApiPagesDeploymentStatus {
+    id: String,
+    url: Option<String>,
+    stage_status: Option<String>,
+}
+
+async fn trigger_pages_deployment(
+    state: &AppState,
+    project_name: &str,
+) -> Result<ApiPagesDeploymentStatus, ApiError> {
+    let url = format!(
+        "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects/{}/deployments",
+        state.cf_account_id, project_name
+    );
+    let response = state
+        .cf_client
+        .post(url)
+        .bearer_auth(&state.cf_api_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+    parse_pages_deployment_response(response).await
+}
+
+async fn wait_pages_deployment_success(
+    state: &AppState,
+    project_name: &str,
+    deployment_id: &str,
+) -> Result<ApiPagesDeploymentStatus, ApiError> {
+    for _ in 0..PAGES_DEPLOYMENT_POLL_ATTEMPTS {
+        let url = format!(
+            "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects/{}/deployments/{}",
+            state.cf_account_id, project_name, deployment_id
+        );
+        let response = state
+            .cf_client
+            .get(url)
+            .bearer_auth(&state.cf_api_token)
+            .send()
+            .await
+            .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+        let deployment = parse_pages_deployment_response(response).await?;
+        match deployment.stage_status.as_deref() {
+            Some("success") => return Ok(deployment),
+            Some("failure") | Some("canceled") => {
+                return Err(DomainError::Cloudflare(format!(
+                    "deployment {} ended with status {}",
+                    deployment.id,
+                    deployment.stage_status.unwrap_or_default()
+                )))?;
+            }
+            _ => sleep(PAGES_DEPLOYMENT_POLL_INTERVAL).await,
+        }
+    }
+
+    Err(DomainError::Cloudflare(format!(
+        "deployment {deployment_id} did not complete before timeout"
+    )))?
+}
+
+async fn parse_pages_deployment_response(
+    response: reqwest::Response,
+) -> Result<ApiPagesDeploymentStatus, ApiError> {
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+    if !status.is_success()
+        || response_success(&body)
+            .map(|success| !success)
+            .unwrap_or(false)
+    {
+        return Err(DomainError::Cloudflare(format!("{status}: {body}")))?;
+    }
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| DomainError::Cloudflare(format!("parse deployment response: {e}: {body}")))?;
+    let result = value
+        .get("result")
+        .ok_or_else(|| DomainError::Cloudflare("deployment response missing result".to_string()))?;
+    let id = result
+        .get("id")
+        .and_then(|item| item.as_str())
+        .filter(|item| !item.trim().is_empty())
+        .ok_or_else(|| DomainError::Cloudflare("deployment response missing id".to_string()))?
+        .to_string();
+    let url = result
+        .get("url")
+        .and_then(|item| item.as_str())
+        .filter(|item| !item.trim().is_empty())
+        .map(String::from);
+    let stage_status = result
+        .get("latest_stage")
+        .and_then(|stage| stage.get("status"))
+        .and_then(|item| item.as_str())
+        .map(String::from);
+    Ok(ApiPagesDeploymentStatus {
+        id,
+        url,
+        stage_status,
+    })
+}
+
+async fn bind_pages_custom_domain(
+    state: &AppState,
+    project_name: &str,
+    domain: &str,
+) -> Result<(), ApiError> {
+    if let Some(status) = get_pages_domain_status(state, project_name, domain).await? {
+        return ensure_domain_status_not_failed(domain, &status);
+    }
+    let bind_url = format!(
+        "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects/{}/domains",
+        state.cf_account_id, project_name
+    );
+    let bind_response = state
+        .cf_client
+        .post(&bind_url)
+        .bearer_auth(&state.cf_api_token)
+        .json(&serde_json::json!({"name": domain}))
+        .send()
+        .await
+        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+
+    let bind_status = bind_response.status();
+    let bind_body = bind_response
+        .text()
+        .await
+        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+
+    if !bind_status.is_success()
+        || response_success(&bind_body)
+            .map(|success| !success)
+            .unwrap_or(false)
+    {
+        warn!(status = %bind_status, body = %bind_body, "custom domain bind failed");
+        return Err(DomainError::Cloudflare(format!(
+            "custom domain bind failed: {bind_status}: {bind_body}"
+        )))?;
+    }
+
+    for _ in 0..PAGES_DOMAIN_POLL_ATTEMPTS {
+        if let Some(status) = get_pages_domain_status(state, project_name, domain).await? {
+            return ensure_domain_status_not_failed(domain, &status);
+        }
+        sleep(PAGES_DOMAIN_POLL_INTERVAL).await;
+    }
+
+    Err(DomainError::Cloudflare(format!(
+        "custom domain {domain} was not visible after binding"
+    )))?
+}
+
+async fn get_pages_domain_status(
+    state: &AppState,
+    project_name: &str,
+    domain: &str,
+) -> Result<Option<String>, ApiError> {
+    let url = format!(
+        "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects/{}/domains/{}",
+        state.cf_account_id, project_name, domain
+    );
+    let response = state
+        .cf_client
+        .get(url)
+        .bearer_auth(&state.cf_api_token)
+        .send()
+        .await
+        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+    if response.status() == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+    if !status.is_success()
+        || response_success(&body)
+            .map(|success| !success)
+            .unwrap_or(false)
+    {
+        return Err(DomainError::Cloudflare(format!("{status}: {body}")))?;
+    }
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| DomainError::Cloudflare(format!("parse domain response: {e}: {body}")))?;
+    let domain_status = value
+        .get("result")
+        .and_then(|result| result.get("status"))
+        .and_then(|status| status.as_str())
+        .filter(|status| !status.trim().is_empty())
+        .ok_or_else(|| DomainError::Cloudflare("domain response missing status".to_string()))?;
+    Ok(Some(domain_status.to_string()))
+}
+
+fn ensure_domain_status_not_failed(domain: &str, status: &str) -> Result<(), ApiError> {
+    match status {
+        "active" | "pending" | "initializing" => Ok(()),
+        "blocked" | "error" | "deactivated" => Err(DomainError::Cloudflare(format!(
+            "custom domain {domain} has Cloudflare status {status}"
+        )))?,
+        other => Err(DomainError::Cloudflare(format!(
+            "custom domain {domain} has unknown Cloudflare status {other}"
+        )))?,
+    }
+}
+
+fn response_success(body: &str) -> Option<bool> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("success").and_then(|success| success.as_bool()))
+}
+
+fn verify_existing_pages_project(
+    body: &str,
+    github_owner: &str,
+    github_repo: &str,
+    branch: &str,
+    publish_dir: &str,
+) -> Result<(), ApiError> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| DomainError::Cloudflare(format!("parse project: {e}")))?;
+    if value.get("success").and_then(|success| success.as_bool()) != Some(true) {
+        Err(DomainError::Cloudflare(format!(
+            "get project returned unsuccessful response: {body}"
+        )))?;
+    }
+    let result = value
+        .get("result")
+        .ok_or_else(|| DomainError::Cloudflare("project response missing result".to_string()))?;
+    let config = result
+        .get("source")
+        .and_then(|source| source.get("config"))
+        .ok_or_else(|| {
+            DomainError::Cloudflare(
+                "existing Pages project is not connected to a Git source".to_string(),
+            )
+        })?;
+    let owner = config.get("owner").and_then(|item| item.as_str());
+    let repo = config.get("repo_name").and_then(|item| item.as_str());
+    let production_branch = config
+        .get("production_branch")
+        .and_then(|item| item.as_str());
+    if owner != Some(github_owner) || repo != Some(github_repo) || production_branch != Some(branch)
+    {
+        Err(DomainError::Cloudflare(format!(
+            "existing Pages project points to {}/{}:{}, expected {}/{}:{}",
+            owner.unwrap_or("<missing>"),
+            repo.unwrap_or("<missing>"),
+            production_branch.unwrap_or("<missing>"),
+            github_owner,
+            github_repo,
+            branch
+        )))?;
+    }
+    if let Some(existing_dir) = result
+        .get("build_config")
+        .and_then(|config| config.get("destination_dir"))
+        .and_then(|item| item.as_str())
+        && !existing_dir.is_empty()
+        && existing_dir != publish_dir
+    {
+        Err(DomainError::Cloudflare(format!(
+            "existing Pages project publish directory is {existing_dir}, expected {publish_dir}"
+        )))?;
+    }
+    Ok(())
 }
 
 // ---- ApiError ----
