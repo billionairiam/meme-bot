@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -944,9 +945,25 @@ async fn handle_order_step(
                         .unwrap_or_else(|| "confirmed".to_string())
                 ));
 
-                if let (Some(db_uid), Some(input)) =
+                // Download logo from Telegram before creating website
+                let logo_local_path = if let Some(ref file_id) = draft.logo_file_id {
+                    match download_telegram_logo(&bot, file_id, &order_id.to_string()).await {
+                        Ok(path) => Some(path),
+                        Err(e) => {
+                            warn!(?e, file_id = %file_id, "failed to download logo; using file_id as fallback");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                if let (Some(db_uid), Some(mut input)) =
                     (draft.db_user_id, website_input_from_draft(&draft))
                 {
+                    if let Some(ref path) = logo_local_path {
+                        input.logo_asset_path = path.clone();
+                    }
                     match db::create_website(pool, db_uid, order_id, &input).await {
                         Ok(website_id) => {
                             if let Some(quote_id) = draft.domain_quote_id
@@ -1633,6 +1650,31 @@ async fn enqueue_generation_job_with_retries(
     Err(last_error.unwrap_or_else(|| {
         anyhow::anyhow!("enqueue generation job failed after retries")
     }))
+}
+
+async fn download_telegram_logo(
+    bot: &Bot,
+    file_id: &str,
+    order_id: &str,
+) -> anyhow::Result<String> {
+    let file = bot.get_file(teloxide::types::FileId::from(file_id.to_string())).await?;
+    let ext = Path::new(&file.path)
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_else(|| ".png".to_string());
+    let dir = "./logos";
+    tokio::fs::create_dir_all(dir).await?;
+    let dest = format!("{dir}/{order_id}{ext}");
+    let url = format!(
+        "https://api.telegram.org/file/bot{}/{}",
+        bot.token(),
+        file.path
+    );
+    let response = reqwest::get(&url).await?;
+    let bytes = response.bytes().await?;
+    tokio::fs::write(&dest, &bytes).await?;
+    info!(file_id = %file_id, dest = %dest, "downloaded logo from Telegram");
+    Ok(dest)
 }
 
 async fn verify_payment_with_retries<V>(
