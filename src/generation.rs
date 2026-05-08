@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     process::Stdio,
@@ -6,6 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use regex::Regex;
 use thiserror::Error;
 use tokio::{process::Command, time::timeout};
 use uuid::Uuid;
@@ -37,6 +39,8 @@ pub enum GenerationError {
     ProviderUnavailable,
     #[error("invalid generation input: {0}")]
     InvalidInput(String),
+    #[error("invalid generated site: {0}")]
+    InvalidOutput(String),
     #[error("generation failed: {0}")]
     Failed(String),
 }
@@ -45,7 +49,10 @@ impl GenerationError {
     pub fn is_provider_recoverable(&self) -> bool {
         matches!(
             self,
-            Self::QuotaExhausted | Self::RateLimited | Self::ProviderUnavailable
+            Self::QuotaExhausted
+                | Self::RateLimited
+                | Self::ProviderUnavailable
+                | Self::InvalidOutput(_)
         )
     }
 }
@@ -133,8 +140,7 @@ impl SiteGenerationProvider for CliGenerationProvider {
         &self,
         request: &SiteGenerationRequest,
     ) -> Result<SiteGenerationResult, GenerationError> {
-        fs::create_dir_all(&request.output_dir)
-            .map_err(|error| GenerationError::Failed(error.to_string()))?;
+        prepare_output_dir(&request.output_dir)?;
 
         let prompt = agent_prompt(request, self.name);
         let prompt_file = request.output_dir.join("agent_prompt.md");
@@ -164,7 +170,7 @@ impl SiteGenerationProvider for CliGenerationProvider {
             .map_err(|error| map_provider_spawn_error(error, self.name))?;
 
         if output.status.success() {
-            validate_agent_output(&request.output_dir, &done_file)?;
+            validate_agent_output(request, self.name, &done_file)?;
             Ok(SiteGenerationResult {
                 provider_name: self.name.to_string(),
                 output_dir: request.output_dir.clone(),
@@ -213,7 +219,10 @@ Rules:
 - Do not call external deployment services.
 - Write the website files directly into the current directory.
 - The result must be deployable by Cloudflare Pages.
-- At minimum create either `index.html` or a project with `package.json`.
+- Create a finished static site with `index.html` at the output root, or `dist/index.html`.
+- Do not leave only source files or only `package.json`; the deployable HTML must already exist.
+- The page must visibly include token name, ticker, contract address, X link, and Telegram link.
+- Keep all local image/CSS/JS references inside the output directory and make sure the referenced files exist.
 - When and only when the website files are complete, write `.agent_done.json`.
 - `.agent_done.json` must contain JSON with: provider, status="completed", entrypoint.
 
@@ -244,34 +253,180 @@ fn render_agent_args(
         .map_err(|error| GenerationError::Failed(format!("invalid agent args: {error}")))
 }
 
-fn validate_agent_output(output_dir: &Path, done_file: &Path) -> Result<(), GenerationError> {
+fn prepare_output_dir(output_dir: &Path) -> Result<(), GenerationError> {
+    if output_dir.exists() {
+        fs::remove_dir_all(output_dir).map_err(|error| {
+            GenerationError::Failed(format!("clean output dir failed: {error}"))
+        })?;
+    }
+    fs::create_dir_all(output_dir)
+        .map_err(|error| GenerationError::Failed(format!("create output dir failed: {error}")))
+}
+
+fn validate_agent_output(
+    request: &SiteGenerationRequest,
+    provider_name: &str,
+    done_file: &Path,
+) -> Result<(), GenerationError> {
+    let output_dir = &request.output_dir;
     if !done_file.exists() {
-        return Err(GenerationError::Failed(format!(
+        return Err(GenerationError::InvalidOutput(format!(
             "agent exited successfully but did not create {}",
             done_file.display()
         )));
     }
 
-    let done_content = fs::read_to_string(done_file)
-        .map_err(|error| GenerationError::Failed(format!("read done file failed: {error}")))?;
-    let done_json: serde_json::Value = serde_json::from_str(&done_content)
-        .map_err(|error| GenerationError::Failed(format!("invalid done file JSON: {error}")))?;
+    let done_content = fs::read_to_string(done_file).map_err(|error| {
+        GenerationError::InvalidOutput(format!("read done file failed: {error}"))
+    })?;
+    let done_json: serde_json::Value = serde_json::from_str(&done_content).map_err(|error| {
+        GenerationError::InvalidOutput(format!("invalid done file JSON: {error}"))
+    })?;
+    if done_json.get("provider").and_then(|value| value.as_str()) != Some(provider_name) {
+        return Err(GenerationError::InvalidOutput(
+            "done file provider does not match the generation provider".to_string(),
+        ));
+    }
     if done_json.get("status").and_then(|value| value.as_str()) != Some("completed") {
-        return Err(GenerationError::Failed(
+        return Err(GenerationError::InvalidOutput(
             "done file status is not completed".to_string(),
         ));
     }
 
-    let has_static_entry = output_dir.join("index.html").exists()
-        || output_dir.join("package.json").exists()
-        || output_dir.join("dist/index.html").exists();
-    if !has_static_entry {
-        return Err(GenerationError::Failed(
-            "agent completed but no deployable site entry was found".to_string(),
+    let entrypoint = done_json
+        .get("entrypoint")
+        .and_then(|value| value.as_str())
+        .unwrap_or("index.html");
+    let entrypoint = sanitize_entrypoint(entrypoint)?;
+    let entry_path = output_dir.join(&entrypoint);
+    let fallback_entry = if output_dir.join("index.html").exists() {
+        Some(PathBuf::from("index.html"))
+    } else if output_dir.join("dist/index.html").exists() {
+        Some(PathBuf::from("dist/index.html"))
+    } else {
+        None
+    };
+    let entry_path = if entry_path.exists() {
+        entry_path
+    } else if let Some(fallback) = fallback_entry {
+        output_dir.join(fallback)
+    } else {
+        return Err(GenerationError::InvalidOutput(
+            "agent completed but no deployable index.html or dist/index.html was found".to_string(),
+        ));
+    };
+
+    validate_html_entry(output_dir, &entry_path, request)?;
+
+    Ok(())
+}
+
+fn sanitize_entrypoint(entrypoint: &str) -> Result<PathBuf, GenerationError> {
+    let path = PathBuf::from(entrypoint);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(GenerationError::InvalidOutput(
+            "done file entrypoint must stay inside the output directory".to_string(),
+        ));
+    }
+    Ok(path)
+}
+
+fn validate_html_entry(
+    output_dir: &Path,
+    entry_path: &Path,
+    request: &SiteGenerationRequest,
+) -> Result<(), GenerationError> {
+    let html = fs::read_to_string(entry_path).map_err(|error| {
+        GenerationError::InvalidOutput(format!("read entrypoint failed: {error}"))
+    })?;
+    let normalized = html.to_ascii_lowercase();
+    if normalized.trim().len() < 200 {
+        return Err(GenerationError::InvalidOutput(
+            "entrypoint HTML is too small to be a complete website".to_string(),
+        ));
+    }
+    if !normalized.contains("<html") || !normalized.contains("<body") {
+        return Err(GenerationError::InvalidOutput(
+            "entrypoint must contain a full HTML document".to_string(),
         ));
     }
 
-    Ok(())
+    for required in [
+        request.input.token_name.as_str(),
+        request.input.token_ticker.as_str(),
+        request.input.contract_address.as_str(),
+        request.input.x_url.as_str(),
+        request.input.telegram_url.as_str(),
+    ] {
+        if !normalized.contains(&required.to_ascii_lowercase()) {
+            return Err(GenerationError::InvalidOutput(format!(
+                "entrypoint is missing required content: {required}"
+            )));
+        }
+    }
+
+    validate_local_asset_references(output_dir, entry_path, &html)
+}
+
+fn validate_local_asset_references(
+    output_dir: &Path,
+    entry_path: &Path,
+    html: &str,
+) -> Result<(), GenerationError> {
+    let attr_regex = Regex::new(r#"(?:src|href)=["']([^"']+)["']"#)
+        .map_err(|error| GenerationError::Failed(format!("asset regex failed: {error}")))?;
+    let entry_dir = entry_path.parent().unwrap_or(output_dir);
+    let mut missing = HashSet::new();
+
+    for captures in attr_regex.captures_iter(html) {
+        let Some(reference) = captures.get(1).map(|m| m.as_str().trim()) else {
+            continue;
+        };
+        if should_skip_reference(reference) {
+            continue;
+        }
+        let relative = reference
+            .split_once('#')
+            .map(|(path, _)| path)
+            .unwrap_or(reference)
+            .split_once('?')
+            .map(|(path, _)| path)
+            .unwrap_or(reference)
+            .trim_start_matches('/');
+        if relative.is_empty() {
+            continue;
+        }
+        let candidate = entry_dir.join(relative);
+        if !candidate.exists() {
+            missing.insert(reference.to_string());
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        let mut missing = missing.into_iter().collect::<Vec<_>>();
+        missing.sort();
+        Err(GenerationError::InvalidOutput(format!(
+            "entrypoint references missing local assets: {}",
+            missing.join(", ")
+        )))
+    }
+}
+
+fn should_skip_reference(reference: &str) -> bool {
+    let lower = reference.to_ascii_lowercase();
+    lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("tel:")
+        || lower.starts_with("data:")
+        || lower.starts_with('#')
+        || lower.starts_with("javascript:")
 }
 
 pub struct StaticTemplateProvider;
@@ -286,8 +441,7 @@ impl SiteGenerationProvider for StaticTemplateProvider {
         &self,
         request: &SiteGenerationRequest,
     ) -> Result<SiteGenerationResult, GenerationError> {
-        fs::create_dir_all(&request.output_dir)
-            .map_err(|error| GenerationError::Failed(error.to_string()))?;
+        prepare_output_dir(&request.output_dir)?;
         let html = format!(
             r#"<!doctype html>
 <html lang="en">
@@ -295,21 +449,26 @@ impl SiteGenerationProvider for StaticTemplateProvider {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{name} (${ticker})</title>
+  <meta name="description" content="{name} meme coin website">
 </head>
 <body>
   <main>
-    <img src="{logo}" alt="{name} logo" width="128">
     <h1>{name}</h1>
-    <p>${ticker}</p>
-    <p>Contract: {contract}</p>
-    <p><a href="{x}">X</a> <a href="{telegram}">Telegram</a></p>
+    <p>${ticker} is a community meme coin with a simple launch page generated from verified order details.</p>
+    <section>
+      <h2>Token</h2>
+      <p>Contract: <code>{contract}</code></p>
+    </section>
+    <nav>
+      <a href="{x}">X</a>
+      <a href="{telegram}">Telegram</a>
+    </nav>
   </main>
 </body>
 </html>
 "#,
             name = request.input.token_name,
             ticker = request.input.token_ticker,
-            logo = request.input.logo_asset_path,
             contract = request.input.contract_address,
             x = request.input.x_url,
             telegram = request.input.telegram_url,
@@ -326,6 +485,11 @@ impl SiteGenerationProvider for StaticTemplateProvider {
             done.to_string(),
         )
         .map_err(|error| GenerationError::Failed(error.to_string()))?;
+        validate_agent_output(
+            request,
+            self.name(),
+            &request.output_dir.join(".agent_done.json"),
+        )?;
         Ok(SiteGenerationResult {
             provider_name: self.name().to_string(),
             output_dir: request.output_dir.clone(),
@@ -348,6 +512,7 @@ mod tests {
     use super::*;
 
     struct FailingProvider;
+    struct InvalidOutputProvider;
 
     #[async_trait]
     impl SiteGenerationProvider for FailingProvider {
@@ -363,10 +528,46 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn falls_back_to_second_provider() {
-        let dir = tempdir().unwrap();
-        let request = SiteGenerationRequest {
+    #[async_trait]
+    impl SiteGenerationProvider for InvalidOutputProvider {
+        fn name(&self) -> &'static str {
+            "invalid-output"
+        }
+
+        async fn generate(
+            &self,
+            request: &SiteGenerationRequest,
+        ) -> Result<SiteGenerationResult, GenerationError> {
+            prepare_output_dir(&request.output_dir)?;
+            fs::write(
+                request.output_dir.join("index.html"),
+                "<!doctype html><html><body>blank</body></html>",
+            )
+            .unwrap();
+            fs::write(
+                request.output_dir.join(".agent_done.json"),
+                serde_json::json!({
+                    "provider": self.name(),
+                    "status": "completed",
+                    "entrypoint": "index.html"
+                })
+                .to_string(),
+            )
+            .unwrap();
+            validate_agent_output(
+                request,
+                self.name(),
+                &request.output_dir.join(".agent_done.json"),
+            )?;
+            Ok(SiteGenerationResult {
+                provider_name: self.name().to_string(),
+                output_dir: request.output_dir.clone(),
+            })
+        }
+    }
+
+    fn test_request(output_dir: PathBuf) -> SiteGenerationRequest {
+        SiteGenerationRequest {
             order_id: Uuid::new_v4(),
             build_mode: "template".to_string(),
             template_local_path: None,
@@ -379,8 +580,14 @@ mod tests {
                 logo_asset_path: "logo.png".to_string(),
                 requested_domain: None,
             },
-            output_dir: dir.path().to_path_buf(),
-        };
+            output_dir,
+        }
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_second_provider() {
+        let dir = tempdir().unwrap();
+        let request = test_request(dir.path().to_path_buf());
         let router = GenerationRouter::new(
             GenerationProviderName::Gemini,
             Box::new(FailingProvider),
@@ -389,5 +596,51 @@ mod tests {
 
         let result = router.generate(&request).await.unwrap();
         assert_eq!(result.provider_name, "static-template");
+    }
+
+    #[tokio::test]
+    async fn falls_back_when_first_provider_writes_invalid_site() {
+        let dir = tempdir().unwrap();
+        let request = test_request(dir.path().to_path_buf());
+        let router = GenerationRouter::new(
+            GenerationProviderName::Gemini,
+            Box::new(InvalidOutputProvider),
+            Box::new(StaticTemplateProvider),
+        );
+
+        let result = router.generate(&request).await.unwrap();
+        assert_eq!(result.provider_name, "static-template");
+        let html = fs::read_to_string(dir.path().join("index.html")).unwrap();
+        assert!(html.contains("Moon Token"));
+    }
+
+    #[test]
+    fn rejects_missing_local_assets() {
+        let dir = tempdir().unwrap();
+        let request = test_request(dir.path().to_path_buf());
+        let html = r#"<!doctype html>
+<html><body>
+  <h1>Moon Token</h1>
+  <p>MOON</p>
+  <p>0x1111111111111111111111111111111111111111</p>
+  <a href="https://x.com/moon">X</a>
+  <a href="https://t.me/moonchat">Telegram</a>
+  <img src="missing.png" alt="Moon Token">
+</body></html>"#;
+        fs::write(dir.path().join("index.html"), html).unwrap();
+        fs::write(
+            dir.path().join(".agent_done.json"),
+            serde_json::json!({
+                "provider": "test",
+                "status": "completed",
+                "entrypoint": "index.html"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let error = validate_agent_output(&request, "test", &dir.path().join(".agent_done.json"))
+            .unwrap_err();
+        assert!(matches!(error, GenerationError::InvalidOutput(_)));
     }
 }

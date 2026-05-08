@@ -1,4 +1,4 @@
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{fs, path::Path, process::Stdio, time::Duration};
 
 use async_trait::async_trait;
 use reqwest::{Client, StatusCode};
@@ -581,6 +581,7 @@ async fn push_site_to_github(request: &DeploymentRequest) -> Result<(), Deployme
         &["checkout", "-B", &request.production_branch],
     )
     .await?;
+    ensure_site_gitignore(&request.site_dir).await?;
     run_git(&request.site_dir, &["add", "."]).await?;
     run_git_allow_nothing_to_commit(
         &request.site_dir,
@@ -605,6 +606,38 @@ async fn push_site_to_github(request: &DeploymentRequest) -> Result<(), Deployme
         &["push", "-u", "origin", &request.production_branch],
     )
     .await
+}
+
+async fn ensure_site_gitignore(site_dir: &str) -> Result<(), DeploymentError> {
+    let path = Path::new(site_dir).join(".gitignore");
+    let mut existing = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(DeploymentError::GitPush(format!(
+                "read generated site .gitignore failed: {error}"
+            )));
+        }
+    };
+
+    let mut changed = false;
+    for entry in ["agent_prompt.md", ".agent_done.json"] {
+        if !existing.lines().any(|line| line.trim() == entry) {
+            if !existing.is_empty() && !existing.ends_with('\n') {
+                existing.push('\n');
+            }
+            existing.push_str(entry);
+            existing.push('\n');
+            changed = true;
+        }
+    }
+
+    if changed {
+        fs::write(&path, existing).map_err(|error| {
+            DeploymentError::GitPush(format!("write generated site .gitignore failed: {error}"))
+        })?;
+    }
+    Ok(())
 }
 
 pub struct DryRunDeployer;
