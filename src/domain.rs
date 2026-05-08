@@ -37,6 +37,7 @@ pub struct DomainPurchaseRequest {
 pub struct DomainPurchaseResult {
     pub namecheap_order_id: String,
     pub namecheap_transaction_id: String,
+    pub charged_amount_usd: Decimal,
 }
 
 #[derive(Debug, Error)]
@@ -239,9 +240,9 @@ impl NamecheapRegistrar {
                 "namecheap.users.getPricing",
                 vec![
                     ("ProductType".to_string(), "DOMAIN".to_string()),
-                    ("ProductCategory".to_string(), "REGISTER".to_string()),
+                    ("ProductCategory".to_string(), "DOMAINS".to_string()),
                     ("ActionName".to_string(), "REGISTER".to_string()),
-                    ("ProductName".to_string(), tld.to_string()),
+                    ("ProductName".to_string(), tld.to_ascii_uppercase()),
                 ],
             )
             .await?;
@@ -339,8 +340,9 @@ impl DomainRegistrar for NamecheapRegistrar {
         }
 
         Ok(DomainPurchaseResult {
-            namecheap_order_id: attrs.get("OrderID").cloned().unwrap_or_default(),
-            namecheap_transaction_id: attrs.get("TransactionID").cloned().unwrap_or_default(),
+            namecheap_order_id: required_attr(&attrs, "OrderID")?,
+            namecheap_transaction_id: required_attr(&attrs, "TransactionID")?,
+            charged_amount_usd: attr_decimal(&attrs, "ChargedAmount")?,
         })
     }
 }
@@ -485,13 +487,52 @@ fn contact_param_name(prefix: &str, field: &str) -> String {
 }
 
 fn parse_price_for_years(xml: &str, tld: &str, years: i32) -> Result<Decimal, DomainError> {
+    let register_body = product_category_body(xml, "REGISTER")
+        .ok_or_else(|| DomainError::Parse("missing REGISTER pricing category".to_string()))?;
+    parse_price_for_years_in_category(register_body, tld, years)
+}
+
+fn product_category_body<'a>(xml: &'a str, category_name: &str) -> Option<&'a str> {
     let mut cursor = 0;
-    while let Some(start) = xml[cursor..].find("<Product ") {
+    while let Some(start) = xml[cursor..].find("<ProductCategory ") {
         let absolute_start = cursor + start;
         let Some(end) = xml[absolute_start..].find('>') else {
             break;
         };
-        let product_tag = &xml[absolute_start..absolute_start + end + 1];
+        let category_tag = &xml[absolute_start..absolute_start + end + 1];
+        let category_attrs = parse_attrs(category_tag);
+        let name = category_attrs
+            .get("Name")
+            .map(|value| value.to_ascii_uppercase());
+
+        let category_close = "</ProductCategory>";
+        let content_start = absolute_start + end + 1;
+        let Some(close_offset) = xml[content_start..].find(category_close) else {
+            break;
+        };
+        let category_body = &xml[content_start..content_start + close_offset];
+
+        if name.as_deref() == Some(category_name) {
+            return Some(category_body);
+        }
+        cursor = content_start + close_offset + category_close.len();
+    }
+
+    None
+}
+
+fn parse_price_for_years_in_category(
+    category_body: &str,
+    tld: &str,
+    years: i32,
+) -> Result<Decimal, DomainError> {
+    let mut cursor = 0;
+    while let Some(start) = category_body[cursor..].find("<Product ") {
+        let absolute_start = cursor + start;
+        let Some(end) = category_body[absolute_start..].find('>') else {
+            break;
+        };
+        let product_tag = &category_body[absolute_start..absolute_start + end + 1];
         let product_attrs = parse_attrs(product_tag);
         let product_name = product_attrs
             .get("Name")
@@ -499,10 +540,10 @@ fn parse_price_for_years(xml: &str, tld: &str, years: i32) -> Result<Decimal, Do
 
         let product_close = "</Product>";
         let content_start = absolute_start + end + 1;
-        let Some(close_offset) = xml[content_start..].find(product_close) else {
+        let Some(close_offset) = category_body[content_start..].find(product_close) else {
             break;
         };
-        let product_body = &xml[content_start..content_start + close_offset];
+        let product_body = &category_body[content_start..content_start + close_offset];
 
         if product_name.as_deref() == Some(tld) {
             return parse_price_in_product(product_body, years);
@@ -614,6 +655,23 @@ fn attr_decimal(attrs: &HashMap<String, String>, name: &str) -> Result<Decimal, 
         .get(name)
         .ok_or_else(|| DomainError::Parse(format!("missing {name}")))?;
     Decimal::from_str(value).map_err(|error| DomainError::Parse(error.to_string()))
+}
+
+fn required_attr(attrs: &HashMap<String, String>, name: &str) -> Result<String, DomainError> {
+    attrs
+        .get(name)
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .ok_or_else(|| DomainError::Parse(format!("missing {name}")))
+}
+
+fn namecheap_domain_parts(domain: &str) -> Result<(String, String), DomainError> {
+    let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (sld, tld) = domain.rsplit_once('.').ok_or(DomainError::UnsupportedTld)?;
+    if sld.is_empty() || tld.is_empty() {
+        return Err(DomainError::UnsupportedTld);
+    }
+    Ok((sld.to_string(), tld.to_string()))
 }
 
 fn xml_unescape(value: &str) -> String {
@@ -812,15 +870,25 @@ impl DnsProvisioner for NamecheapDnsProvisioner {
         domain: &str,
         nameservers: &[String],
     ) -> Result<(), DomainError> {
+        let (sld, tld) = namecheap_domain_parts(domain)?;
         let ns_list = nameservers.join(",");
-        self.call_namecheap(
-            "namecheap.domains.dns.setCustom",
-            vec![
-                ("DomainName".to_string(), domain.to_ascii_lowercase()),
-                ("Nameservers".to_string(), ns_list),
-            ],
-        )
-        .await?;
+        let xml = self
+            .call_namecheap(
+                "namecheap.domains.dns.setCustom",
+                vec![
+                    ("SLD".to_string(), sld),
+                    ("TLD".to_string(), tld),
+                    ("Nameservers".to_string(), ns_list),
+                ],
+            )
+            .await?;
+        let attrs = first_tag_attrs(&xml, "DomainDNSSetCustomResult")
+            .ok_or_else(|| DomainError::Parse("missing DomainDNSSetCustomResult".to_string()))?;
+        if !attr_bool(&attrs, "Updated").unwrap_or(false) {
+            return Err(DomainError::Namecheap(format!(
+                "nameserver update was not applied: {xml}"
+            )));
+        }
         Ok(())
     }
 
@@ -829,7 +897,8 @@ impl DnsProvisioner for NamecheapDnsProvisioner {
         domain: &str,
         records: &[DnsRecord],
     ) -> Result<(), DomainError> {
-        let mut params = vec![("DomainName".to_string(), domain.to_ascii_lowercase())];
+        let (sld, tld) = namecheap_domain_parts(domain)?;
+        let mut params = vec![("SLD".to_string(), sld), ("TLD".to_string(), tld)];
         for (i, record) in records.iter().enumerate() {
             let n = i + 1;
             params.push((format!("HostName{n}"), record.host_name.clone()));
@@ -842,8 +911,16 @@ impl DnsProvisioner for NamecheapDnsProvisioner {
                 params.push((format!("TTL{n}"), ttl.to_string()));
             }
         }
-        self.call_namecheap("namecheap.domains.dns.setHosts", params)
+        let xml = self
+            .call_namecheap("namecheap.domains.dns.setHosts", params)
             .await?;
+        let attrs = first_tag_attrs(&xml, "DomainDNSSetHostsResult")
+            .ok_or_else(|| DomainError::Parse("missing DomainDNSSetHostsResult".to_string()))?;
+        if !attr_bool(&attrs, "IsSuccess").unwrap_or(false) {
+            return Err(DomainError::Namecheap(format!(
+                "dns host records were not applied: {xml}"
+            )));
+        }
         Ok(())
     }
 }
@@ -1143,6 +1220,7 @@ mod tests {
             Ok(DomainPurchaseResult {
                 namecheap_order_id: "mock-order-1".to_string(),
                 namecheap_transaction_id: "mock-txn-1".to_string(),
+                charged_amount_usd: self.price_usd,
             })
         }
     }
@@ -1330,11 +1408,15 @@ mod tests {
 
     #[test]
     fn parses_domain_create_result() {
-        let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainCreateResult Domain="pepe.xyz" Registered="true" OrderID="123" TransactionID="456" /></CommandResponse></ApiResponse>"#;
+        let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainCreateResult Domain="pepe.xyz" Registered="true" ChargedAmount="12.3400" OrderID="123" TransactionID="456" /></CommandResponse></ApiResponse>"#;
         let attrs = first_tag_attrs(xml, "DomainCreateResult").unwrap();
         assert!(attr_bool(&attrs, "Registered").unwrap());
         assert_eq!(attrs.get("OrderID").unwrap(), "123");
         assert_eq!(attrs.get("TransactionID").unwrap(), "456");
+        assert_eq!(
+            attr_decimal(&attrs, "ChargedAmount").unwrap(),
+            Decimal::from_str("12.3400").unwrap()
+        );
     }
 
     #[test]
@@ -1493,10 +1575,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_dns_set_custom_not_updated() {
+        let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainDNSSetCustomResult Domain="pepe.xyz" Updated="false" /></CommandResponse></ApiResponse>"#;
+        let attrs = first_tag_attrs(xml, "DomainDNSSetCustomResult").unwrap();
+        assert!(!attr_bool(&attrs, "Updated").unwrap());
+    }
+
+    #[test]
     fn parses_dns_set_hosts_result() {
         let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainDNSSetHostsResult Domain="pepe.xyz" IsSuccess="true" /></CommandResponse></ApiResponse>"#;
         let attrs = first_tag_attrs(xml, "DomainDNSSetHostsResult").unwrap();
         assert!(attr_bool(&attrs, "IsSuccess").unwrap());
+    }
+
+    #[test]
+    fn splits_namecheap_domain_parts_for_dns_api() {
+        let (sld, tld) = namecheap_domain_parts("Pepe.XYZ.").unwrap();
+        assert_eq!(sld, "pepe");
+        assert_eq!(tld, "xyz");
     }
 
     // ---- Real Namecheap sandbox API tests ----
