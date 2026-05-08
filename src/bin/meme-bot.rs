@@ -5,7 +5,9 @@ use meme_bot::app::App;
 use meme_bot::config::Config;
 use meme_bot::telegram::run_bot;
 use sqlx::sqlite::SqlitePoolOptions;
-use tracing::{error, info};
+use teloxide::{prelude::*, types::ParseMode};
+use tokio::sync::mpsc;
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -31,8 +33,19 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("run migrations")?;
 
+    let (notification_tx, mut notification_rx) =
+        mpsc::unbounded_channel::<meme_bot::queue::UserNotification>();
+
     let app = App::new(config.clone(), pool.clone());
-    let queue = app.build_queue();
+    let queue = app.build_queue(Some(notification_tx));
+
+    let notify_bot = if config.telegram_bot_token.trim().is_empty() {
+        None
+    } else {
+        let bot = Bot::new(config.telegram_bot_token.clone());
+        let _ = bot.get_me().await;
+        Some(bot)
+    };
 
     let telegram_handle = tokio::spawn(async move {
         if let Err(e) = run_bot(config, pool).await {
@@ -55,12 +68,36 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let notifier_handle = tokio::spawn(async move {
+        while let Some(notification) = notification_rx.recv().await {
+            let Some(bot) = &notify_bot else {
+                warn!("notification channel received message but no bot is configured");
+                continue;
+            };
+            let chat_id = teloxide::types::ChatId(notification.telegram_user_id);
+            if let Err(error) = bot
+                .send_message(chat_id, &notification.message)
+                .parse_mode(ParseMode::Html)
+                .await
+            {
+                warn!(
+                    telegram_user_id = notification.telegram_user_id,
+                    ?error,
+                    "failed to send notification"
+                );
+            }
+        }
+    });
+
     tokio::select! {
         r = telegram_handle => {
             error!("telegram bot task ended unexpectedly: {:?}", r);
         }
         r = worker_handle => {
             error!("queue worker task ended unexpectedly: {:?}", r);
+        }
+        r = notifier_handle => {
+            error!("notifier task ended unexpectedly: {:?}", r);
         }
     }
 

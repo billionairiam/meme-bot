@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use sqlx::SqlitePool as Pool;
+use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::{
     config::Config,
     deployment::{CloudflarePagesDeployer, HttpClientPagesDeployer, SiteDeployer},
     generation::{CliGenerationProvider, GenerationRouter},
-    queue::GenerationQueue,
+    queue::{GenerationQueue, UserNotification},
 };
 
 pub struct App {
@@ -20,7 +21,10 @@ impl App {
         Self { config, pool }
     }
 
-    pub fn build_queue(&self) -> GenerationQueue {
+    pub fn build_queue(
+        &self,
+        notification_tx: Option<mpsc::UnboundedSender<UserNotification>>,
+    ) -> GenerationQueue {
         let router = Arc::new(GenerationRouter::new(
             self.config.generation_primary_provider,
             Box::new(CliGenerationProvider::gemini(
@@ -66,10 +70,11 @@ impl App {
             "worker-1".to_string(),
             self.config.github_owner.clone(),
             self.config.github_token.clone(),
+            notification_tx,
         )
     }
 
     pub async fn run_once(&self) -> anyhow::Result<()> {
-        self.build_queue().tick().await
+        self.build_queue(None).tick().await
     }
 }

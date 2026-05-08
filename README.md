@@ -328,7 +328,7 @@ When both are set, the bot uses `HttpClientDomainRegistrar`, `HttpClientDnsProvi
 - `namecheap.users.getPricing` — reads the 1-year registration price.
 - `namecheap.domains.create` — purchases the domain using unified contact fields.
 
-Supported TLDs: `.com`, `.xyz`, `.fun`, `.site`, `.online`.
+Supported TLDs: `.com`, `.net`, `.org`, `.xyz`, `.fun`, `.site`, `.online`, `.io`, `.co`, `.me`, `.cc`, `.app`, `.dev`, `.world`, `.space`, `.club`, `.store`, `.shop`.
 
 ### Required settings
 

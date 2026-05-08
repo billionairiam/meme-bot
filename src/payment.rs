@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
@@ -87,7 +87,7 @@ where
         if outcome.confirmed_at < request.order_created_at {
             return Err(PaymentVerificationError::OldTransaction);
         }
-        if outcome.confirmed_at > request.submitted_at {
+        if outcome.confirmed_at > request.submitted_at + Duration::minutes(2) {
             return Err(PaymentVerificationError::TransactionAfterSubmission);
         }
         if !outcome
@@ -670,7 +670,6 @@ fn usdt_decimal_from_base_units(
 
 #[cfg(test)]
 mod tests {
-    use chrono::Duration;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -732,10 +731,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_transactions_after_user_submission() {
+    async fn rejects_transactions_confirmed_well_after_user_submission() {
         let submitted_at = Utc::now();
         let service = PaymentService::new(FixedTimeVerifier {
-            confirmed_at: submitted_at + Duration::seconds(1),
+            confirmed_at: submitted_at + Duration::minutes(3),
         });
         let request = PaymentVerificationRequest {
             order_id: Uuid::new_v4(),
@@ -752,5 +751,25 @@ mod tests {
             service.verify_tx(request).await.unwrap_err(),
             PaymentVerificationError::TransactionAfterSubmission
         );
+    }
+
+    #[tokio::test]
+    async fn allows_transactions_within_clock_skew_tolerance() {
+        let submitted_at = Utc::now();
+        let service = PaymentService::new(FixedTimeVerifier {
+            confirmed_at: submitted_at + Duration::seconds(30),
+        });
+        let request = PaymentVerificationRequest {
+            order_id: Uuid::new_v4(),
+            chain: PaymentChain::Erc20,
+            tx_hash: "valid_0xabc".to_string(),
+            expected_to_address: "0x1111111111111111111111111111111111111111".to_string(),
+            required_amount_usdt: Decimal::new(50, 0),
+            order_created_at: submitted_at - Duration::minutes(1),
+            submitted_at,
+            expires_at: submitted_at + Duration::minutes(29),
+        };
+
+        assert!(service.verify_tx(request).await.is_ok());
     }
 }

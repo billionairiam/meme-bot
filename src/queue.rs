@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use sqlx::{Row, SqlitePool};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::time::{Duration, sleep};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -14,6 +14,12 @@ use crate::{
 
 const MAX_JOB_ATTEMPTS: i64 = 3;
 
+#[derive(Clone, Debug)]
+pub struct UserNotification {
+    pub telegram_user_id: i64,
+    pub message: String,
+}
+
 pub struct GenerationQueue {
     pool: SqlitePool,
     router: Arc<GenerationRouter>,
@@ -23,6 +29,7 @@ pub struct GenerationQueue {
     semaphore: Arc<Semaphore>,
     lock_mutex: Arc<Mutex<()>>,
     worker_id: String,
+    notification_tx: Option<mpsc::UnboundedSender<UserNotification>>,
 }
 
 impl GenerationQueue {
@@ -34,6 +41,7 @@ impl GenerationQueue {
         worker_id: String,
         repo_owner: String,
         github_token: String,
+        notification_tx: Option<mpsc::UnboundedSender<UserNotification>>,
     ) -> Self {
         Self {
             pool,
@@ -44,6 +52,7 @@ impl GenerationQueue {
             semaphore: Arc::new(Semaphore::new(max_concurrency.max(1))),
             lock_mutex: Arc::new(Mutex::new(())),
             worker_id,
+            notification_tx,
         }
     }
 
@@ -138,6 +147,19 @@ impl GenerationQueue {
                             .bind(request.order_id)
                             .execute(&self.pool)
                             .await?;
+
+                            let site_url = deployment
+                                .custom_domain
+                                .as_deref()
+                                .map(|d| format!("https://{d}"))
+                                .unwrap_or_else(|| deployment.cloudflare_pages_url.clone());
+                            self.notify_user(
+                                request.order_id,
+                                &format!(
+                                    "🎉 <b>Your website is live!</b>\n\n🌐 {site_url}\n\nCheck /status for details."
+                                ),
+                            )
+                            .await;
                         }
                         Err(error) => {
                             error!(order_id = %request.order_id, error = %error, "deployment failed");
@@ -157,8 +179,16 @@ impl GenerationQueue {
                             .bind(request.order_id)
                             .execute(&self.pool)
                             .await?;
-                            self.retry_or_manual_review(job_id, request.order_id, attempt_count)
+                            let went_to_review = self
+                                .retry_or_manual_review(job_id, request.order_id, attempt_count)
                                 .await?;
+                            if went_to_review {
+                                self.notify_user(
+                                    request.order_id,
+                                    "⚠️ <b>Website deployment failed after retries.</b>\n\nYour order needs manual review. Contact admin for assistance.",
+                                )
+                                .await;
+                            }
                         }
                     }
                 } else {
@@ -171,13 +201,29 @@ impl GenerationQueue {
                 }
             }
             Err(GenerationError::QuotaExhausted | GenerationError::ProviderUnavailable) => {
-                self.retry_or_manual_review(job_id, request.order_id, attempt_count)
+                let went_to_review = self
+                    .retry_or_manual_review(job_id, request.order_id, attempt_count)
                     .await?;
+                if went_to_review {
+                    self.notify_user(
+                        request.order_id,
+                        "⚠️ <b>Website generation could not complete.</b>\n\nAll providers are unavailable. Your order needs manual review. Contact admin.",
+                    )
+                    .await;
+                }
             }
             Err(error) => {
                 error!(order_id = %request.order_id, error = %error, "generation failed");
-                self.retry_or_manual_review(job_id, request.order_id, attempt_count)
+                let went_to_review = self
+                    .retry_or_manual_review(job_id, request.order_id, attempt_count)
                     .await?;
+                if went_to_review {
+                    self.notify_user(
+                        request.order_id,
+                        "⚠️ <b>Website generation failed after retries.</b>\n\nYour order needs manual review. Contact admin for assistance.",
+                    )
+                    .await;
+                }
             }
         }
         Ok(())
@@ -311,7 +357,7 @@ impl GenerationQueue {
         job_id: Uuid,
         order_id: Uuid,
         attempt_count: i64,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         if attempt_count < MAX_JOB_ATTEMPTS {
             sqlx::query(
                 "UPDATE orders SET site_status = 'queued', updated_at = datetime('now') WHERE id = ?",
@@ -329,10 +375,41 @@ impl GenerationQueue {
             .bind(job_id)
             .execute(&self.pool)
             .await?;
-            return Ok(());
+            return Ok(false);
         }
 
-        self.mark_manual_review(job_id, order_id).await
+        self.mark_manual_review(job_id, order_id).await?;
+        Ok(true)
+    }
+
+    async fn notify_user(&self, order_id: Uuid, message: &str) {
+        let Some(tx) = &self.notification_tx else {
+            return;
+        };
+        match sqlx::query(
+            "SELECT u.telegram_user_id FROM users u JOIN orders o ON o.user_id = u.id WHERE o.id = ?",
+        )
+        .bind(order_id)
+        .fetch_optional(&self.pool)
+        .await
+        {
+            Ok(Some(row)) => {
+                let telegram_user_id: i64 = row.get("telegram_user_id");
+                let notification = UserNotification {
+                    telegram_user_id,
+                    message: message.to_string(),
+                };
+                if tx.send(notification).is_err() {
+                    warn!(order_id = %order_id, "notification channel closed");
+                }
+            }
+            Ok(None) => {
+                warn!(order_id = %order_id, "cannot notify user: order not found");
+            }
+            Err(error) => {
+                warn!(order_id = %order_id, ?error, "cannot notify user: db lookup failed");
+            }
+        }
     }
 }
 

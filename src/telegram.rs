@@ -854,9 +854,10 @@ async fn handle_order_step(
                     required_amount_usdt: payment_info.amount_usdt,
                     order_created_at: payment_info.created_at,
                     submitted_at: tx_submitted_at,
-                    expires_at: payment_info
-                        .payment_expires_at
-                        .unwrap_or_else(chrono::Utc::now),
+                    expires_at: payment_info.payment_expires_at.unwrap_or_else(|| {
+                        warn!(order_id = %order_id, "payment_expires_at is NULL, falling back to created_at + 30min");
+                        payment_info.created_at + chrono::Duration::minutes(30)
+                    }),
                 };
                 let verification = verify_payment_with_retries(&service, verify_request).await;
                 if let Err(e) = db::record_payment_attempt(
@@ -929,14 +930,15 @@ async fn handle_order_step(
                                     warn!(?e, order_id = %order_id, "failed to mark manual review");
                                 }
                                 status_parts.push(
-                                    "Website generation paused after repeated domain setup failures. Contact admin."
+                                    "Your order requires manual review before generation. Contact admin."
                                         .to_string(),
                                 );
                             } else if let Err(e) =
-                                db::enqueue_generation_job(pool, order_id, website_id).await
+                                enqueue_generation_job_with_retries(pool, order_id, website_id).await
                             {
-                                warn!(?e, order_id = %order_id, "failed to enqueue generation job");
-                                status_parts.push("⚠️ Failed to queue generation.".to_string());
+                                warn!(?e, order_id = %order_id, "failed to enqueue generation job after retries");
+                                let _ = db::mark_order_manual_review(pool, order_id).await;
+                                status_parts.push("⚠️ Failed to queue generation. Contact admin.".to_string());
                             } else {
                                 status_parts.push("Website queued for generation.".to_string());
                             }
@@ -1481,6 +1483,28 @@ async fn maybe_purchase_domain_after_tx(
             )
         }
     }
+}
+
+async fn enqueue_generation_job_with_retries(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    website_id: Uuid,
+) -> anyhow::Result<Uuid> {
+    let mut last_error = None;
+    for attempt in 1..=EXTERNAL_STEP_MAX_ATTEMPTS {
+        match db::enqueue_generation_job(pool, order_id, website_id).await {
+            Ok(id) => return Ok(id),
+            Err(error) if attempt < EXTERNAL_STEP_MAX_ATTEMPTS => {
+                warn!(?error, order_id = %order_id, attempt, "failed to enqueue generation job; retrying");
+                last_error = Some(error);
+                sleep(TokioDuration::from_secs(attempt as u64)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        anyhow::anyhow!("enqueue generation job failed after retries")
+    }))
 }
 
 async fn verify_payment_with_retries<V>(
