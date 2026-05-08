@@ -173,6 +173,7 @@ struct OrderDraft {
     website_url: Option<String>,
     domain_quote_id: Option<Uuid>,
     domain_price_usdt: Option<Decimal>,
+    alternative_domains: Option<Vec<crate::domain::DomainQuote>>,
     total_usdt: Option<Decimal>,
     payment_chain: Option<PaymentChain>,
     order_id: Option<Uuid>,
@@ -231,6 +232,7 @@ impl OrderDraft {
             website_url: None,
             domain_quote_id: None,
             domain_price_usdt: None,
+            alternative_domains: None,
             total_usdt: None,
             payment_chain: None,
             order_id: None,
@@ -410,6 +412,22 @@ async fn handle_callback(
                     .await
                 }
             }
+        }
+        Some(data) if data.starts_with("alt_domain:") => {
+            let domain = data.trim_start_matches("alt_domain:");
+            handle_alternative_domain_selection(
+                &bot, target, query.from.id, domain, &config, &sessions, &pool,
+            )
+            .await
+        }
+        Some("alt_domain_custom") => {
+            edit_screen(
+                &bot,
+                target,
+                "✏️ <b>Enter your domain</b>\n\nSend the domain you want, for example:\n<code>pepe.xyz</code>",
+                cancel_keyboard(),
+            )
+            .await
         }
         Some("cancel") => {
             remove_session(query.from.id, &sessions);
@@ -736,25 +754,42 @@ async fn handle_order_step(
                     .await
                     .map(|_| ())
                 }
-                Ok(_) => bot
-                    .send_message(
-                        msg.chat.id,
-                        "<b>Domain unavailable or premium.</b>\n\nPlease send another domain.",
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ()),
-                Err(error) => bot
-                    .send_message(
-                        msg.chat.id,
-                        format!(
-                            "<b>Domain check failed after retries.</b>\n\n{}\n\nContact admin if this persists.",
-                            html_escape(&domain_error_for_user(&error))
-                        ),
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ()),
+                Ok(_) | Err(_) => {
+                    let tld = domain.rsplit_once('.').map(|(_, t)| t).unwrap_or("");
+                    let base_name = domain
+                        .rsplit_once('.')
+                        .map(|(name, _)| name)
+                        .unwrap_or(&domain);
+                    let alternatives =
+                        check_alternative_domains(registrar.as_ref(), base_name, tld).await;
+
+                    if alternatives.is_empty() {
+                        bot.send_message(
+                            msg.chat.id,
+                            format!(
+                                "<b>Domain unavailable.</b>\n\nNo alternative TLDs available for <b>{base_name}</b>. Please send another domain name.",
+                            ),
+                        )
+                        .parse_mode(ParseMode::Html)
+                        .await
+                        .map(|_| ())
+                    } else {
+                        draft.alternative_domains = Some(alternatives.clone());
+                        set_session(user_id, draft.clone(), &sessions);
+                        bot.send_message(
+                            msg.chat.id,
+                            format!(
+                                "🔍 <b>{} is taken.</b>\n\nAvailable alternatives for <b>{}</b>:",
+                                html_escape(&domain),
+                                html_escape(base_name)
+                            ),
+                        )
+                        .parse_mode(ParseMode::Html)
+                        .reply_markup(alternative_domains_keyboard(&alternatives))
+                        .await
+                        .map(|_| ())
+                    }
+                }
             }
         }
         DraftStep::ReadyToPay => bot
@@ -1371,6 +1406,99 @@ async fn edit_payment_chain_and_ask_tx(
     .await
 }
 
+async fn handle_alternative_domain_selection(
+    bot: &Bot,
+    target: UiMessage,
+    user_id: UserId,
+    domain: &str,
+    _config: &TelegramUiConfig,
+    sessions: &Sessions,
+    pool: &SqlitePool,
+) -> ResponseResult<()> {
+    let Some(mut draft) = get_session(user_id, sessions) else {
+        return edit_screen(
+            bot,
+            target,
+            "<b>No active order.</b>\n\nStart with /create.",
+            main_menu_keyboard(),
+        )
+        .await;
+    };
+
+    let Some(alternatives) = &draft.alternative_domains else {
+        return edit_screen(
+            bot,
+            target,
+            "<b>Session expired.</b>\n\nPlease restart with /create.",
+            main_menu_keyboard(),
+        )
+        .await;
+    };
+
+    let Some(quote) = alternatives.iter().find(|q| q.domain == domain).cloned() else {
+        return edit_screen(
+            bot,
+            target,
+            "<b>Domain selection expired.</b>\n\nPlease restart with /create.",
+            main_menu_keyboard(),
+        )
+        .await;
+    };
+
+    let site_price_usdt = draft.site_price_usdt;
+
+    let db_user_id = match db::upsert_user(pool, user_id.0 as i64, None, None, None, true).await {
+        Ok(id) => id,
+        Err(e) => {
+            warn!(?e, user_id = user_id.0 as i64, "failed to upsert user for alt domain");
+            return edit_screen(
+                bot,
+                target,
+                "<b>Internal error.</b>\n\nFailed to record selection. Please try again.",
+                main_menu_keyboard(),
+            )
+            .await;
+        }
+    };
+
+    let domain_quote_id = match db::record_domain_quote(pool, db_user_id, &quote, quote.price_usd)
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            warn!(?e, "failed to record domain quote for alt domain");
+            return edit_screen(
+                bot,
+                target,
+                "<b>Internal error.</b>\n\nFailed to record selection. Please try again.",
+                main_menu_keyboard(),
+            )
+            .await;
+        }
+    };
+
+    let total = site_price_usdt + quote.price_usd;
+    draft.website_url = Some(domain.to_string());
+    draft.db_user_id = Some(db_user_id);
+    draft.domain_price_usdt = Some(quote.price_usd);
+    draft.domain_quote_id = Some(domain_quote_id);
+    draft.total_usdt = Some(total);
+    draft.step = DraftStep::ReadyToPay;
+    draft.alternative_domains = None;
+    set_session(user_id, draft.clone(), sessions);
+
+    edit_screen(
+        bot,
+        target,
+        format!(
+            "✅ <b>Domain selected.</b>\n\n🌐 {domain}\nDomain price: <b>{}</b> USDT\nWebsite price: <b>{}</b> USDT\n\nTotal: <b>{}</b> USDT\n\nChoose payment chain. After payment, send the TX hash and I will verify it on-chain.",
+            quote.price_usd, site_price_usdt, total
+        ),
+        payment_chain_keyboard(),
+    )
+    .await
+}
+
 fn set_session(user_id: UserId, draft: OrderDraft, sessions: &Sessions) {
     sessions
         .lock()
@@ -1803,6 +1931,49 @@ fn parse_template_deep_link(text: &str) -> Option<&str> {
     text.trim()
         .strip_prefix("/start tpl_")
         .or_else(|| text.trim().strip_prefix("/start=tpl_"))
+}
+
+async fn check_alternative_domains(
+    registrar: &dyn DomainRegistrar,
+    base_name: &str,
+    exclude_tld: &str,
+) -> Vec<crate::domain::DomainQuote> {
+    let mut alternatives = Vec::new();
+    for tld in crate::domain::SUPPORTED_TLDS {
+        if *tld == exclude_tld {
+            continue;
+        }
+        let domain = format!("{base_name}.{tld}");
+        let request = DomainQuoteRequest { domain };
+        if let Ok(quote) = registrar.quote(&request).await {
+            if quote.available && !quote.is_premium {
+                alternatives.push(quote);
+            }
+        }
+    }
+    alternatives.sort_by(|a, b| a.price_usd.cmp(&b.price_usd));
+    alternatives
+}
+
+fn alternative_domains_keyboard(
+    alternatives: &[crate::domain::DomainQuote],
+) -> InlineKeyboardMarkup {
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+    for quote in alternatives.iter().take(12) {
+        rows.push(vec![InlineKeyboardButton::callback(
+            format!(
+                "{} — {} USDT",
+                quote.domain,
+                quote.price_usd.round_dp(2)
+            ),
+            format!("alt_domain:{}", quote.domain),
+        )]);
+    }
+    rows.push(vec![InlineKeyboardButton::callback(
+        "✏️ Enter another domain",
+        "alt_domain_custom",
+    )]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 fn normalize_domain(text: &str) -> String {
