@@ -845,6 +845,7 @@ async fn handle_order_step(
                     config.usdt_sol_min_confirmations,
                 );
                 let service = PaymentService::new(verifier);
+                let tx_submitted_at = chrono::Utc::now();
                 let verify_request = PaymentVerificationRequest {
                     order_id,
                     chain,
@@ -852,6 +853,7 @@ async fn handle_order_step(
                     expected_to_address,
                     required_amount_usdt: payment_info.amount_usdt,
                     order_created_at: payment_info.created_at,
+                    submitted_at: tx_submitted_at,
                     expires_at: payment_info
                         .payment_expires_at
                         .unwrap_or_else(chrono::Utc::now),
@@ -1852,6 +1854,9 @@ fn payment_error_for_user(error: &PaymentVerificationError) -> String {
         }
         PaymentVerificationError::OldTransaction => {
             "Transaction is older than this order.".to_string()
+        }
+        PaymentVerificationError::TransactionAfterSubmission => {
+            "Transaction timestamp is later than when you submitted the TX hash. Wait until the transaction is confirmed, then submit the TX hash again.".to_string()
         }
         PaymentVerificationError::Provider(value) => {
             format!("Payment provider error after repeated checks: {value}. Contact admin.")

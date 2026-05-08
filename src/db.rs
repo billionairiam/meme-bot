@@ -156,11 +156,12 @@ pub async fn tx_hash_already_used(
     chain: PaymentChain,
     tx_hash: &str,
 ) -> anyhow::Result<bool> {
+    let canonical_tx_hash = canonical_tx_hash(chain, tx_hash);
     let row = sqlx::query(
         "SELECT COUNT(*) AS count FROM payment_transactions WHERE chain = ? AND tx_hash = ?",
     )
     .bind(chain.as_str())
-    .bind(tx_hash)
+    .bind(&canonical_tx_hash)
     .fetch_one(pool)
     .await?;
     Ok(row.get::<i64, _>("count") > 0)
@@ -226,6 +227,7 @@ pub async fn record_payment_transaction(
     tx_hash: &str,
     outcome: &PaymentVerificationOutcome,
 ) -> anyhow::Result<()> {
+    let canonical_tx_hash = canonical_tx_hash(chain, tx_hash);
     sqlx::query(
         r#"
         INSERT INTO payment_transactions (
@@ -236,7 +238,7 @@ pub async fn record_payment_transaction(
     )
     .bind(Uuid::new_v4())
     .bind(chain.as_str())
-    .bind(tx_hash)
+    .bind(&canonical_tx_hash)
     .bind(order_id)
     .bind(outcome.observed_amount_usdt.to_string())
     .bind(&outcome.observed_to_address)
@@ -253,26 +255,22 @@ pub async fn confirm_payment_and_mark_paid(
     tx_hash: &str,
     outcome: &PaymentVerificationOutcome,
 ) -> anyhow::Result<()> {
+    let canonical_tx_hash = canonical_tx_hash(chain, tx_hash);
     let mut tx = pool.begin().await?;
-    sqlx::query(
-        r#"
-        INSERT INTO payment_transactions (
-            id, chain, tx_hash, order_id, amount_usdt, to_address, confirmed_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        "#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(chain.as_str())
-    .bind(tx_hash)
-    .bind(order_id)
-    .bind(outcome.observed_amount_usdt.to_string())
-    .bind(&outcome.observed_to_address)
-    .bind(outcome.confirmed_at.to_rfc3339())
-    .execute(&mut *tx)
-    .await?;
 
-    sqlx::query(
+    let existing = sqlx::query(
+        "SELECT COUNT(*) AS count FROM payment_transactions WHERE chain = ? AND tx_hash = ?",
+    )
+    .bind(chain.as_str())
+    .bind(&canonical_tx_hash)
+    .fetch_one(&mut *tx)
+    .await?
+    .get::<i64, _>("count");
+    if existing > 0 {
+        anyhow::bail!("payment transaction already used");
+    }
+
+    let update_result = sqlx::query(
         r#"
         UPDATE orders
         SET payment_status = 'paid',
@@ -284,12 +282,33 @@ pub async fn confirm_payment_and_mark_paid(
             tx_hash = ?,
             paid_at = datetime('now'),
             updated_at = datetime('now')
-        WHERE id = ? AND payment_status <> 'paid'
+        WHERE id = ? AND payment_status = 'pending'
         "#,
     )
     .bind(chain.as_str())
-    .bind(tx_hash)
+    .bind(&canonical_tx_hash)
     .bind(order_id)
+    .execute(&mut *tx)
+    .await?;
+    if update_result.rows_affected() != 1 {
+        anyhow::bail!("order is not pending or does not exist");
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO payment_transactions (
+            id, chain, tx_hash, order_id, amount_usdt, to_address, confirmed_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(chain.as_str())
+    .bind(&canonical_tx_hash)
+    .bind(order_id)
+    .bind(outcome.observed_amount_usdt.to_string())
+    .bind(&outcome.observed_to_address)
+    .bind(outcome.confirmed_at.to_rfc3339())
     .execute(&mut *tx)
     .await?;
 
@@ -302,6 +321,14 @@ pub async fn confirm_payment_and_mark_paid(
 
     tx.commit().await?;
     Ok(())
+}
+
+fn canonical_tx_hash(chain: PaymentChain, tx_hash: &str) -> String {
+    let trimmed = tx_hash.trim();
+    match chain {
+        PaymentChain::Erc20 | PaymentChain::Tron => trimmed.to_ascii_lowercase(),
+        PaymentChain::Sol => trimmed.to_string(),
+    }
 }
 
 pub async fn create_website(

@@ -17,6 +17,7 @@ pub struct PaymentVerificationRequest {
     pub expected_to_address: String,
     pub required_amount_usdt: Decimal,
     pub order_created_at: DateTime<Utc>,
+    pub submitted_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -48,6 +49,8 @@ pub enum PaymentVerificationError {
     ExpiredOrder,
     #[error("transaction is older than order")]
     OldTransaction,
+    #[error("transaction timestamp is after user submission")]
+    TransactionAfterSubmission,
     #[error("provider error: {0}")]
     Provider(String),
 }
@@ -84,6 +87,9 @@ where
         if outcome.confirmed_at < request.order_created_at {
             return Err(PaymentVerificationError::OldTransaction);
         }
+        if outcome.confirmed_at > request.submitted_at {
+            return Err(PaymentVerificationError::TransactionAfterSubmission);
+        }
         if !outcome
             .observed_to_address
             .eq_ignore_ascii_case(&request.expected_to_address)
@@ -117,7 +123,7 @@ impl PaymentVerifier for StubPaymentVerifier {
                 PaymentChain::Tron => 20,
                 PaymentChain::Sol => 1,
             }),
-            confirmed_at: Utc::now(),
+            confirmed_at: request.submitted_at,
         })
     }
 }
@@ -211,7 +217,7 @@ impl ChainPaymentVerifier {
         )
         .ok_or(PaymentVerificationError::WrongRecipient)?;
 
-        let observed_amount_usdt = usdt_decimal_from_base_units(&transfer.amount, 6)?;
+        let observed_amount_usdt = transfer.amount;
         let block_number = receipt
             .get("blockNumber")
             .and_then(Value::as_str)
@@ -303,6 +309,10 @@ impl ChainPaymentVerifier {
             .and_then(Value::as_array)
             .ok_or(PaymentVerificationError::NotFound)?;
 
+        let mut total = Decimal::ZERO;
+        let mut observed_to = None;
+        let mut block_number = None;
+        let mut confirmed_at = None;
         for event in events {
             let result = event.get("result").unwrap_or(event);
             let to = result
@@ -320,22 +330,59 @@ impl ChainPaymentVerifier {
                 .ok_or_else(|| {
                     PaymentVerificationError::Provider("missing TRC20 amount".to_string())
                 })?;
-            let confirmed_at = event
+            total += usdt_decimal_from_base_units(&raw_amount, 6)?;
+            observed_to = Some(to.to_string());
+            block_number = event
+                .get("block_number")
+                .or_else(|| event.get("blockNumber"))
+                .and_then(value_to_u64)
+                .or(block_number);
+            confirmed_at = event
                 .get("block_timestamp")
                 .or_else(|| event.get("timestamp"))
                 .and_then(Value::as_i64)
                 .and_then(|ms| Utc.timestamp_millis_opt(ms).single())
-                .unwrap_or_else(Utc::now);
-
-            return Ok(PaymentVerificationOutcome {
-                observed_amount_usdt: usdt_decimal_from_base_units(&raw_amount, 6)?,
-                observed_to_address: to.to_string(),
-                confirmations: Some(self.tron_min_confirmations),
-                confirmed_at,
-            });
+                .or(confirmed_at);
         }
 
-        Err(PaymentVerificationError::WrongRecipient)
+        let Some(observed_to) = observed_to else {
+            return Err(PaymentVerificationError::WrongRecipient);
+        };
+        let block_number = block_number.ok_or_else(|| {
+            PaymentVerificationError::Provider("missing TRON block number".to_string())
+        })?;
+        let latest = self.tron_latest_block_number().await?;
+        let confirmations = latest.saturating_sub(block_number).saturating_add(1);
+        if confirmations < self.tron_min_confirmations {
+            return Err(PaymentVerificationError::InsufficientConfirmations);
+        }
+
+        Ok(PaymentVerificationOutcome {
+            observed_amount_usdt: total,
+            observed_to_address: observed_to,
+            confirmations: Some(confirmations),
+            confirmed_at: confirmed_at.unwrap_or_else(Utc::now),
+        })
+    }
+
+    async fn tron_latest_block_number(&self) -> Result<u64, PaymentVerificationError> {
+        let url = format!("{}/wallet/getnowblock", self.tron_grid_base_url);
+        let mut builder = self.client.post(url).json(&json!({}));
+        if let Some(api_key) = &self.tron_grid_api_key {
+            builder = builder.header("TRON-PRO-API-KEY", api_key);
+        }
+        let body: Value = builder
+            .send()
+            .await
+            .map_err(|e| PaymentVerificationError::Provider(e.to_string()))?
+            .json()
+            .await
+            .map_err(|e| PaymentVerificationError::Provider(e.to_string()))?;
+        body.pointer("/block_header/raw_data/number")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                PaymentVerificationError::Provider("missing latest TRON block".to_string())
+            })
     }
 
     async fn verify_sol(
@@ -374,6 +421,9 @@ impl ChainPaymentVerifier {
             .get("result")
             .filter(|v| !v.is_null())
             .ok_or(PaymentVerificationError::NotFound)?;
+        if !tx.pointer("/meta/err").is_none_or(Value::is_null) {
+            return Err(PaymentVerificationError::NotFound);
+        }
         let slot = tx.get("slot").and_then(Value::as_u64).unwrap_or_default();
         let block_time = tx
             .get("blockTime")
@@ -433,7 +483,7 @@ impl PaymentVerifier for ChainPaymentVerifier {
 
 struct Erc20Transfer {
     to: String,
-    amount: String,
+    amount: Decimal,
 }
 
 fn find_erc20_transfer(
@@ -444,6 +494,8 @@ fn find_erc20_transfer(
     let transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
     let normalized_contract = normalize_hex(contract);
     let normalized_to = normalize_hex(to);
+    let mut total = Decimal::ZERO;
+    let mut observed_to = None;
     for log in logs? {
         if normalize_hex(log.get("address")?.as_str()?) != normalized_contract {
             continue;
@@ -456,19 +508,17 @@ fn find_erc20_transfer(
         if !topic_to.to_ascii_lowercase().ends_with(&normalized_to) {
             continue;
         }
-        return Some(Erc20Transfer {
-            to: to.to_string(),
-            amount: log.get("data")?.as_str()?.to_string(),
-        });
+        let amount = usdt_decimal_from_base_units(log.get("data")?.as_str()?, 6).ok()?;
+        total += amount;
+        observed_to = Some(to.to_string());
     }
-    None
+    observed_to.map(|to| Erc20Transfer { to, amount: total })
 }
 
 fn find_solana_usdt_transfer(tx: &Value, mint: &str, recipient: &str) -> Option<Decimal> {
-    let instructions = tx
-        .pointer("/transaction/message/instructions")
-        .and_then(Value::as_array)?;
-    for instruction in instructions {
+    let mut total = Decimal::ZERO;
+    let mut found = false;
+    for instruction in solana_instructions(tx) {
         let Some(parsed) = instruction.get("parsed") else {
             continue;
         };
@@ -485,25 +535,95 @@ fn find_solana_usdt_transfer(tx: &Value, mint: &str, recipient: &str) -> Option<
         if info.get("mint").and_then(Value::as_str) != Some(mint) {
             continue;
         }
-        if info
-            .get("destination")
-            .or_else(|| info.get("destinationOwner"))
-            .and_then(Value::as_str)
-            != Some(recipient)
-        {
+        if !solana_transfer_matches_recipient(tx, info, mint, recipient) {
             continue;
         }
         if let Some(amount) = info
             .pointer("/tokenAmount/uiAmountString")
             .and_then(Value::as_str)
         {
-            return Decimal::from_str_exact(amount).ok();
+            total += Decimal::from_str_exact(amount).ok()?;
+            found = true;
+            continue;
         }
         if let Some(amount) = info.pointer("/tokenAmount/amount").and_then(Value::as_str) {
-            return usdt_decimal_from_base_units(amount, 6).ok();
+            total += usdt_decimal_from_base_units(amount, 6).ok()?;
+            found = true;
         }
     }
-    None
+    found.then_some(total)
+}
+
+fn solana_instructions(tx: &Value) -> Vec<&Value> {
+    let mut instructions = Vec::new();
+    if let Some(top_level) = tx
+        .pointer("/transaction/message/instructions")
+        .and_then(Value::as_array)
+    {
+        instructions.extend(top_level);
+    }
+    if let Some(inner_groups) = tx
+        .pointer("/meta/innerInstructions")
+        .and_then(Value::as_array)
+    {
+        for group in inner_groups {
+            if let Some(inner) = group.get("instructions").and_then(Value::as_array) {
+                instructions.extend(inner);
+            }
+        }
+    }
+    instructions
+}
+
+fn solana_transfer_matches_recipient(
+    tx: &Value,
+    info: &Value,
+    mint: &str,
+    recipient: &str,
+) -> bool {
+    if info
+        .get("destinationOwner")
+        .and_then(Value::as_str)
+        .is_some_and(|owner| owner == recipient)
+    {
+        return true;
+    }
+
+    let Some(destination) = info.get("destination").and_then(Value::as_str) else {
+        return false;
+    };
+    if destination == recipient {
+        return true;
+    }
+
+    solana_token_account_owner(tx, destination, mint)
+        .as_deref()
+        .is_some_and(|owner| owner == recipient)
+}
+
+fn solana_token_account_owner(tx: &Value, token_account: &str, mint: &str) -> Option<String> {
+    let account_index = tx
+        .pointer("/transaction/message/accountKeys")
+        .and_then(Value::as_array)?
+        .iter()
+        .position(|account| {
+            account
+                .get("pubkey")
+                .or_else(|| account.get("account"))
+                .and_then(Value::as_str)
+                == Some(token_account)
+        })? as u64;
+
+    tx.pointer("/meta/postTokenBalances")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|balance| {
+            balance.get("accountIndex").and_then(Value::as_u64) == Some(account_index)
+                && balance.get("mint").and_then(Value::as_str) == Some(mint)
+        })?
+        .get("owner")
+        .and_then(Value::as_str)
+        .map(String::from)
 }
 
 fn normalize_hex(value: &str) -> String {
@@ -519,6 +639,12 @@ fn value_to_decimal_string(value: &Value) -> Option<String> {
         .as_str()
         .map(String::from)
         .or_else(|| value.as_u64().map(|number| number.to_string()))
+}
+
+fn value_to_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|number| number.parse().ok()))
 }
 
 fn usdt_decimal_from_base_units(
@@ -549,6 +675,25 @@ mod tests {
 
     use super::*;
 
+    struct FixedTimeVerifier {
+        confirmed_at: DateTime<Utc>,
+    }
+
+    #[async_trait]
+    impl PaymentVerifier for FixedTimeVerifier {
+        async fn verify(
+            &self,
+            request: &PaymentVerificationRequest,
+        ) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
+            Ok(PaymentVerificationOutcome {
+                observed_amount_usdt: request.required_amount_usdt,
+                observed_to_address: request.expected_to_address.clone(),
+                confirmations: Some(12),
+                confirmed_at: self.confirmed_at,
+            })
+        }
+    }
+
     #[tokio::test]
     async fn allows_overpayment_or_exact_payment() {
         let service = PaymentService::new(StubPaymentVerifier);
@@ -559,6 +704,7 @@ mod tests {
             expected_to_address: "0x1111111111111111111111111111111111111111".to_string(),
             required_amount_usdt: Decimal::new(50, 0),
             order_created_at: Utc::now() - Duration::minutes(1),
+            submitted_at: Utc::now(),
             expires_at: Utc::now() + Duration::minutes(29),
         };
 
@@ -575,12 +721,36 @@ mod tests {
             expected_to_address: "T111111111111111111111111111111111".to_string(),
             required_amount_usdt: Decimal::new(30, 0),
             order_created_at: Utc::now() - Duration::hours(1),
+            submitted_at: Utc::now(),
             expires_at: Utc::now() - Duration::minutes(1),
         };
 
         assert_eq!(
             service.verify_tx(request).await.unwrap_err(),
             PaymentVerificationError::ExpiredOrder
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_transactions_after_user_submission() {
+        let submitted_at = Utc::now();
+        let service = PaymentService::new(FixedTimeVerifier {
+            confirmed_at: submitted_at + Duration::seconds(1),
+        });
+        let request = PaymentVerificationRequest {
+            order_id: Uuid::new_v4(),
+            chain: PaymentChain::Erc20,
+            tx_hash: "valid_0xabc".to_string(),
+            expected_to_address: "0x1111111111111111111111111111111111111111".to_string(),
+            required_amount_usdt: Decimal::new(50, 0),
+            order_created_at: submitted_at - Duration::minutes(1),
+            submitted_at,
+            expires_at: submitted_at + Duration::minutes(29),
+        };
+
+        assert_eq!(
+            service.verify_tx(request).await.unwrap_err(),
+            PaymentVerificationError::TransactionAfterSubmission
         );
     }
 }
