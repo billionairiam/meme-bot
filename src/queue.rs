@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use sqlx::{Row, SqlitePool};
 use tokio::sync::{Mutex, Semaphore};
+use tokio::time::{Duration, sleep};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -10,6 +11,8 @@ use crate::{
     deployment::{DeploymentRequest, SiteDeployer},
     generation::{GenerationError, GenerationRouter, SiteGenerationRequest},
 };
+
+const MAX_JOB_ATTEMPTS: i64 = 3;
 
 pub struct GenerationQueue {
     pool: SqlitePool,
@@ -53,6 +56,7 @@ impl GenerationQueue {
         info!(job_id = %job.job_id, order_id = %job.order_id, "running generation job");
         let job_id = job.job_id;
         let website_id = job.website_id;
+        let attempt_count = job.attempt_count;
         let request = job.into_generation_request();
         sqlx::query(
             "UPDATE orders SET site_status = 'generating', updated_at = datetime('now') WHERE id = ?",
@@ -101,7 +105,9 @@ impl GenerationQueue {
                     .await?;
                     let deployment_request =
                         request.deployment_request(&self.repo_owner, &self.github_token);
-                    let deployment = deployer.deploy(&deployment_request).await;
+                    let deployment = self
+                        .deploy_with_retries(deployer.as_ref(), &deployment_request, website_id)
+                        .await;
                     match deployment {
                         Ok(deployment) => {
                             for stage in [
@@ -140,14 +146,6 @@ impl GenerationQueue {
                             } else {
                                 "deployment_failed"
                             };
-                            db::record_deployment_attempt(
-                                &self.pool,
-                                website_id,
-                                error.stage(),
-                                "failed",
-                                Some(&error.to_string()),
-                            )
-                            .await?;
                             sqlx::query(
                                 r#"
                                 UPDATE websites
@@ -159,7 +157,8 @@ impl GenerationQueue {
                             .bind(request.order_id)
                             .execute(&self.pool)
                             .await?;
-                            self.mark_failed(job_id, request.order_id).await?;
+                            self.retry_or_manual_review(job_id, request.order_id, attempt_count)
+                                .await?;
                         }
                     }
                 } else {
@@ -172,11 +171,13 @@ impl GenerationQueue {
                 }
             }
             Err(GenerationError::QuotaExhausted | GenerationError::ProviderUnavailable) => {
-                self.mark_manual_review(job_id, request.order_id).await?;
+                self.retry_or_manual_review(job_id, request.order_id, attempt_count)
+                    .await?;
             }
             Err(error) => {
                 error!(order_id = %request.order_id, error = %error, "generation failed");
-                self.mark_failed(job_id, request.order_id).await?;
+                self.retry_or_manual_review(job_id, request.order_id, attempt_count)
+                    .await?;
             }
         }
         Ok(())
@@ -187,7 +188,7 @@ impl GenerationQueue {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(
             r#"
-            SELECT gj.id AS job_id, gj.order_id, gj.website_id,
+            SELECT gj.id AS job_id, gj.order_id, gj.website_id, gj.attempt_count,
                    o.build_mode, o.template_id,
                    w.token_ticker, w.token_name, w.contract_address,
                    w.x_url, w.telegram_url, w.logo_asset_path, w.requested_domain
@@ -238,6 +239,50 @@ impl GenerationQueue {
             telegram_url: row.get("telegram_url"),
             logo_asset_path: row.get("logo_asset_path"),
             requested_domain: row.get("requested_domain"),
+            attempt_count: row.get::<i64, _>("attempt_count") + 1,
+        }))
+    }
+
+    async fn deploy_with_retries(
+        &self,
+        deployer: &dyn SiteDeployer,
+        request: &DeploymentRequest,
+        website_id: Uuid,
+    ) -> Result<crate::deployment::DeploymentResult, crate::deployment::DeploymentError> {
+        let mut last_error = None;
+        for attempt in 1..=MAX_JOB_ATTEMPTS {
+            match deployer.deploy(request).await {
+                Ok(result) => return Ok(result),
+                Err(error) => {
+                    error!(
+                        order_id = %request.custom_domain.as_deref().unwrap_or(&request.repo_name),
+                        attempt,
+                        error = %error,
+                        "deployment failed"
+                    );
+                    if let Err(record_error) = db::record_deployment_attempt(
+                        &self.pool,
+                        website_id,
+                        error.stage(),
+                        "failed",
+                        Some(&format!("attempt {attempt}: {error}")),
+                    )
+                    .await
+                    {
+                        error!(error = %record_error, "failed to record deployment retry");
+                    }
+                    if attempt >= MAX_JOB_ATTEMPTS {
+                        return Err(error);
+                    }
+                    last_error = Some(error);
+                    sleep(Duration::from_secs(attempt as u64 * 5)).await;
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            crate::deployment::DeploymentError::CloudflarePages(
+                "deployment failed after retries".to_string(),
+            )
         }))
     }
 
@@ -261,24 +306,33 @@ impl GenerationQueue {
         Ok(())
     }
 
-    async fn mark_failed(&self, job_id: Uuid, order_id: Uuid) -> anyhow::Result<()> {
-        sqlx::query(
-            "UPDATE orders SET site_status = 'failed', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(order_id)
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            r#"
-            UPDATE generation_jobs
-            SET status = 'failed', finished_at = datetime('now'), locked_by = NULL, locked_at = NULL
-            WHERE id = ?
-            "#,
-        )
-        .bind(job_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+    async fn retry_or_manual_review(
+        &self,
+        job_id: Uuid,
+        order_id: Uuid,
+        attempt_count: i64,
+    ) -> anyhow::Result<()> {
+        if attempt_count < MAX_JOB_ATTEMPTS {
+            sqlx::query(
+                "UPDATE orders SET site_status = 'queued', updated_at = datetime('now') WHERE id = ?",
+            )
+            .bind(order_id)
+            .execute(&self.pool)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE generation_jobs
+                SET status = 'queued', finished_at = NULL, locked_by = NULL, locked_at = NULL
+                WHERE id = ?
+                "#,
+            )
+            .bind(job_id)
+            .execute(&self.pool)
+            .await?;
+            return Ok(());
+        }
+
+        self.mark_manual_review(job_id, order_id).await
     }
 }
 
@@ -333,6 +387,7 @@ struct GenerationJobRow {
     telegram_url: String,
     logo_asset_path: String,
     requested_domain: Option<String>,
+    attempt_count: i64,
 }
 
 impl GenerationJobRow {

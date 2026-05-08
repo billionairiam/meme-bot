@@ -15,6 +15,7 @@ use teloxide::{
     },
     utils::client_from_env,
 };
+use tokio::time::{Duration as TokioDuration, sleep};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -28,7 +29,8 @@ use crate::{
     },
     models::{PaymentChain, WebsiteInput},
     payment::{
-        ChainPaymentVerifier, PaymentService, PaymentVerificationError, PaymentVerificationRequest,
+        ChainPaymentVerifier, PaymentService, PaymentVerificationError, PaymentVerificationOutcome,
+        PaymentVerificationRequest, PaymentVerifier,
     },
     validation::{
         validate_contract_address, validate_domain, validate_telegram_url, validate_x_url,
@@ -36,6 +38,8 @@ use crate::{
 };
 
 type Sessions = Arc<Mutex<HashMap<UserId, OrderDraft>>>;
+
+const EXTERNAL_STEP_MAX_ATTEMPTS: usize = 3;
 
 const TEMPLATE_OPTIONS: [TemplateOption; 12] = [
     TemplateOption::new("template_01", "example1.web", 30),
@@ -670,12 +674,7 @@ async fn handle_order_step(
             } else {
                 Box::new(NamecheapRegistrar::new(config.namecheap.clone()))
             };
-            match registrar
-                .quote(&DomainQuoteRequest {
-                    domain: domain.clone(),
-                })
-                .await
-            {
+            match quote_domain_with_retries(registrar.as_ref(), &domain).await {
                 Ok(quote) if quote.available && !quote.is_premium => {
                     let db_user_id = match db::upsert_user(
                         pool,
@@ -749,7 +748,7 @@ async fn handle_order_step(
                     .send_message(
                         msg.chat.id,
                         format!(
-                            "<b>Domain check failed.</b>\n\n{}\n\nPlease send another domain.",
+                            "<b>Domain check failed after retries.</b>\n\n{}\n\nContact admin if this persists.",
                             html_escape(&domain_error_for_user(&error))
                         ),
                     )
@@ -857,7 +856,7 @@ async fn handle_order_step(
                         .payment_expires_at
                         .unwrap_or_else(chrono::Utc::now),
                 };
-                let verification = service.verify_tx(verify_request).await;
+                let verification = verify_payment_with_retries(&service, verify_request).await;
                 if let Err(e) = db::record_payment_attempt(
                     pool,
                     payment_info.id,
@@ -928,7 +927,7 @@ async fn handle_order_step(
                                     warn!(?e, order_id = %order_id, "failed to mark manual review");
                                 }
                                 status_parts.push(
-                                    "Website generation paused until domain issue is resolved."
+                                    "Website generation paused after repeated domain setup failures. Contact admin."
                                         .to_string(),
                                 );
                             } else if let Err(e) =
@@ -1427,19 +1426,12 @@ async fn maybe_purchase_domain_after_tx(
     } else {
         Box::new(NamecheapRegistrar::new(config.namecheap.clone()))
     };
-    match registrar
-        .purchase(&DomainPurchaseRequest {
-            domain: domain.to_string(),
-            years: 1,
-            privacy_enabled: true,
-        })
-        .await
-    {
+    match purchase_domain_with_retries(registrar.as_ref(), domain).await {
         Ok(result) => {
             if let Err(error) = db::record_domain_purchase_success(pool, quote_id, &result).await {
                 warn!(?error, quote_id = %quote_id, "failed to record domain purchase success");
             }
-            let dns_result = setup_cloudflare_dns_after_purchase(config, domain).await;
+            let dns_result = setup_cloudflare_dns_after_purchase_with_retries(config, domain).await;
             let dns_ready = match &dns_result {
                 Ok(zone) => {
                     if let Err(error) = db::record_domain_dns_result(pool, quote_id, Ok(zone)).await
@@ -1487,6 +1479,116 @@ async fn maybe_purchase_domain_after_tx(
             )
         }
     }
+}
+
+async fn verify_payment_with_retries<V>(
+    service: &PaymentService<V>,
+    request: PaymentVerificationRequest,
+) -> Result<PaymentVerificationOutcome, PaymentVerificationError>
+where
+    V: PaymentVerifier,
+{
+    let mut last_error = None;
+    for attempt in 1..=EXTERNAL_STEP_MAX_ATTEMPTS {
+        match service.verify_tx(request.clone()).await {
+            Ok(outcome) => return Ok(outcome),
+            Err(error)
+                if retryable_payment_error(&error) && attempt < EXTERNAL_STEP_MAX_ATTEMPTS =>
+            {
+                last_error = Some(error);
+                sleep(TokioDuration::from_secs(attempt as u64 * 2)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or(PaymentVerificationError::Provider(
+        "payment verification failed after retries".to_string(),
+    )))
+}
+
+fn retryable_payment_error(error: &PaymentVerificationError) -> bool {
+    matches!(error, PaymentVerificationError::Provider(_))
+}
+
+async fn quote_domain_with_retries(
+    registrar: &dyn DomainRegistrar,
+    domain: &str,
+) -> Result<crate::domain::DomainQuote, DomainError> {
+    let request = DomainQuoteRequest {
+        domain: domain.to_string(),
+    };
+    let mut last_error = None;
+    for attempt in 1..=EXTERNAL_STEP_MAX_ATTEMPTS {
+        match registrar.quote(&request).await {
+            Ok(quote) => return Ok(quote),
+            Err(error)
+                if retryable_domain_error(&error) && attempt < EXTERNAL_STEP_MAX_ATTEMPTS =>
+            {
+                warn!(%domain, attempt, error = %error, "domain quote failed; retrying");
+                last_error = Some(error);
+                sleep(TokioDuration::from_secs(attempt as u64 * 2)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| DomainError::Namecheap("domain quote failed after retries".to_string())))
+}
+
+async fn purchase_domain_with_retries(
+    registrar: &dyn DomainRegistrar,
+    domain: &str,
+) -> Result<crate::domain::DomainPurchaseResult, DomainError> {
+    let request = DomainPurchaseRequest {
+        domain: domain.to_string(),
+        years: 1,
+        privacy_enabled: true,
+    };
+    let mut last_error = None;
+    for attempt in 1..=EXTERNAL_STEP_MAX_ATTEMPTS {
+        match registrar.purchase(&request).await {
+            Ok(result) => return Ok(result),
+            Err(error)
+                if retryable_domain_error(&error) && attempt < EXTERNAL_STEP_MAX_ATTEMPTS =>
+            {
+                warn!(%domain, attempt, error = %error, "domain purchase failed; retrying");
+                last_error = Some(error);
+                sleep(TokioDuration::from_secs(attempt as u64 * 3)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        DomainError::Namecheap("domain purchase failed after retries".to_string())
+    }))
+}
+
+async fn setup_cloudflare_dns_after_purchase_with_retries(
+    config: &TelegramUiConfig,
+    domain: &str,
+) -> Result<crate::domain::CloudflareZoneResult, String> {
+    let mut last_error = None;
+    for attempt in 1..=EXTERNAL_STEP_MAX_ATTEMPTS {
+        match setup_cloudflare_dns_after_purchase(config, domain).await {
+            Ok(zone) => return Ok(zone),
+            Err(error) if attempt < EXTERNAL_STEP_MAX_ATTEMPTS => {
+                warn!(%domain, attempt, error = %error, "dns setup failed; retrying");
+                last_error = Some(error);
+                sleep(TokioDuration::from_secs(attempt as u64 * 3)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        "\n<b>DNS setup failed.</b> Repeated attempts failed. Contact admin.".to_string()
+    }))
+}
+
+fn retryable_domain_error(error: &DomainError) -> bool {
+    matches!(
+        error,
+        DomainError::Http(_) | DomainError::Namecheap(_) | DomainError::Cloudflare(_)
+    )
 }
 
 async fn setup_cloudflare_dns_after_purchase(
@@ -1751,7 +1853,9 @@ fn payment_error_for_user(error: &PaymentVerificationError) -> String {
         PaymentVerificationError::OldTransaction => {
             "Transaction is older than this order.".to_string()
         }
-        PaymentVerificationError::Provider(value) => format!("Payment provider error: {value}"),
+        PaymentVerificationError::Provider(value) => {
+            format!("Payment provider error after repeated checks: {value}. Contact admin.")
+        }
     }
 }
 
