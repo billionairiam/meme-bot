@@ -1,9 +1,12 @@
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
+use crate::deployment::DeploymentResult;
+use crate::domain::{CloudflareZoneResult, DomainPurchaseResult, DomainQuote};
 use crate::models::{BuildMode, OrderType, PaymentChain, WebsiteInput};
+use crate::payment::{PaymentVerificationError, PaymentVerificationOutcome};
 
 pub async fn upsert_user(
     pool: &SqlitePool,
@@ -49,6 +52,7 @@ pub async fn create_site_order(
     build_mode: BuildMode,
     template_id: Option<&str>,
     amount_usdt: Decimal,
+    domain_quote_id: Option<Uuid>,
 ) -> anyhow::Result<Uuid> {
     let id = Uuid::new_v4();
     let expires_at = (Utc::now() + Duration::minutes(30)).to_rfc3339();
@@ -56,9 +60,9 @@ pub async fn create_site_order(
         r#"
         INSERT INTO orders (
             id, user_id, order_type, build_mode, template_id, amount_usdt,
-            payment_status, site_status, payment_expires_at
+            payment_status, site_status, payment_expires_at, domain_quote_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', 'collecting_assets', ?)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', 'collecting_assets', ?, ?)
         RETURNING id
         "#,
     )
@@ -69,6 +73,7 @@ pub async fn create_site_order(
     .bind(template_id)
     .bind(amount_usdt.to_string())
     .bind(expires_at)
+    .bind(domain_quote_id)
     .fetch_one(pool)
     .await?;
 
@@ -117,6 +122,188 @@ pub async fn mark_order_paid(
     Ok(())
 }
 
+pub async fn get_order_payment_info(
+    pool: &SqlitePool,
+    order_id: Uuid,
+) -> anyhow::Result<OrderPaymentInfo> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, user_id, amount_usdt, created_at, payment_expires_at, payment_status
+        FROM orders
+        WHERE id = ?
+        "#,
+    )
+    .bind(order_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(OrderPaymentInfo {
+        id: Uuid::parse_str(row.get::<&str, _>("id"))?,
+        user_id: Uuid::parse_str(row.get::<&str, _>("user_id"))?,
+        amount_usdt: Decimal::from_str_exact(row.get::<&str, _>("amount_usdt"))?,
+        created_at: parse_db_datetime(row.get::<&str, _>("created_at"))?,
+        payment_expires_at: row
+            .get::<Option<String>, _>("payment_expires_at")
+            .as_deref()
+            .map(parse_db_datetime)
+            .transpose()?,
+        payment_status: row.get("payment_status"),
+    })
+}
+
+pub async fn tx_hash_already_used(
+    pool: &SqlitePool,
+    chain: PaymentChain,
+    tx_hash: &str,
+) -> anyhow::Result<bool> {
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS count FROM payment_transactions WHERE chain = ? AND tx_hash = ?",
+    )
+    .bind(chain.as_str())
+    .bind(tx_hash)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.get::<i64, _>("count") > 0)
+}
+
+pub async fn record_payment_attempt(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    user_id: Uuid,
+    chain: PaymentChain,
+    tx_hash: &str,
+    result: Result<&PaymentVerificationOutcome, &PaymentVerificationError>,
+) -> anyhow::Result<()> {
+    let id = Uuid::new_v4();
+    let (status, failure_reason, observed_amount, observed_to, confirmations) = match result {
+        Ok(outcome) => (
+            "valid",
+            None,
+            Some(outcome.observed_amount_usdt.to_string()),
+            Some(outcome.observed_to_address.clone()),
+            outcome.confirmations.map(|value| value as i64),
+        ),
+        Err(error) => (
+            match error {
+                PaymentVerificationError::InsufficientConfirmations => "insufficient_confirmations",
+                _ => "invalid",
+            },
+            Some(error.to_string()),
+            None,
+            None,
+            None,
+        ),
+    };
+
+    sqlx::query(
+        r#"
+        INSERT INTO payment_attempts (
+            id, order_id, user_id, chain, tx_hash, status, failure_reason,
+            observed_amount_usdt, observed_to_address, confirmations, checked_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        "#,
+    )
+    .bind(id)
+    .bind(order_id)
+    .bind(user_id)
+    .bind(chain.as_str())
+    .bind(tx_hash)
+    .bind(status)
+    .bind(failure_reason)
+    .bind(observed_amount)
+    .bind(observed_to)
+    .bind(confirmations)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn record_payment_transaction(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    chain: PaymentChain,
+    tx_hash: &str,
+    outcome: &PaymentVerificationOutcome,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO payment_transactions (
+            id, chain, tx_hash, order_id, amount_usdt, to_address, confirmed_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(chain.as_str())
+    .bind(tx_hash)
+    .bind(order_id)
+    .bind(outcome.observed_amount_usdt.to_string())
+    .bind(&outcome.observed_to_address)
+    .bind(outcome.confirmed_at.to_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn confirm_payment_and_mark_paid(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    chain: PaymentChain,
+    tx_hash: &str,
+    outcome: &PaymentVerificationOutcome,
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO payment_transactions (
+            id, chain, tx_hash, order_id, amount_usdt, to_address, confirmed_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(chain.as_str())
+    .bind(tx_hash)
+    .bind(order_id)
+    .bind(outcome.observed_amount_usdt.to_string())
+    .bind(&outcome.observed_to_address)
+    .bind(outcome.confirmed_at.to_rfc3339())
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE orders
+        SET payment_status = 'paid',
+            site_status = CASE
+                WHEN order_type = 'site_fee' THEN 'queued'
+                ELSE site_status
+            END,
+            payment_chain = ?,
+            tx_hash = ?,
+            paid_at = datetime('now'),
+            updated_at = datetime('now')
+        WHERE id = ? AND payment_status <> 'paid'
+        "#,
+    )
+    .bind(chain.as_str())
+    .bind(tx_hash)
+    .bind(order_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE domain_quotes SET status = 'paid', updated_at = datetime('now') WHERE id = (SELECT domain_quote_id FROM orders WHERE id = ?)",
+    )
+    .bind(order_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn create_website(
     pool: &SqlitePool,
     user_id: Uuid,
@@ -148,6 +335,230 @@ pub async fn create_website(
     .await?;
 
     Ok(Uuid::parse_str(row.get::<&str, _>("id"))?)
+}
+
+pub async fn record_domain_quote(
+    pool: &SqlitePool,
+    user_id: Uuid,
+    quote: &DomainQuote,
+    quoted_amount_usdt: Decimal,
+) -> anyhow::Result<Uuid> {
+    let id = Uuid::new_v4();
+    let expires_at = (Utc::now() + Duration::minutes(30)).to_rfc3339();
+    sqlx::query(
+        r#"
+        INSERT INTO domain_quotes (
+            id, user_id, domain, tld, available, is_premium,
+            namecheap_price_usd, quoted_amount_usdt, expires_at, status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'quoted')
+        "#,
+    )
+    .bind(id)
+    .bind(user_id)
+    .bind(&quote.domain)
+    .bind(&quote.tld)
+    .bind(quote.available)
+    .bind(quote.is_premium)
+    .bind(quote.price_usd.to_string())
+    .bind(quoted_amount_usdt.to_string())
+    .bind(expires_at)
+    .execute(pool)
+    .await?;
+    Ok(id)
+}
+
+pub async fn attach_quote_website(
+    pool: &SqlitePool,
+    quote_id: Uuid,
+    website_id: Uuid,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE domain_quotes SET website_id = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(website_id)
+    .bind(quote_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn record_domain_purchase_started(
+    pool: &SqlitePool,
+    quote_id: Uuid,
+) -> anyhow::Result<Uuid> {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO domain_registrations (id, domain_quote_id, registration_status, nameserver_status)
+        VALUES (?, ?, 'pending', 'pending')
+        ON CONFLICT(domain_quote_id) DO UPDATE SET
+            registration_status = 'pending',
+            updated_at = datetime('now')
+        "#,
+    )
+    .bind(id)
+    .bind(quote_id)
+    .execute(pool)
+    .await?;
+    Ok(id)
+}
+
+pub async fn record_domain_purchase_success(
+    pool: &SqlitePool,
+    quote_id: Uuid,
+    purchase: &DomainPurchaseResult,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE domain_registrations
+        SET namecheap_order_id = ?,
+            namecheap_transaction_id = ?,
+            registration_status = 'registered',
+            updated_at = datetime('now')
+        WHERE domain_quote_id = ?
+        "#,
+    )
+    .bind(&purchase.namecheap_order_id)
+    .bind(&purchase.namecheap_transaction_id)
+    .bind(quote_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE domain_quotes SET status = 'purchased', updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(quote_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn record_domain_dns_result(
+    pool: &SqlitePool,
+    quote_id: Uuid,
+    result: Result<&CloudflareZoneResult, &str>,
+) -> anyhow::Result<()> {
+    match result {
+        Ok(zone) => {
+            sqlx::query(
+                r#"
+                UPDATE domain_registrations
+                SET cloudflare_zone_id = ?,
+                    nameserver_status = 'updated',
+                    updated_at = datetime('now')
+                WHERE domain_quote_id = ?
+                "#,
+            )
+            .bind(&zone.zone_id)
+            .bind(quote_id)
+            .execute(pool)
+            .await?;
+        }
+        Err(_) => {
+            sqlx::query(
+                r#"
+                UPDATE domain_registrations
+                SET nameserver_status = 'failed',
+                    registration_status = 'needs_manual_review',
+                    updated_at = datetime('now')
+                WHERE domain_quote_id = ?
+                "#,
+            )
+            .bind(quote_id)
+            .execute(pool)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn mark_domain_purchase_failed(pool: &SqlitePool, quote_id: Uuid) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE domain_registrations
+        SET registration_status = 'failed', updated_at = datetime('now')
+        WHERE domain_quote_id = ?
+        "#,
+    )
+    .bind(quote_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE domain_quotes SET status = 'failed', updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(quote_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn mark_order_manual_review(pool: &SqlitePool, order_id: Uuid) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE orders SET site_status = 'needs_manual_review', updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(order_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn update_website_deployment_success(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    deployment: &DeploymentResult,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE websites
+        SET github_owner = ?,
+            github_repo_name = ?,
+            github_repo_url = ?,
+            github_commit_sha = ?,
+            cloudflare_project_name = ?,
+            cloudflare_pages_url = ?,
+            custom_domain = ?,
+            deployment_status = 'live',
+            updated_at = datetime('now')
+        WHERE order_id = ?
+        "#,
+    )
+    .bind(&deployment.github_owner)
+    .bind(&deployment.github_repo_name)
+    .bind(&deployment.github_repo_url)
+    .bind(&deployment.github_commit_sha)
+    .bind(&deployment.cloudflare_project_name)
+    .bind(&deployment.cloudflare_pages_url)
+    .bind(&deployment.custom_domain)
+    .bind(order_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn record_deployment_attempt(
+    pool: &SqlitePool,
+    website_id: Uuid,
+    stage: &str,
+    status: &str,
+    error_message: Option<&str>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO deployment_attempts (
+            id, website_id, stage, status, error_message, finished_at
+        )
+        VALUES (?, ?, ?, ?, ?, CASE WHEN ? <> 'running' THEN datetime('now') ELSE NULL END)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(website_id)
+    .bind(stage)
+    .bind(status)
+    .bind(error_message)
+    .bind(status)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 pub async fn enqueue_generation_job(
@@ -214,8 +625,7 @@ pub async fn get_user_order(
     Ok(row.map(|r| UserOrderStatus {
         payment_status: r.get("payment_status"),
         site_status: r.get("site_status"),
-        amount_usdt: Decimal::from_str_exact(r.get::<&str, _>("amount_usdt"))
-            .unwrap_or_default(),
+        amount_usdt: Decimal::from_str_exact(r.get::<&str, _>("amount_usdt")).unwrap_or_default(),
         payment_chain: r.get("payment_chain"),
         requested_domain: r.get("requested_domain"),
     }))
@@ -228,4 +638,22 @@ pub struct UserOrderStatus {
     pub amount_usdt: rust_decimal::Decimal,
     pub payment_chain: Option<String>,
     pub requested_domain: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrderPaymentInfo {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub amount_usdt: Decimal,
+    pub created_at: DateTime<Utc>,
+    pub payment_expires_at: Option<DateTime<Utc>>,
+    pub payment_status: String,
+}
+
+fn parse_db_datetime(value: &str) -> anyhow::Result<DateTime<Utc>> {
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
+        return Ok(parsed.with_timezone(&Utc));
+    }
+    let naive = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")?;
+    Ok(DateTime::from_naive_utc_and_offset(naive, Utc))
 }

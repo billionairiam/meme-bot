@@ -374,9 +374,7 @@ async fn map_http_error(response: reqwest::Response) -> DomainError {
             "missing_config" => DomainError::MissingConfig(api_err.message),
             "namecheap_error" => DomainError::Namecheap(api_err.message),
             "cloudflare_error" => DomainError::Cloudflare(api_err.message),
-            "upstream_http_error" | "upstream_parse_error" => {
-                DomainError::Http(api_err.message)
-            }
+            "upstream_http_error" | "upstream_parse_error" => DomainError::Http(api_err.message),
             _ => DomainError::Http(format!("{status}: {}", api_err.message)),
         },
         Err(_) => DomainError::Http(format!("{status}: {body}")),
@@ -681,11 +679,8 @@ pub trait DnsProvisioner: Send + Sync {
         nameservers: &[String],
     ) -> Result<(), DomainError>;
 
-    async fn set_dns_records(
-        &self,
-        domain: &str,
-        records: &[DnsRecord],
-    ) -> Result<(), DomainError>;
+    async fn set_dns_records(&self, domain: &str, records: &[DnsRecord])
+    -> Result<(), DomainError>;
 }
 
 // ---- DryRunDnsProvisioner ----
@@ -838,7 +833,10 @@ impl DnsProvisioner for NamecheapDnsProvisioner {
         for (i, record) in records.iter().enumerate() {
             let n = i + 1;
             params.push((format!("HostName{n}"), record.host_name.clone()));
-            params.push((format!("RecordType{n}"), record.record_type.as_namecheap_str().to_string()));
+            params.push((
+                format!("RecordType{n}"),
+                record.record_type.as_namecheap_str().to_string(),
+            ));
             params.push((format!("Address{n}"), record.address.clone()));
             if let Some(ttl) = record.ttl {
                 params.push((format!("TTL{n}"), ttl.to_string()));
@@ -889,12 +887,10 @@ impl DnsProvisioner for CloudflareDnsProvisioner {
     async fn create_zone(&self, domain: &str) -> Result<CloudflareZoneResult, DomainError> {
         self.validate_config()?;
 
-        let url = format!(
-            "https://api.cloudflare.com/client/v4/zones"
-        );
+        let url = "https://api.cloudflare.com/client/v4/zones";
         let response = self
             .client
-            .post(&url)
+            .post(url)
             .bearer_auth(&self.api_token)
             .json(&serde_json::json!({
                 "name": domain,
@@ -923,7 +919,9 @@ impl DnsProvisioner for CloudflareDnsProvisioner {
                 .get("errors")
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "unknown error".to_string());
-            return Err(DomainError::Cloudflare(format!("zone creation failed: {errors}")));
+            return Err(DomainError::Cloudflare(format!(
+                "zone creation failed: {errors}"
+            )));
         }
 
         let result = json
@@ -946,7 +944,10 @@ impl DnsProvisioner for CloudflareDnsProvisioner {
             })
             .unwrap_or_default();
 
-        Ok(CloudflareZoneResult { zone_id, nameservers })
+        Ok(CloudflareZoneResult {
+            zone_id,
+            nameservers,
+        })
     }
 
     async fn set_namecheap_nameservers(
@@ -955,7 +956,8 @@ impl DnsProvisioner for CloudflareDnsProvisioner {
         _nameservers: &[String],
     ) -> Result<(), DomainError> {
         Err(DomainError::Cloudflare(
-            "set_namecheap_nameservers not supported by Cloudflare; use NamecheapDnsProvisioner".to_string(),
+            "set_namecheap_nameservers not supported by Cloudflare; use NamecheapDnsProvisioner"
+                .to_string(),
         ))
     }
 
@@ -1071,26 +1073,48 @@ mod tests {
 
     impl MockDomainRegistrar {
         fn available(price_usd: Decimal) -> Self {
-            Self { available: true, is_premium: false, price_usd, purchase_fails: false }
+            Self {
+                available: true,
+                is_premium: false,
+                price_usd,
+                purchase_fails: false,
+            }
         }
 
         fn unavailable() -> Self {
-            Self { available: false, is_premium: false, price_usd: Decimal::ZERO, purchase_fails: false }
+            Self {
+                available: false,
+                is_premium: false,
+                price_usd: Decimal::ZERO,
+                purchase_fails: false,
+            }
         }
 
         fn premium(price_usd: Decimal) -> Self {
-            Self { available: true, is_premium: true, price_usd, purchase_fails: false }
+            Self {
+                available: true,
+                is_premium: true,
+                price_usd,
+                purchase_fails: false,
+            }
         }
 
         fn purchase_failing(price_usd: Decimal) -> Self {
-            Self { available: true, is_premium: false, price_usd, purchase_fails: true }
+            Self {
+                available: true,
+                is_premium: false,
+                price_usd,
+                purchase_fails: true,
+            }
         }
     }
 
     #[async_trait]
     impl DomainRegistrar for MockDomainRegistrar {
         async fn quote(&self, request: &DomainQuoteRequest) -> Result<DomainQuote, DomainError> {
-            let tld = request.domain.rsplit_once('.')
+            let tld = request
+                .domain
+                .rsplit_once('.')
                 .map(|(_, tld)| tld.to_ascii_lowercase())
                 .ok_or(DomainError::UnsupportedTld)?;
             Ok(DomainQuote {
@@ -1103,7 +1127,10 @@ mod tests {
             })
         }
 
-        async fn purchase(&self, _request: &DomainPurchaseRequest) -> Result<DomainPurchaseResult, DomainError> {
+        async fn purchase(
+            &self,
+            _request: &DomainPurchaseRequest,
+        ) -> Result<DomainPurchaseResult, DomainError> {
             if self.purchase_fails {
                 return Err(DomainError::Namecheap("purchase failed".to_string()));
             }
@@ -1125,15 +1152,25 @@ mod tests {
     #[tokio::test]
     async fn full_quote_purchase_flow_available_domain() {
         let registrar = MockDomainRegistrar::available(Decimal::from_str("9.99").unwrap());
-        let quote = registrar.quote(&DomainQuoteRequest { domain: "mytoken.xyz".to_string() }).await.unwrap();
+        let quote = registrar
+            .quote(&DomainQuoteRequest {
+                domain: "mytoken.xyz".to_string(),
+            })
+            .await
+            .unwrap();
         assert!(quote.available);
         assert!(!quote.is_premium);
         assert_eq!(quote.price_usd, Decimal::from_str("9.99").unwrap());
         assert_eq!(quote.tld, "xyz");
 
-        let purchase = registrar.purchase(&DomainPurchaseRequest {
-            domain: "mytoken.xyz".to_string(), years: 1, privacy_enabled: true,
-        }).await.unwrap();
+        let purchase = registrar
+            .purchase(&DomainPurchaseRequest {
+                domain: "mytoken.xyz".to_string(),
+                years: 1,
+                privacy_enabled: true,
+            })
+            .await
+            .unwrap();
         assert_eq!(purchase.namecheap_order_id, "mock-order-1");
         assert_eq!(purchase.namecheap_transaction_id, "mock-txn-1");
     }
@@ -1141,7 +1178,12 @@ mod tests {
     #[tokio::test]
     async fn quote_unavailable_domain() {
         let registrar = MockDomainRegistrar::unavailable();
-        let quote = registrar.quote(&DomainQuoteRequest { domain: "taken.xyz".to_string() }).await.unwrap();
+        let quote = registrar
+            .quote(&DomainQuoteRequest {
+                domain: "taken.xyz".to_string(),
+            })
+            .await
+            .unwrap();
         assert!(!quote.available);
         assert_eq!(quote.price_usd, Decimal::ZERO);
     }
@@ -1149,7 +1191,12 @@ mod tests {
     #[tokio::test]
     async fn quote_premium_domain_rejected() {
         let registrar = MockDomainRegistrar::premium(Decimal::from_str("2500.00").unwrap());
-        let quote = registrar.quote(&DomainQuoteRequest { domain: "premium.xyz".to_string() }).await.unwrap();
+        let quote = registrar
+            .quote(&DomainQuoteRequest {
+                domain: "premium.xyz".to_string(),
+            })
+            .await
+            .unwrap();
         assert!(quote.available);
         assert!(quote.is_premium);
         assert_eq!(quote.price_usd, Decimal::from_str("2500.00").unwrap());
@@ -1158,27 +1205,42 @@ mod tests {
     #[tokio::test]
     async fn purchase_unavailable_domain_errors() {
         let registrar = MockDomainRegistrar::unavailable();
-        let err = registrar.purchase(&DomainPurchaseRequest {
-            domain: "taken.xyz".to_string(), years: 1, privacy_enabled: true,
-        }).await.unwrap_err();
+        let err = registrar
+            .purchase(&DomainPurchaseRequest {
+                domain: "taken.xyz".to_string(),
+                years: 1,
+                privacy_enabled: true,
+            })
+            .await
+            .unwrap_err();
         assert!(matches!(err, DomainError::Unavailable));
     }
 
     #[tokio::test]
     async fn purchase_premium_domain_errors() {
         let registrar = MockDomainRegistrar::premium(Decimal::from_str("2500.00").unwrap());
-        let err = registrar.purchase(&DomainPurchaseRequest {
-            domain: "premium.xyz".to_string(), years: 1, privacy_enabled: true,
-        }).await.unwrap_err();
+        let err = registrar
+            .purchase(&DomainPurchaseRequest {
+                domain: "premium.xyz".to_string(),
+                years: 1,
+                privacy_enabled: true,
+            })
+            .await
+            .unwrap_err();
         assert!(matches!(err, DomainError::PremiumRejected));
     }
 
     #[tokio::test]
     async fn purchase_failure_propagates_error() {
         let registrar = MockDomainRegistrar::purchase_failing(Decimal::from_str("9.99").unwrap());
-        let err = registrar.purchase(&DomainPurchaseRequest {
-            domain: "ok.xyz".to_string(), years: 1, privacy_enabled: true,
-        }).await.unwrap_err();
+        let err = registrar
+            .purchase(&DomainPurchaseRequest {
+                domain: "ok.xyz".to_string(),
+                years: 1,
+                privacy_enabled: true,
+            })
+            .await
+            .unwrap_err();
         assert!(matches!(err, DomainError::Namecheap(_)));
     }
 
@@ -1297,7 +1359,10 @@ mod tests {
     #[test]
     fn detects_namecheap_error_in_response() {
         let xml = r#"<ApiResponse Status="ERROR"><CommandResponse><Error>Domain not available</Error></CommandResponse></ApiResponse>"#;
-        assert_eq!(first_tag_text(xml, "Error").unwrap(), "Domain not available");
+        assert_eq!(
+            first_tag_text(xml, "Error").unwrap(),
+            "Domain not available"
+        );
     }
 
     #[test]
@@ -1349,16 +1414,25 @@ mod tests {
         let zone = provisioner.create_zone("pepe.xyz").await.unwrap();
         assert!(zone.zone_id.contains("pepe.xyz"));
         assert_eq!(zone.nameservers.len(), 2);
-        assert!(zone.nameservers.iter().all(|ns| ns.ends_with(".cloudflare.com")));
+        assert!(
+            zone.nameservers
+                .iter()
+                .all(|ns| ns.ends_with(".cloudflare.com"))
+        );
     }
 
     #[tokio::test]
     async fn dry_run_set_nameservers_succeeds() {
         let provisioner = DryRunDnsProvisioner;
-        let result = provisioner.set_namecheap_nameservers(
-            "pepe.xyz",
-            &["ns1.cloudflare.com".to_string(), "ns2.cloudflare.com".to_string()],
-        ).await;
+        let result = provisioner
+            .set_namecheap_nameservers(
+                "pepe.xyz",
+                &[
+                    "ns1.cloudflare.com".to_string(),
+                    "ns2.cloudflare.com".to_string(),
+                ],
+            )
+            .await;
         assert!(result.is_ok());
     }
 
@@ -1443,7 +1517,8 @@ mod tests {
         let api_key = std::env::var("NAMECHEAP_API_KEY").ok()?;
         let username = std::env::var("NAMECHEAP_USERNAME").ok()?;
         let client_ip = std::env::var("NAMECHEAP_CLIENT_IP").ok()?;
-        if api_user.is_empty() || api_key.is_empty() || username.is_empty() || client_ip.is_empty() {
+        if api_user.is_empty() || api_key.is_empty() || username.is_empty() || client_ip.is_empty()
+        {
             return None;
         }
         Some(NamecheapConfig {
@@ -1480,7 +1555,9 @@ mod tests {
         let config = sandbox_config().expect("Namecheap API credentials not set in env");
         let registrar = NamecheapRegistrar::new(config);
         let quote = registrar
-            .quote(&DomainQuoteRequest { domain: "test-meme-bot-2026.xyz".to_string() })
+            .quote(&DomainQuoteRequest {
+                domain: "test-meme-bot-2026.xyz".to_string(),
+            })
             .await
             .expect("quote call failed");
         assert!(quote.available, "expected domain to be available");
@@ -1495,7 +1572,9 @@ mod tests {
         let config = sandbox_config().expect("Namecheap API credentials not set in env");
         let registrar = NamecheapRegistrar::new(config);
         let quote = registrar
-            .quote(&DomainQuoteRequest { domain: "test-meme-bot-2026.com".to_string() })
+            .quote(&DomainQuoteRequest {
+                domain: "test-meme-bot-2026.com".to_string(),
+            })
             .await
             .expect("quote call failed");
         assert!(quote.available);
@@ -1515,7 +1594,9 @@ mod tests {
             ("test-meme.fun", "fun"),
         ] {
             let quote = registrar
-                .quote(&DomainQuoteRequest { domain: domain.to_string() })
+                .quote(&DomainQuoteRequest {
+                    domain: domain.to_string(),
+                })
                 .await
                 .expect("quote call failed");
             assert!(quote.available, "expected {domain} available");
@@ -1530,7 +1611,9 @@ mod tests {
         let config = sandbox_config().expect("Namecheap API credentials not set in env");
         let registrar = NamecheapRegistrar::new(config);
         let err = registrar
-            .quote(&DomainQuoteRequest { domain: "test.page".to_string() })
+            .quote(&DomainQuoteRequest {
+                domain: "test.page".to_string(),
+            })
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::UnsupportedTld));
@@ -1550,7 +1633,9 @@ mod tests {
         };
         let registrar = NamecheapRegistrar::new(config);
         let err = registrar
-            .quote(&DomainQuoteRequest { domain: "test.xyz".to_string() })
+            .quote(&DomainQuoteRequest {
+                domain: "test.xyz".to_string(),
+            })
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::MissingConfig(_)));
@@ -1720,7 +1805,11 @@ mod tests {
             Ok(zone) => {
                 assert!(!zone.zone_id.is_empty());
                 assert!(!zone.nameservers.is_empty());
-                assert!(zone.nameservers.iter().any(|ns| ns.contains("cloudflare.com")));
+                assert!(
+                    zone.nameservers
+                        .iter()
+                        .any(|ns| ns.contains("cloudflare.com"))
+                );
             }
             Err(DomainError::Cloudflare(ref msg)) if msg.contains("already exists") => {
                 eprintln!("zone already exists on Cloudflare");
@@ -1749,15 +1838,12 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn real_full_dns_flow_cloudflare_zone_then_namecheap_nameservers() {
-        let cf_provisioner = cloudflare_provisioner()
-            .expect("Cloudflare credentials not set");
+        let cf_provisioner = cloudflare_provisioner().expect("Cloudflare credentials not set");
         let nc_config = sandbox_config().expect("Namecheap API credentials not set in env");
         let nc_provisioner = NamecheapDnsProvisioner::new(nc_config);
 
         // Step 1: create zone on Cloudflare, get assigned nameservers
-        let zone = cf_provisioner
-            .create_zone("test-meme-fullflow.xyz")
-            .await;
+        let zone = cf_provisioner.create_zone("test-meme-fullflow.xyz").await;
         let nameservers = match zone {
             Ok(zone) => {
                 assert!(!zone.zone_id.is_empty());

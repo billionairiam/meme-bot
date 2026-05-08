@@ -20,8 +20,11 @@ pub struct DeploymentRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeploymentResult {
+    pub github_owner: String,
+    pub github_repo_name: String,
     pub github_repo_url: String,
     pub github_commit_sha: String,
+    pub cloudflare_project_name: String,
     pub cloudflare_pages_url: String,
     pub custom_domain: Option<String>,
 }
@@ -38,6 +41,18 @@ pub enum DeploymentError {
     CloudflarePages(String),
     #[error("custom domain bind failed: {0}")]
     DomainBind(String),
+}
+
+impl DeploymentError {
+    pub fn stage(&self) -> &'static str {
+        match self {
+            Self::GithubCreate(_) => "github_create",
+            Self::GitPush(_) => "git_push",
+            Self::CloudflarePages(_) => "pages_create",
+            Self::DomainBind(_) => "domain_bind",
+            Self::MissingConfig(_) => "pages_deploy",
+        }
+    }
 }
 
 #[async_trait]
@@ -166,6 +181,45 @@ impl SiteDeployer for CloudflarePagesDeployer {
         &self,
         request: &DeploymentRequest,
     ) -> Result<DeploymentResult, DeploymentError> {
+        if !request.github_token.trim().is_empty() && !request.repo_owner.trim().is_empty() {
+            self.validate_cloudflare_config()?;
+            ensure_github_repo(
+                &self.client,
+                &request.repo_owner,
+                &request.repo_name,
+                &request.github_token,
+            )
+            .await?;
+            push_site_to_github(request).await?;
+            self.ensure_git_project(
+                &request.cloudflare_project_name,
+                &request.production_branch,
+                &request.repo_owner,
+                &request.repo_name,
+            )
+            .await?;
+            if let Some(domain) = request.custom_domain.as_deref() {
+                self.bind_custom_domain(&request.cloudflare_project_name, domain)
+                    .await?;
+            }
+            let commit_sha = git_output(&request.site_dir, &["rev-parse", "HEAD"]).await?;
+            return Ok(DeploymentResult {
+                github_owner: request.repo_owner.clone(),
+                github_repo_name: request.repo_name.clone(),
+                github_repo_url: format!(
+                    "https://github.com/{}/{}",
+                    request.repo_owner, request.repo_name
+                ),
+                github_commit_sha: commit_sha.trim().to_string(),
+                cloudflare_project_name: request.cloudflare_project_name.clone(),
+                cloudflare_pages_url: format!(
+                    "https://{}.pages.dev",
+                    request.cloudflare_project_name
+                ),
+                custom_domain: request.custom_domain.clone(),
+            });
+        }
+
         self.validate_config()?;
         self.ensure_project(&request.cloudflare_project_name, &request.production_branch)
             .await?;
@@ -198,11 +252,79 @@ impl SiteDeployer for CloudflarePagesDeployer {
         }
 
         Ok(DeploymentResult {
+            github_owner: request.repo_owner.clone(),
+            github_repo_name: request.repo_name.clone(),
             github_repo_url: request.repo_owner.clone(),
             github_commit_sha: "direct-upload".to_string(),
+            cloudflare_project_name: request.cloudflare_project_name.clone(),
             cloudflare_pages_url: format!("https://{}.pages.dev", request.cloudflare_project_name),
             custom_domain: request.custom_domain.clone(),
         })
+    }
+}
+
+impl CloudflarePagesDeployer {
+    fn validate_cloudflare_config(&self) -> Result<(), DeploymentError> {
+        let missing = [
+            ("CLOUDFLARE_ACCOUNT_ID", &self.account_id),
+            ("CLOUDFLARE_API_TOKEN", &self.api_token),
+        ]
+        .iter()
+        .filter_map(|(name, value)| value.trim().is_empty().then_some(*name))
+        .collect::<Vec<_>>();
+
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(DeploymentError::MissingConfig(missing.join(", ")))
+        }
+    }
+
+    async fn ensure_git_project(
+        &self,
+        project_name: &str,
+        branch: &str,
+        github_owner: &str,
+        github_repo: &str,
+    ) -> Result<(), DeploymentError> {
+        let get_response = self
+            .client
+            .get(self.project_url(project_name))
+            .bearer_auth(&self.api_token)
+            .send()
+            .await
+            .map_err(|error| DeploymentError::CloudflarePages(error.to_string()))?;
+        if get_response.status().is_success() {
+            return Ok(());
+        }
+
+        let url = format!(
+            "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects",
+            self.account_id
+        );
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(&self.api_token)
+            .json(&json!({
+                "name": project_name,
+                "production_branch": branch,
+                "source": {
+                    "type": "github",
+                    "config": {
+                        "owner": github_owner,
+                        "repo_name": github_repo,
+                        "production_branch": branch,
+                        "pr_comments_enabled": false,
+                        "deployments_enabled": true
+                    }
+                }
+            }))
+            .send()
+            .await
+            .map_err(|error| DeploymentError::CloudflarePages(error.to_string()))?;
+
+        ensure_cloudflare_success(response, DeploymentError::CloudflarePages).await
     }
 }
 
@@ -252,43 +374,26 @@ impl SiteDeployer for GitCliCloudflareDeployer {
         &self,
         request: &DeploymentRequest,
     ) -> Result<DeploymentResult, DeploymentError> {
-        let repo_url = format!(
-            "https://github.com/{}/{}.git",
-            request.repo_owner, request.repo_name
-        );
-        let authed_repo_url = format!(
-            "https://x-access-token:{}@github.com/{}/{}.git",
-            request.github_token, request.repo_owner, request.repo_name
-        );
-
-        run_git(&request.site_dir, &["init"]).await?;
-        run_git(
-            &request.site_dir,
-            &["checkout", "-B", &request.production_branch],
+        let client = Client::new();
+        ensure_github_repo(
+            &client,
+            &request.repo_owner,
+            &request.repo_name,
+            &request.github_token,
         )
         .await?;
-        run_git(&request.site_dir, &["add", "."]).await?;
-        run_git(
-            &request.site_dir,
-            &["commit", "-m", "Initial generated website"],
-        )
-        .await?;
-        run_git(
-            &request.site_dir,
-            &["remote", "add", "origin", &authed_repo_url],
-        )
-        .await?;
-        run_git(
-            &request.site_dir,
-            &["push", "-u", "origin", &request.production_branch],
-        )
-        .await?;
-
+        push_site_to_github(request).await?;
         let commit_sha = git_output(&request.site_dir, &["rev-parse", "HEAD"]).await?;
 
         Ok(DeploymentResult {
-            github_repo_url: repo_url,
+            github_owner: request.repo_owner.clone(),
+            github_repo_name: request.repo_name.clone(),
+            github_repo_url: format!(
+                "https://github.com/{}/{}.git",
+                request.repo_owner, request.repo_name
+            ),
             github_commit_sha: commit_sha.trim().to_string(),
+            cloudflare_project_name: request.cloudflare_project_name.clone(),
             cloudflare_pages_url: format!("https://{}.pages.dev", request.cloudflare_project_name),
             custom_domain: request.custom_domain.clone(),
         })
@@ -314,6 +419,30 @@ async fn run_git(dir: impl AsRef<Path>, args: &[&str]) -> Result<(), DeploymentE
     }
 }
 
+async fn run_git_allow_nothing_to_commit(
+    dir: impl AsRef<Path>,
+    args: &[&str],
+) -> Result<(), DeploymentError> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|error| DeploymentError::GitPush(error.to_string()))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("nothing to commit") {
+        Ok(())
+    } else {
+        Err(DeploymentError::GitPush(stderr.to_string()))
+    }
+}
+
 async fn git_output(dir: impl AsRef<Path>, args: &[&str]) -> Result<String, DeploymentError> {
     let output = Command::new("git")
         .args(args)
@@ -333,6 +462,151 @@ async fn git_output(dir: impl AsRef<Path>, args: &[&str]) -> Result<String, Depl
     }
 }
 
+async fn ensure_github_repo(
+    client: &Client,
+    owner: &str,
+    repo: &str,
+    token: &str,
+) -> Result<(), DeploymentError> {
+    if owner.trim().is_empty() || repo.trim().is_empty() || token.trim().is_empty() {
+        return Err(DeploymentError::MissingConfig(
+            "GITHUB_OWNER, generated repo name, and GITHUB_TOKEN".to_string(),
+        ));
+    }
+
+    let get_url = format!("https://api.github.com/repos/{owner}/{repo}");
+    let get_response = github_request(client.get(&get_url), token)
+        .send()
+        .await
+        .map_err(|error| DeploymentError::GithubCreate(error.to_string()))?;
+    if get_response.status().is_success() {
+        return Ok(());
+    }
+    if get_response.status() != StatusCode::NOT_FOUND {
+        let status = get_response.status();
+        let body = get_response.text().await.unwrap_or_default();
+        return Err(DeploymentError::GithubCreate(format!("{status}: {body}")));
+    }
+
+    let body = json!({
+        "name": repo,
+        "private": false,
+        "auto_init": false,
+    });
+    let org_url = format!("https://api.github.com/orgs/{owner}/repos");
+    let org_response = github_request(client.post(org_url), token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| DeploymentError::GithubCreate(error.to_string()))?;
+    if org_response.status().is_success() {
+        return Ok(());
+    }
+
+    let org_status = org_response.status();
+    let org_body = org_response.text().await.unwrap_or_default();
+    let login = github_authenticated_login(client, token).await?;
+    if !login.eq_ignore_ascii_case(owner) {
+        return Err(DeploymentError::GithubCreate(format!(
+            "cannot create repo for owner {owner}; token user is {login} and org create failed: {org_status}: {org_body}"
+        )));
+    }
+
+    let user_response = github_request(client.post("https://api.github.com/user/repos"), token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| DeploymentError::GithubCreate(error.to_string()))?;
+    if user_response.status().is_success() {
+        Ok(())
+    } else {
+        let user_status = user_response.status();
+        let user_body = user_response.text().await.unwrap_or_default();
+        Err(DeploymentError::GithubCreate(format!(
+            "org repo create failed: {org_status}: {org_body}; user repo create failed: {user_status}: {user_body}"
+        )))
+    }
+}
+
+fn github_request(builder: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
+    builder
+        .bearer_auth(token)
+        .header("User-Agent", "meme-bot")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+}
+
+async fn github_authenticated_login(
+    client: &Client,
+    token: &str,
+) -> Result<String, DeploymentError> {
+    let response = github_request(client.get("https://api.github.com/user"), token)
+        .send()
+        .await
+        .map_err(|error| DeploymentError::GithubCreate(error.to_string()))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| DeploymentError::GithubCreate(error.to_string()))?;
+    if !status.is_success() {
+        return Err(DeploymentError::GithubCreate(format!("{status}: {body}")));
+    }
+    serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("login")
+                .and_then(|login| login.as_str())
+                .map(String::from)
+        })
+        .ok_or_else(|| DeploymentError::GithubCreate("missing authenticated login".to_string()))
+}
+
+async fn push_site_to_github(request: &DeploymentRequest) -> Result<(), DeploymentError> {
+    let authed_repo_url = format!(
+        "https://x-access-token:{}@github.com/{}/{}.git",
+        request.github_token, request.repo_owner, request.repo_name
+    );
+
+    run_git(&request.site_dir, &["init"]).await?;
+    run_git(
+        &request.site_dir,
+        &["config", "user.email", "bot@mem-bot.local"],
+    )
+    .await?;
+    run_git(&request.site_dir, &["config", "user.name", "Meme Bot"]).await?;
+    run_git(
+        &request.site_dir,
+        &["checkout", "-B", &request.production_branch],
+    )
+    .await?;
+    run_git(&request.site_dir, &["add", "."]).await?;
+    run_git_allow_nothing_to_commit(
+        &request.site_dir,
+        &["commit", "-m", "Deploy generated website"],
+    )
+    .await?;
+    if run_git(
+        &request.site_dir,
+        &["remote", "set-url", "origin", &authed_repo_url],
+    )
+    .await
+    .is_err()
+    {
+        run_git(
+            &request.site_dir,
+            &["remote", "add", "origin", &authed_repo_url],
+        )
+        .await?;
+    }
+    run_git(
+        &request.site_dir,
+        &["push", "-u", "origin", &request.production_branch],
+    )
+    .await
+}
+
 pub struct DryRunDeployer;
 
 #[async_trait]
@@ -342,11 +616,14 @@ impl SiteDeployer for DryRunDeployer {
         request: &DeploymentRequest,
     ) -> Result<DeploymentResult, DeploymentError> {
         Ok(DeploymentResult {
+            github_owner: request.repo_owner.clone(),
+            github_repo_name: request.repo_name.clone(),
             github_repo_url: format!(
                 "https://github.com/{}/{}",
                 request.repo_owner, request.repo_name
             ),
             github_commit_sha: "dry-run".to_string(),
+            cloudflare_project_name: request.cloudflare_project_name.clone(),
             cloudflare_pages_url: format!("https://{}.pages.dev", request.cloudflare_project_name),
             custom_domain: request.custom_domain.clone(),
         })
@@ -384,6 +661,16 @@ impl SiteDeployer for HttpClientPagesDeployer {
         &self,
         request: &DeploymentRequest,
     ) -> Result<DeploymentResult, DeploymentError> {
+        ensure_github_repo(
+            &self.client,
+            &request.repo_owner,
+            &request.repo_name,
+            &request.github_token,
+        )
+        .await?;
+        push_site_to_github(request).await?;
+        let commit_sha = git_output(&request.site_dir, &["rev-parse", "HEAD"]).await?;
+
         let response = self
             .client
             .post(format!("{}/api/v1/pages/deploy", self.base_url))
@@ -408,26 +695,23 @@ impl SiteDeployer for HttpClientPagesDeployer {
 
         if status.is_success() {
             let deploy_response: PagesDeployResponse = serde_json::from_str(&body)
-                .map_err(|e| {
-                    DeploymentError::CloudflarePages(format!("parse response: {e}"))
-                })?;
+                .map_err(|e| DeploymentError::CloudflarePages(format!("parse response: {e}")))?;
             Ok(DeploymentResult {
+                github_owner: request.repo_owner.clone(),
+                github_repo_name: request.repo_name.clone(),
                 github_repo_url: format!(
                     "https://github.com/{}/{}",
                     request.repo_owner, request.repo_name
                 ),
-                github_commit_sha: "cloudflare-git".to_string(),
+                github_commit_sha: commit_sha.trim().to_string(),
+                cloudflare_project_name: request.cloudflare_project_name.clone(),
                 cloudflare_pages_url: deploy_response.cloudflare_pages_url,
                 custom_domain: deploy_response.custom_domain,
             })
         } else {
             let err_msg = serde_json::from_str::<serde_json::Value>(&body)
                 .ok()
-                .and_then(|v| {
-                    v.get("message")
-                        .and_then(|m| m.as_str())
-                        .map(String::from)
-                })
+                .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
                 .unwrap_or(body);
             Err(DeploymentError::CloudflarePages(err_msg))
         }

@@ -12,6 +12,16 @@ pub struct Config {
     pub usdt_erc20_address: String,
     pub usdt_tron_address: String,
     pub usdt_sol_address: String,
+    pub usdt_erc20_rpc_url: String,
+    pub usdt_erc20_contract: String,
+    pub usdt_erc20_min_confirmations: u64,
+    pub tron_grid_base_url: String,
+    pub tron_grid_api_key: Option<String>,
+    pub usdt_tron_contract: String,
+    pub usdt_tron_min_confirmations: u64,
+    pub solana_rpc_url: String,
+    pub usdt_sol_mint: String,
+    pub usdt_sol_min_confirmations: u64,
     pub generation_max_concurrency: usize,
     pub generation_primary_provider: GenerationProviderName,
     pub agent_timeout_seconds: u64,
@@ -87,6 +97,32 @@ impl Config {
             usdt_erc20_address: env::var("USDT_ERC20_ADDRESS").unwrap_or_default(),
             usdt_tron_address: env::var("USDT_TRON_ADDRESS").unwrap_or_default(),
             usdt_sol_address: env::var("USDT_SOL_ADDRESS").unwrap_or_default(),
+            usdt_erc20_rpc_url: env::var("USDT_ERC20_RPC_URL").unwrap_or_default(),
+            usdt_erc20_contract: env::var("USDT_ERC20_CONTRACT")
+                .unwrap_or_else(|_| "0xdAC17F958D2ee523a2206206994597C13D831ec7".to_string()),
+            usdt_erc20_min_confirmations: env::var("USDT_ERC20_MIN_CONFIRMATIONS")
+                .unwrap_or_else(|_| "12".to_string())
+                .parse()
+                .context("parse USDT_ERC20_MIN_CONFIRMATIONS")?,
+            tron_grid_base_url: env::var("TRON_GRID_BASE_URL")
+                .unwrap_or_else(|_| "https://api.trongrid.io".to_string()),
+            tron_grid_api_key: env::var("TRON_GRID_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            usdt_tron_contract: env::var("USDT_TRON_CONTRACT")
+                .unwrap_or_else(|_| "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t".to_string()),
+            usdt_tron_min_confirmations: env::var("USDT_TRON_MIN_CONFIRMATIONS")
+                .unwrap_or_else(|_| "20".to_string())
+                .parse()
+                .context("parse USDT_TRON_MIN_CONFIRMATIONS")?,
+            solana_rpc_url: env::var("SOLANA_RPC_URL")
+                .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string()),
+            usdt_sol_mint: env::var("USDT_SOL_MINT")
+                .unwrap_or_else(|_| "Es9vMFrzaCERmJfrF4H2FYD4KCoT1r9tnmTaGJQG7uC".to_string()),
+            usdt_sol_min_confirmations: env::var("USDT_SOL_MIN_CONFIRMATIONS")
+                .unwrap_or_else(|_| "1".to_string())
+                .parse()
+                .context("parse USDT_SOL_MIN_CONFIRMATIONS")?,
             generation_max_concurrency: env::var("GENERATION_MAX_CONCURRENCY")
                 .unwrap_or_else(|_| "2".to_string())
                 .parse()

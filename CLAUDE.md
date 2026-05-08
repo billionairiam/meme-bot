@@ -64,7 +64,7 @@ Telegram user → /create → 7-step wizard → select payment chain
 | `models` | Shared domain types: `WebsiteInput`, `BuildMode`, `OrderType`, `PaymentChain`, `Order`, `Template`. |
 | `validation` | Regex-based input validation for tickers, contract addresses (EVM/SOL/TRON), X/TG links, domains. No user-provided prompts — all input is structured fields. |
 | `db` | Raw SQLx queries: `upsert_user`, `create_site_order`, `mark_order_paid`, `create_website`, `enqueue_generation_job`, `queue_position`. |
-| `payment` | `PaymentVerifier` trait + `StubPaymentVerifier` (accepts `valid_*` TX hashes). `PaymentService` wraps a verifier with expiry/receiver/amount checks. Chain addresses are fixed per env config. |
+| `payment` | `PaymentVerifier` trait + chain verifier for ERC20/TRON/SOL USDT. `PaymentService` wraps provider checks with expiry, recipient, amount, confirmation, and transaction-age validation. Chain addresses are fixed per env config. |
 | `generation` | `SiteGenerationProvider` trait. `GenerationRouter` tries providers in order (primary → fallback) on recoverable errors. `CliGenerationProvider` runs Gemini/Codex as external CLI processes with a 900s timeout, validates output via `.agent_done.json` + static file checks. `StaticTemplateProvider` exists for tests. |
 | `queue` | `GenerationQueue` with SQLite-backed job locking (mutex-guarded SELECT + UPDATE). One `tick()` picks a queued job, generates, optionally deploys. Uses a `tokio::sync::Semaphore` for concurrency control. |
 | `deployment` | `SiteDeployer` trait. `CloudflarePagesDeployer` uses Cloudflare API (ensure project → wrangler direct upload → bind custom domain). `GitCliCloudflareDeployer` does git init/push to GitHub. `DryRunDeployer` for testing. |

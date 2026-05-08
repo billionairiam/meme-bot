@@ -6,6 +6,7 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::{
+    db,
     deployment::{DeploymentRequest, SiteDeployer},
     generation::{GenerationError, GenerationRouter, SiteGenerationRequest},
 };
@@ -14,6 +15,8 @@ pub struct GenerationQueue {
     pool: SqlitePool,
     router: Arc<GenerationRouter>,
     deployer: Option<Arc<dyn SiteDeployer>>,
+    repo_owner: String,
+    github_token: String,
     semaphore: Arc<Semaphore>,
     lock_mutex: Arc<Mutex<()>>,
     worker_id: String,
@@ -26,12 +29,16 @@ impl GenerationQueue {
         deployer: Option<Arc<dyn SiteDeployer>>,
         max_concurrency: usize,
         worker_id: String,
+        repo_owner: String,
+        github_token: String,
     ) -> Self {
         Self {
             pool,
             router,
             deployer,
-            semaphore: Arc::new(Semaphore::new(max_concurrency)),
+            repo_owner,
+            github_token,
+            semaphore: Arc::new(Semaphore::new(max_concurrency.max(1))),
             lock_mutex: Arc::new(Mutex::new(())),
             worker_id,
         }
@@ -45,6 +52,7 @@ impl GenerationQueue {
 
         info!(job_id = %job.job_id, order_id = %job.order_id, "running generation job");
         let job_id = job.job_id;
+        let website_id = job.website_id;
         let request = job.into_generation_request();
         sqlx::query(
             "UPDATE orders SET site_status = 'generating', updated_at = datetime('now') WHERE id = ?",
@@ -85,23 +93,38 @@ impl GenerationQueue {
                     .bind(request.order_id)
                     .execute(&self.pool)
                     .await?;
-                    let deployment = deployer.deploy(&request.deployment_request()).await;
+                    sqlx::query(
+                        "UPDATE websites SET deployment_status = 'deploying', updated_at = datetime('now') WHERE id = ?",
+                    )
+                    .bind(website_id)
+                    .execute(&self.pool)
+                    .await?;
+                    let deployment_request =
+                        request.deployment_request(&self.repo_owner, &self.github_token);
+                    let deployment = deployer.deploy(&deployment_request).await;
                     match deployment {
                         Ok(deployment) => {
-                            sqlx::query(
-                                r#"
-                                UPDATE websites
-                                SET cloudflare_pages_url = ?,
-                                    custom_domain = ?,
-                                    deployment_status = 'live',
-                                    updated_at = datetime('now')
-                                WHERE order_id = ?
-                                "#,
+                            for stage in [
+                                "github_create",
+                                "git_push",
+                                "pages_create",
+                                "pages_deploy",
+                                "domain_bind",
+                            ] {
+                                db::record_deployment_attempt(
+                                    &self.pool,
+                                    website_id,
+                                    stage,
+                                    "succeeded",
+                                    None,
+                                )
+                                .await?;
+                            }
+                            db::update_website_deployment_success(
+                                &self.pool,
+                                request.order_id,
+                                &deployment,
                             )
-                            .bind(deployment.cloudflare_pages_url)
-                            .bind(deployment.custom_domain)
-                            .bind(request.order_id)
-                            .execute(&self.pool)
                             .await?;
                             sqlx::query(
                                 "UPDATE orders SET site_status = 'live', updated_at = datetime('now') WHERE id = ?",
@@ -112,13 +135,27 @@ impl GenerationQueue {
                         }
                         Err(error) => {
                             error!(order_id = %request.order_id, error = %error, "deployment failed");
+                            let deployment_status = if error.stage() == "domain_bind" {
+                                "domain_bind_failed"
+                            } else {
+                                "deployment_failed"
+                            };
+                            db::record_deployment_attempt(
+                                &self.pool,
+                                website_id,
+                                error.stage(),
+                                "failed",
+                                Some(&error.to_string()),
+                            )
+                            .await?;
                             sqlx::query(
                                 r#"
                                 UPDATE websites
-                                SET deployment_status = 'deployment_failed', updated_at = datetime('now')
+                                SET deployment_status = ?, updated_at = datetime('now')
                                 WHERE order_id = ?
                                 "#,
                             )
+                            .bind(deployment_status)
                             .bind(request.order_id)
                             .execute(&self.pool)
                             .await?;
@@ -246,17 +283,17 @@ impl GenerationQueue {
 }
 
 impl SiteGenerationRequest {
-    fn deployment_request(&self) -> DeploymentRequest {
+    fn deployment_request(&self, repo_owner: &str, github_token: &str) -> DeploymentRequest {
         let domain = self.input.requested_domain.clone();
-        let project_name = domain
-            .as_deref()
-            .map(|domain| project_name_from_domain(domain, self.order_id))
+        let repo_name = domain
+            .clone()
             .unwrap_or_else(|| format!("site-{}", &self.order_id.simple().to_string()[..8]));
+        let project_name = project_name_from_repo_name(&repo_name);
 
         DeploymentRequest {
-            repo_owner: "direct-upload".to_string(),
-            repo_name: project_name.clone(),
-            github_token: String::new(),
+            repo_owner: repo_owner.to_string(),
+            repo_name,
+            github_token: github_token.to_string(),
             site_dir: self.output_dir.display().to_string(),
             cloudflare_project_name: project_name,
             production_branch: "main".to_string(),
@@ -265,8 +302,8 @@ impl SiteGenerationRequest {
     }
 }
 
-fn project_name_from_domain(domain: &str, order_id: Uuid) -> String {
-    let base = domain
+fn project_name_from_repo_name(repo_name: &str) -> String {
+    repo_name
         .chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() {
@@ -277,9 +314,7 @@ fn project_name_from_domain(domain: &str, order_id: Uuid) -> String {
         })
         .collect::<String>()
         .trim_matches('-')
-        .to_string();
-    let suffix = order_id.simple().to_string();
-    format!("{}-{}", base, &suffix[..8])
+        .to_string()
         .chars()
         .take(58)
         .collect()

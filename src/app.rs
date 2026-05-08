@@ -35,23 +35,22 @@ impl App {
             )),
         ));
 
-        let deployer: Option<Arc<dyn SiteDeployer>> =
-            if let (Some(base_url), Some(api_key)) = (
-                self.config.api_service_base_url.as_deref(),
-                self.config.api_service_api_key.as_deref(),
-            ) {
-                Some(Arc::new(HttpClientPagesDeployer::new(
-                    base_url.to_string(),
-                    api_key.to_string(),
-                )))
-            } else {
-                Some(Arc::new(CloudflarePagesDeployer::new(
-                    self.config.cloudflare_account_id.clone(),
-                    self.config.cloudflare_api_token.clone(),
-                    self.config.cloudflare_wrangler_command.clone(),
-                    self.config.cloudflare_wrangler_args.clone(),
-                )))
-            };
+        let deployer: Option<Arc<dyn SiteDeployer>> = if let (Some(base_url), Some(api_key)) = (
+            self.config.api_service_base_url.as_deref(),
+            self.config.api_service_api_key.as_deref(),
+        ) {
+            Some(Arc::new(HttpClientPagesDeployer::new(
+                base_url.to_string(),
+                api_key.to_string(),
+            )))
+        } else {
+            Some(Arc::new(CloudflarePagesDeployer::new(
+                self.config.cloudflare_account_id.clone(),
+                self.config.cloudflare_api_token.clone(),
+                self.config.cloudflare_wrangler_command.clone(),
+                self.config.cloudflare_wrangler_args.clone(),
+            )))
+        };
 
         info!(
             max_concurrency = self.config.generation_max_concurrency,
@@ -65,6 +64,8 @@ impl App {
             deployer,
             self.config.generation_max_concurrency,
             "worker-1".to_string(),
+            self.config.github_owner.clone(),
+            self.config.github_token.clone(),
         )
     }
 

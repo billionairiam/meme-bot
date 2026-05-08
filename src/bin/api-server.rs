@@ -1,12 +1,12 @@
 use std::{env, net::SocketAddr, sync::Arc};
 
 use axum::{
+    Router,
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
-    Router,
 };
 use meme_bot::{
     config::{NamecheapConfig, NamecheapContactConfig},
@@ -32,8 +32,7 @@ struct AppState {
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -50,8 +49,7 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(8080);
-    let bind_addr = env::var("API_SERVICE_BIND_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    let bind_addr = env::var("API_SERVICE_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
     let nc_config = namecheap_config_from_env();
     let cf_account_id = env::var("CLOUDFLARE_ACCOUNT_ID").unwrap_or_default();
     let cf_api_token = env::var("CLOUDFLARE_API_TOKEN").unwrap_or_default();
@@ -80,7 +78,10 @@ async fn main() {
         .route("/api/v1/dns/set-nameservers", post(dns_set_nameservers))
         .route("/api/v1/dns/set-records", post(dns_set_records))
         .route("/api/v1/pages/deploy", post(pages_deploy))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .with_state(state);
 
     let addr: SocketAddr = format!("{bind_addr}:{port}")
@@ -112,7 +113,11 @@ async fn auth_middleware(
         .unwrap_or("");
 
     if provided != state.api_key {
-        return (StatusCode::UNAUTHORIZED, api_error_body("unauthorized", "invalid API key")).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            api_error_body("unauthorized", "invalid API key"),
+        )
+            .into_response();
     }
 
     next.run(request).await
@@ -131,7 +136,12 @@ async fn domain_quote(
     Json(request): Json<DomainQuoteRequest>,
 ) -> Result<Json<DomainQuote>, ApiError> {
     info!(domain = %request.domain, "domain quote");
-    state.registrar.quote(&request).await.map(Json).map_err(ApiError)
+    state
+        .registrar
+        .quote(&request)
+        .await
+        .map(Json)
+        .map_err(ApiError)
 }
 
 async fn domain_purchase(
@@ -139,7 +149,12 @@ async fn domain_purchase(
     Json(request): Json<DomainPurchaseRequest>,
 ) -> Result<Json<DomainPurchaseResult>, ApiError> {
     info!(domain = %request.domain, "domain purchase");
-    state.registrar.purchase(&request).await.map(Json).map_err(ApiError)
+    state
+        .registrar
+        .purchase(&request)
+        .await
+        .map(Json)
+        .map_err(ApiError)
 }
 
 // ---- DNS ----
@@ -204,7 +219,9 @@ async fn dns_create_zone(
             .get("errors")
             .map(|e| e.to_string())
             .unwrap_or_else(|| "unknown error".to_string());
-        return Err(DomainError::Cloudflare(format!("zone creation failed: {errors}")))?;
+        return Err(DomainError::Cloudflare(format!(
+            "zone creation failed: {errors}"
+        )))?;
     }
 
     let result = json
@@ -220,10 +237,17 @@ async fn dns_create_zone(
     let nameservers: Vec<String> = result
         .get("name_servers")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|ns| ns.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|ns| ns.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
-    Ok(Json(CloudflareZoneResult { zone_id, nameservers }))
+    Ok(Json(CloudflareZoneResult {
+        zone_id,
+        nameservers,
+    }))
 }
 
 async fn dns_set_nameservers(
@@ -285,49 +309,65 @@ async fn pages_deploy(
         state.cf_account_id
     );
 
-    // Create Git-connected Pages project
-    let response = state
+    let project_url = format!("{cf_url}/{}", request.project_name);
+    let existing = state
         .cf_client
-        .post(&cf_url)
+        .get(&project_url)
         .bearer_auth(&state.cf_api_token)
-        .json(&serde_json::json!({
-            "name": request.project_name,
-            "production_branch": request.production_branch,
-            "source": {
-                "type": "github",
-                "config": {
-                    "owner": request.github_owner,
-                    "repo_name": request.github_repo,
-                    "production_branch": request.production_branch,
-                    "pr_comments_enabled": false,
-                    "deployments_enabled": true,
-                }
-            }
-        }))
         .send()
         .await
         .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+    let project_exists = existing.status().is_success();
 
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+    if !project_exists {
+        // Create Git-connected Pages project
+        let response = state
+            .cf_client
+            .post(&cf_url)
+            .bearer_auth(&state.cf_api_token)
+            .json(&serde_json::json!({
+                "name": request.project_name,
+                "production_branch": request.production_branch,
+                "source": {
+                    "type": "github",
+                    "config": {
+                        "owner": request.github_owner,
+                        "repo_name": request.github_repo,
+                        "production_branch": request.production_branch,
+                        "pr_comments_enabled": false,
+                        "deployments_enabled": true,
+                    }
+                }
+            }))
+            .send()
+            .await
+            .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
 
-    if !status.is_success() {
-        error!(status = %status, body = %body, "cloudflare pages project creation failed");
-        return Err(DomainError::Cloudflare(format!("create pages project failed: {status}: {body}")))?;
-    }
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
 
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| DomainError::Cloudflare(format!("parse response: {e}")))?;
+        if !status.is_success() {
+            error!(status = %status, body = %body, "cloudflare pages project creation failed");
+            return Err(DomainError::Cloudflare(format!(
+                "create pages project failed: {status}: {body}"
+            )))?;
+        }
 
-    if json.get("success").and_then(|v| v.as_bool()) != Some(true) {
-        let errors = json
-            .get("errors")
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "unknown error".to_string());
-        return Err(DomainError::Cloudflare(format!("pages project creation failed: {errors}")))?;
+        let json: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| DomainError::Cloudflare(format!("parse response: {e}")))?;
+
+        if json.get("success").and_then(|v| v.as_bool()) != Some(true) {
+            let errors = json
+                .get("errors")
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown error".to_string());
+            return Err(DomainError::Cloudflare(format!(
+                "pages project creation failed: {errors}"
+            )))?;
+        }
     }
 
     // Bind custom domain if requested
@@ -351,7 +391,9 @@ async fn pages_deploy(
 
         if !bind_status.is_success() {
             warn!(status = %bind_status, body = %bind_body, "custom domain bind failed");
-            // Don't fail the whole deploy; domain binding can be retried
+            return Err(DomainError::Cloudflare(format!(
+                "custom domain bind failed: {bind_status}: {bind_body}"
+            )))?;
         }
     }
 

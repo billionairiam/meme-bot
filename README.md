@@ -48,7 +48,7 @@ When `API_SERVICE_BASE_URL` is set, meme-bot calls the API server via HTTP. When
 | `models` | Shared domain types: `WebsiteInput`, `BuildMode`, `OrderType`, `PaymentChain`, `Order`, `Template`. |
 | `validation` | Regex-based input validation for tickers, contract addresses (EVM/SOL/TRON), X/TG links, domains. No user-provided prompts. |
 | `db` | Raw SQLx queries: `upsert_user`, `create_site_order`, `mark_order_paid`, `enqueue_generation_job`, `queue_position`. |
-| `payment` | `PaymentVerifier` trait + `StubPaymentVerifier` (accepts `valid_*` TX hashes). `PaymentService` wraps a verifier with expiry/receiver/amount checks. |
+| `payment` | `PaymentVerifier` trait + real chain verifier for ERC20/TRON/SOL USDT. `PaymentService` checks expiry, recipient, amount, confirmations, and transaction age. |
 | `generation` | `SiteGenerationProvider` trait. `GenerationRouter` tries primary → fallback on recoverable errors. `CliGenerationProvider` runs Gemini/Codex as external CLI processes. |
 | `queue` | `GenerationQueue` with SQLite-backed job locking (mutex-guarded SELECT + UPDATE), global semaphore for concurrency control. |
 | `deployment` | `SiteDeployer` trait. `HttpClientPagesDeployer` calls the API server. `CloudflarePagesDeployer` talks to Cloudflare directly (fallback). |
@@ -61,7 +61,7 @@ When `API_SERVICE_BASE_URL` is set, meme-bot calls the API server via HTTP. When
 1. User interacts with Telegram bot → 7-step order wizard
 2. User selects payment chain → order written to SQLite (`orders` table, status: `pending`)
 3. User submits TX hash → order marked `paid`, website created, generation job enqueued
-4. Queue worker picks up job (mutex-guarded query) → runs AI agent → deploys to Cloudflare Pages
+4. Queue worker picks up job (mutex-guarded query) → runs AI agent → pushes generated site to GitHub → creates/binds Cloudflare Pages
 5. User checks `/status` → reads order status from SQLite
 
 All state is persisted in SQLite. If the server restarts, orders already written to DB survive. In-progress wizard steps (before payment chain selection) are lost, but no payment has occurred at that point.
