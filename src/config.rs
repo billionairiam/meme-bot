@@ -75,7 +75,9 @@ impl GenerationProviderName {
 impl Config {
     pub fn from_env() -> Result<Self> {
         Ok(Self {
-            database_url: env::var("DATABASE_URL").ok(),
+            database_url: env::var("DATABASE_URL")
+                .ok()
+                .or_else(|| Some("sqlite://./db.sqlite3".to_string())),
             telegram_bot_token: env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default(),
             telegram_required_group_id: env::var("TELEGRAM_REQUIRED_GROUP_ID")
                 .unwrap_or_else(|_| "@MeMe_Web_Support".to_string()),

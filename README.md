@@ -20,8 +20,8 @@ Rust monorepo for a Telegram bot that sells meme coin websites. Users pay USDT o
        │ Bot API               │ X-API-Key (TLS)
        │                      │
 ┌──────┴──────────────────────┴───────┐     ┌─────────────┐
-│             meme-bot                │────▶│  PostgreSQL │
-│          (home server)              │     │  (DB)       │
+│             meme-bot                │────▶│   SQLite    │
+│          (home server)              │     │ (db.sqlite3)│
 │  ┌────────────┐  ┌──────────────┐   │     └─────────────┘
 │  │  Telegram  │  │ Queue Worker │   │
 │  │ Dispatcher │  │  (tick loop) │   │
@@ -36,7 +36,7 @@ Rust monorepo for a Telegram bot that sells meme coin websites. Users pay USDT o
 | `meme-bot` | `src/bin/meme-bot.rs` | Telegram bot + queue worker (all-in-one) | Home server |
 | `api-server` | `src/bin/api-server.rs` | REST API for Namecheap + Cloudflare operations | VPS |
 
-Both compile from the same crate (`src/lib.rs`). The `meme-bot` binary runs the Telegram dispatcher and generation queue worker concurrently in a single process. All user orders are persisted to PostgreSQL — no in-memory state that could be lost on restart.
+Both compile from the same crate (`src/lib.rs`). The `meme-bot` binary runs the Telegram dispatcher and generation queue worker concurrently in a single process. All user orders are persisted to SQLite (`./db.sqlite3`, created automatically on first run) — no in-memory state that could be lost on restart.
 
 When `API_SERVICE_BASE_URL` is set, meme-bot calls the API server via HTTP. When omitted, it falls back to direct API calls — backward compatible for single-server deployments.
 
@@ -50,7 +50,7 @@ When `API_SERVICE_BASE_URL` is set, meme-bot calls the API server via HTTP. When
 | `db` | Raw SQLx queries: `upsert_user`, `create_site_order`, `mark_order_paid`, `enqueue_generation_job`, `queue_position`. |
 | `payment` | `PaymentVerifier` trait + `StubPaymentVerifier` (accepts `valid_*` TX hashes). `PaymentService` wraps a verifier with expiry/receiver/amount checks. |
 | `generation` | `SiteGenerationProvider` trait. `GenerationRouter` tries primary → fallback on recoverable errors. `CliGenerationProvider` runs Gemini/Codex as external CLI processes. |
-| `queue` | `GenerationQueue` with PostgreSQL-backed job locking (`FOR UPDATE SKIP LOCKED`), global semaphore for concurrency control. |
+| `queue` | `GenerationQueue` with SQLite-backed job locking (mutex-guarded SELECT + UPDATE), global semaphore for concurrency control. |
 | `deployment` | `SiteDeployer` trait. `HttpClientPagesDeployer` calls the API server. `CloudflarePagesDeployer` talks to Cloudflare directly (fallback). |
 | `domain` | `DomainRegistrar` trait. `NamecheapRegistrar` calls Namecheap XML API. `HttpClientDomainRegistrar` proxies through the API server. `DnsProvisioner` trait with `NamecheapDnsProvisioner` / `HttpClientDnsProvisioner`. |
 | `telegram` | teloxide-based bot with `dptree` dispatch. Inline keyboard UI for 7-step order form, template deep-links (`/start tpl_<id>`). |
@@ -59,19 +59,19 @@ When `API_SERVICE_BASE_URL` is set, meme-bot calls the API server via HTTP. When
 ### Data flow
 
 1. User interacts with Telegram bot → 7-step order wizard
-2. User selects payment chain → order written to PostgreSQL (`orders` table, status: `pending`)
+2. User selects payment chain → order written to SQLite (`orders` table, status: `pending`)
 3. User submits TX hash → order marked `paid`, website created, generation job enqueued
-4. Queue worker picks up job (`FOR UPDATE SKIP LOCKED`) → runs AI agent → deploys to Cloudflare Pages
-5. User checks `/status` → reads order status from PostgreSQL
+4. Queue worker picks up job (mutex-guarded query) → runs AI agent → deploys to Cloudflare Pages
+5. User checks `/status` → reads order status from SQLite
 
-All state is persisted in PostgreSQL. If the server restarts, orders already written to DB survive. In-progress wizard steps (before payment chain selection) are lost, but no payment has occurred at that point.
+All state is persisted in SQLite. If the server restarts, orders already written to DB survive. In-progress wizard steps (before payment chain selection) are lost, but no payment has occurred at that point.
 
 ## Quick Start
 
 ### Prerequisites
 
 - Rust toolchain (edition 2024)
-- PostgreSQL (for full backend mode)
+- SQLite (bundled via libsqlite3-sys, no system dependency)
 
 ### Build
 
@@ -96,7 +96,7 @@ cargo test    # run all tests
 ```bash
 cp .env.example .env   # edit with your values
 
-# Main binary (Telegram bot + queue worker, requires DATABASE_URL)
+# Main binary (Telegram bot + queue worker, DATABASE_URL defaults to sqlite://./db.sqlite3)
 cargo run
 
 # API server
@@ -393,7 +393,7 @@ The Telegram bot runs as part of the `meme-bot` binary. It requires:
 ```bash
 # Required
 TELEGRAM_BOT_TOKEN=<bot token>
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/meme_bot
+DATABASE_URL=sqlite://./db.sqlite3
 TEMPLATE_CATALOG_URL=https://your-template-site.example
 ADMIN_CONTACT=@your_admin
 

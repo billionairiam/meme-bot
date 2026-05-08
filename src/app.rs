@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use sqlx::PgPool;
+use sqlx::SqlitePool as Pool;
 use tracing::info;
 
 use crate::{
@@ -12,11 +12,11 @@ use crate::{
 
 pub struct App {
     config: Config,
-    pool: PgPool,
+    pool: Pool,
 }
 
 impl App {
-    pub fn new(config: Config, pool: PgPool) -> Self {
+    pub fn new(config: Config, pool: Pool) -> Self {
         Self { config, pool }
     }
 

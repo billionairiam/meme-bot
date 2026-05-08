@@ -4,7 +4,7 @@ use std::{
 };
 
 use rust_decimal::Decimal;
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use teloxide::{
     dispatching::UpdateFilterExt,
     dptree,
@@ -209,7 +209,7 @@ impl OrderDraft {
     }
 }
 
-pub async fn run_bot(config: Config, pool: PgPool) -> anyhow::Result<()> {
+pub async fn run_bot(config: Config, pool: SqlitePool) -> anyhow::Result<()> {
     if config.telegram_bot_token.trim().is_empty() {
         anyhow::bail!("TELEGRAM_BOT_TOKEN is required to run the Telegram bot");
     }
@@ -253,7 +253,7 @@ async fn handle_message(
     msg: Message,
     config: Arc<TelegramUiConfig>,
     sessions: Sessions,
-    pool: PgPool,
+    pool: SqlitePool,
 ) -> ResponseResult<()> {
     if !ensure_group_member(&bot, &msg, &config).await? {
         return Ok(());
@@ -294,7 +294,7 @@ async fn handle_callback(
     query: CallbackQuery,
     config: Arc<TelegramUiConfig>,
     sessions: Sessions,
-    pool: PgPool,
+    pool: SqlitePool,
 ) -> ResponseResult<()> {
     bot.answer_callback_query(query.id.clone()).await?;
 
@@ -401,7 +401,7 @@ async fn handle_order_step(
     user_id: UserId,
     config: Arc<TelegramUiConfig>,
     sessions: Sessions,
-    pool: &PgPool,
+    pool: &SqlitePool,
 ) -> ResponseResult<()> {
     let Some(mut draft) = get_session(user_id, &sessions) else {
         return show_main_menu(
@@ -893,7 +893,7 @@ fn ask_logo_text() -> &'static str {
     "🖼 <b>Step 1/7 · Logo</b>\n\nUpload your token logo image.\n\nAfter receiving the logo, I will ask for ticker."
 }
 
-async fn status_text(user_id: UserId, sessions: &Sessions, pool: &PgPool) -> String {
+async fn status_text(user_id: UserId, sessions: &Sessions, pool: &SqlitePool) -> String {
     if let Some(draft) = get_session(user_id, sessions) {
         return format!(
             "📊 <b>Current Order</b>\n\nStatus: <code>{:?}</code>\nMode: <b>{}</b>\nWebsite price: <b>{}</b> USDT",
@@ -1013,7 +1013,7 @@ async fn show_status(
     chat_id: ChatId,
     user_id: UserId,
     sessions: &Sessions,
-    pool: &PgPool,
+    pool: &SqlitePool,
 ) -> ResponseResult<()> {
     send_screen(
         bot,
@@ -1029,7 +1029,7 @@ async fn edit_status(
     target: UiMessage,
     user_id: UserId,
     sessions: &Sessions,
-    pool: &PgPool,
+    pool: &SqlitePool,
 ) -> ResponseResult<()> {
     edit_screen(
         bot,
@@ -1072,7 +1072,7 @@ async fn edit_payment_chain_and_ask_tx(
     chain: PaymentChain,
     address: &str,
     sessions: &Sessions,
-    pool: &PgPool,
+    pool: &SqlitePool,
 ) -> ResponseResult<()> {
     let Some(mut draft) = get_session(user_id, sessions) else {
         return edit_screen(

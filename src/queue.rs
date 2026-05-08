@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use sqlx::{PgPool, Row};
-use tokio::sync::Semaphore;
+use sqlx::{Row, SqlitePool};
+use tokio::sync::{Mutex, Semaphore};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -11,16 +11,17 @@ use crate::{
 };
 
 pub struct GenerationQueue {
-    pool: PgPool,
+    pool: SqlitePool,
     router: Arc<GenerationRouter>,
     deployer: Option<Arc<dyn SiteDeployer>>,
     semaphore: Arc<Semaphore>,
+    lock_mutex: Arc<Mutex<()>>,
     worker_id: String,
 }
 
 impl GenerationQueue {
     pub fn new(
-        pool: PgPool,
+        pool: SqlitePool,
         router: Arc<GenerationRouter>,
         deployer: Option<Arc<dyn SiteDeployer>>,
         max_concurrency: usize,
@@ -31,6 +32,7 @@ impl GenerationQueue {
             router,
             deployer,
             semaphore: Arc::new(Semaphore::new(max_concurrency)),
+            lock_mutex: Arc::new(Mutex::new(())),
             worker_id,
         }
     }
@@ -45,7 +47,7 @@ impl GenerationQueue {
         let job_id = job.job_id;
         let request = job.into_generation_request();
         sqlx::query(
-            "UPDATE orders SET site_status = 'generating', updated_at = now() WHERE id = $1",
+            "UPDATE orders SET site_status = 'generating', updated_at = datetime('now') WHERE id = ?",
         )
         .bind(request.order_id)
         .execute(&self.pool)
@@ -56,8 +58,8 @@ impl GenerationQueue {
                 sqlx::query(
                     r#"
                     UPDATE generation_jobs
-                    SET status = 'succeeded', finished_at = now(), locked_by = NULL, locked_at = NULL
-                    WHERE id = $1
+                    SET status = 'succeeded', finished_at = datetime('now'), locked_by = NULL, locked_at = NULL
+                    WHERE id = ?
                     "#,
                 )
                 .bind(job_id)
@@ -67,8 +69,8 @@ impl GenerationQueue {
                 sqlx::query(
                     r#"
                     UPDATE websites
-                    SET generation_provider_used = $1, deployment_status = 'generated', updated_at = now()
-                    WHERE order_id = $2
+                    SET generation_provider_used = ?, deployment_status = 'generated', updated_at = datetime('now')
+                    WHERE order_id = ?
                     "#,
                 )
                 .bind(result.provider_name)
@@ -78,7 +80,7 @@ impl GenerationQueue {
 
                 if let Some(deployer) = &self.deployer {
                     sqlx::query(
-                        "UPDATE orders SET site_status = 'deploying', updated_at = now() WHERE id = $1",
+                        "UPDATE orders SET site_status = 'deploying', updated_at = datetime('now') WHERE id = ?",
                     )
                     .bind(request.order_id)
                     .execute(&self.pool)
@@ -89,11 +91,11 @@ impl GenerationQueue {
                             sqlx::query(
                                 r#"
                                 UPDATE websites
-                                SET cloudflare_pages_url = $1,
-                                    custom_domain = $2,
+                                SET cloudflare_pages_url = ?,
+                                    custom_domain = ?,
                                     deployment_status = 'live',
-                                    updated_at = now()
-                                WHERE order_id = $3
+                                    updated_at = datetime('now')
+                                WHERE order_id = ?
                                 "#,
                             )
                             .bind(deployment.cloudflare_pages_url)
@@ -102,7 +104,7 @@ impl GenerationQueue {
                             .execute(&self.pool)
                             .await?;
                             sqlx::query(
-                                "UPDATE orders SET site_status = 'live', updated_at = now() WHERE id = $1",
+                                "UPDATE orders SET site_status = 'live', updated_at = datetime('now') WHERE id = ?",
                             )
                             .bind(request.order_id)
                             .execute(&self.pool)
@@ -113,8 +115,8 @@ impl GenerationQueue {
                             sqlx::query(
                                 r#"
                                 UPDATE websites
-                                SET deployment_status = 'deployment_failed', updated_at = now()
-                                WHERE order_id = $1
+                                SET deployment_status = 'deployment_failed', updated_at = datetime('now')
+                                WHERE order_id = ?
                                 "#,
                             )
                             .bind(request.order_id)
@@ -125,7 +127,7 @@ impl GenerationQueue {
                     }
                 } else {
                     sqlx::query(
-                        "UPDATE orders SET site_status = 'deploying', updated_at = now() WHERE id = $1",
+                        "UPDATE orders SET site_status = 'deploying', updated_at = datetime('now') WHERE id = ?",
                     )
                     .bind(request.order_id)
                     .execute(&self.pool)
@@ -144,6 +146,7 @@ impl GenerationQueue {
     }
 
     async fn lock_next_job(&self) -> anyhow::Result<Option<GenerationJobRow>> {
+        let _guard = self.lock_mutex.lock().await;
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(
             r#"
@@ -157,7 +160,6 @@ impl GenerationQueue {
             WHERE gj.status = 'queued'
               AND o.payment_status = 'paid'
             ORDER BY gj.priority DESC, gj.queued_at ASC
-            FOR UPDATE SKIP LOCKED
             LIMIT 1
             "#,
         )
@@ -169,13 +171,13 @@ impl GenerationQueue {
             return Ok(None);
         };
 
-        let job_id: Uuid = row.get("job_id");
+        let job_id: Uuid = Uuid::parse_str(row.get::<&str, _>("job_id"))?;
         sqlx::query(
             r#"
             UPDATE generation_jobs
-            SET status = 'running', started_at = COALESCE(started_at, now()),
-                locked_by = $1, locked_at = now(), attempt_count = attempt_count + 1
-            WHERE id = $2
+            SET status = 'running', started_at = COALESCE(started_at, datetime('now')),
+                locked_by = ?, locked_at = datetime('now'), attempt_count = attempt_count + 1
+            WHERE id = ?
             "#,
         )
         .bind(&self.worker_id)
@@ -186,8 +188,8 @@ impl GenerationQueue {
 
         Ok(Some(GenerationJobRow {
             job_id,
-            order_id: row.get("order_id"),
-            website_id: row.get("website_id"),
+            order_id: Uuid::parse_str(row.get::<&str, _>("order_id"))?,
+            website_id: Uuid::parse_str(row.get::<&str, _>("website_id"))?,
             build_mode: row
                 .get::<Option<String>, _>("build_mode")
                 .unwrap_or_default(),
@@ -204,7 +206,7 @@ impl GenerationQueue {
 
     async fn mark_manual_review(&self, job_id: Uuid, order_id: Uuid) -> anyhow::Result<()> {
         sqlx::query(
-            "UPDATE orders SET site_status = 'needs_manual_review', updated_at = now() WHERE id = $1",
+            "UPDATE orders SET site_status = 'needs_manual_review', updated_at = datetime('now') WHERE id = ?",
         )
         .bind(order_id)
         .execute(&self.pool)
@@ -212,8 +214,8 @@ impl GenerationQueue {
         sqlx::query(
             r#"
             UPDATE generation_jobs
-            SET status = 'needs_manual_review', finished_at = now(), locked_by = NULL, locked_at = NULL
-            WHERE id = $1
+            SET status = 'needs_manual_review', finished_at = datetime('now'), locked_by = NULL, locked_at = NULL
+            WHERE id = ?
             "#,
         )
         .bind(job_id)
@@ -223,15 +225,17 @@ impl GenerationQueue {
     }
 
     async fn mark_failed(&self, job_id: Uuid, order_id: Uuid) -> anyhow::Result<()> {
-        sqlx::query("UPDATE orders SET site_status = 'failed', updated_at = now() WHERE id = $1")
-            .bind(order_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE orders SET site_status = 'failed', updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(order_id)
+        .execute(&self.pool)
+        .await?;
         sqlx::query(
             r#"
             UPDATE generation_jobs
-            SET status = 'failed', finished_at = now(), locked_by = NULL, locked_at = NULL
-            WHERE id = $1
+            SET status = 'failed', finished_at = datetime('now'), locked_by = NULL, locked_at = NULL
+            WHERE id = ?
             "#,
         )
         .bind(job_id)

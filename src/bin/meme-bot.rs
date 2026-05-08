@@ -4,7 +4,7 @@ use anyhow::Context;
 use meme_bot::app::App;
 use meme_bot::config::Config;
 use meme_bot::telegram::run_bot;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlite::SqlitePoolOptions;
 use tracing::{error, info};
 
 #[tokio::main]
@@ -20,11 +20,11 @@ async fn main() -> anyhow::Result<()> {
         .database_url
         .as_deref()
         .context("DATABASE_URL is required")?;
-    let pool = PgPoolOptions::new()
-        .max_connections(10)
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
         .connect(database_url)
         .await
-        .context("connect postgres")?;
+        .context("connect sqlite")?;
 
     sqlx::migrate!("./migrations")
         .run(&pool)
