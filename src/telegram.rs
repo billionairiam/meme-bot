@@ -986,11 +986,14 @@ async fn handle_order_step(
                                         .to_string(),
                                 );
                             } else if let Err(e) =
-                                enqueue_generation_job_with_retries(pool, order_id, website_id).await
+                                enqueue_generation_job_with_retries(pool, order_id, website_id)
+                                    .await
                             {
                                 warn!(?e, order_id = %order_id, "failed to enqueue generation job after retries");
                                 let _ = db::mark_order_manual_review(pool, order_id).await;
-                                status_parts.push("⚠️ Failed to queue generation. Contact admin.".to_string());
+                                status_parts.push(
+                                    "⚠️ Failed to queue generation. Contact admin.".to_string(),
+                                );
                             } else {
                                 status_parts.push("Website queued for generation.".to_string());
                             }
@@ -1467,7 +1470,11 @@ async fn handle_alternative_domain_selection(
     let db_user_id = match db::upsert_user(pool, user_id.0 as i64, None, None, None, true).await {
         Ok(id) => id,
         Err(e) => {
-            warn!(?e, user_id = user_id.0 as i64, "failed to upsert user for alt domain");
+            warn!(
+                ?e,
+                user_id = user_id.0 as i64,
+                "failed to upsert user for alt domain"
+            );
             return edit_screen(
                 bot,
                 target,
@@ -1478,21 +1485,20 @@ async fn handle_alternative_domain_selection(
         }
     };
 
-    let domain_quote_id = match db::record_domain_quote(pool, db_user_id, &quote, quote.price_usd)
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            warn!(?e, "failed to record domain quote for alt domain");
-            return edit_screen(
-                bot,
-                target,
-                "<b>Internal error.</b>\n\nFailed to record selection. Please try again.",
-                main_menu_keyboard(),
-            )
-            .await;
-        }
-    };
+    let domain_quote_id =
+        match db::record_domain_quote(pool, db_user_id, &quote, quote.price_usd).await {
+            Ok(id) => id,
+            Err(e) => {
+                warn!(?e, "failed to record domain quote for alt domain");
+                return edit_screen(
+                    bot,
+                    target,
+                    "<b>Internal error.</b>\n\nFailed to record selection. Please try again.",
+                    main_menu_keyboard(),
+                )
+                .await;
+            }
+        };
 
     let total = site_price_usdt + quote.price_usd;
     draft.website_url = Some(domain.to_string());
@@ -1647,9 +1653,8 @@ async fn enqueue_generation_job_with_retries(
             Err(error) => return Err(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| {
-        anyhow::anyhow!("enqueue generation job failed after retries")
-    }))
+    Err(last_error
+        .unwrap_or_else(|| anyhow::anyhow!("enqueue generation job failed after retries")))
 }
 
 async fn download_telegram_logo(
@@ -1657,7 +1662,9 @@ async fn download_telegram_logo(
     file_id: &str,
     order_id: &str,
 ) -> anyhow::Result<String> {
-    let file = bot.get_file(teloxide::types::FileId::from(file_id.to_string())).await?;
+    let file = bot
+        .get_file(teloxide::types::FileId::from(file_id.to_string()))
+        .await?;
     let ext = Path::new(&file.path)
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy()))
@@ -1987,13 +1994,14 @@ async fn check_alternative_domains(
         }
         let domain = format!("{base_name}.{tld}");
         let request = DomainQuoteRequest { domain };
-        if let Ok(quote) = registrar.quote(&request).await {
-            if quote.available && !quote.is_premium {
-                alternatives.push(quote);
-            }
+        if let Ok(quote) = registrar.quote(&request).await
+            && quote.available
+            && !quote.is_premium
+        {
+            alternatives.push(quote);
         }
     }
-    alternatives.sort_by(|a, b| a.price_usd.cmp(&b.price_usd));
+    alternatives.sort_by_key(|quote| quote.price_usd);
     alternatives
 }
 
@@ -2003,11 +2011,7 @@ fn alternative_domains_keyboard(
     let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
     for quote in alternatives.iter().take(12) {
         rows.push(vec![InlineKeyboardButton::callback(
-            format!(
-                "{} — {} USDT",
-                quote.domain,
-                quote.price_usd.round_dp(2)
-            ),
+            format!("{} — {} USDT", quote.domain, quote.price_usd.round_dp(2)),
             format!("alt_domain:{}", quote.domain),
         )]);
     }

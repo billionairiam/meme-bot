@@ -20,6 +20,13 @@ pub struct UserNotification {
     pub message: String,
 }
 
+pub struct GenerationQueueConfig {
+    pub max_concurrency: usize,
+    pub worker_id: String,
+    pub repo_owner: String,
+    pub github_token: String,
+}
+
 pub struct GenerationQueue {
     pool: SqlitePool,
     router: Arc<GenerationRouter>,
@@ -37,21 +44,18 @@ impl GenerationQueue {
         pool: SqlitePool,
         router: Arc<GenerationRouter>,
         deployer: Option<Arc<dyn SiteDeployer>>,
-        max_concurrency: usize,
-        worker_id: String,
-        repo_owner: String,
-        github_token: String,
+        config: GenerationQueueConfig,
         notification_tx: Option<mpsc::UnboundedSender<UserNotification>>,
     ) -> Self {
         Self {
             pool,
             router,
             deployer,
-            repo_owner,
-            github_token,
-            semaphore: Arc::new(Semaphore::new(max_concurrency.max(1))),
+            repo_owner: config.repo_owner,
+            github_token: config.github_token,
+            semaphore: Arc::new(Semaphore::new(config.max_concurrency.max(1))),
             lock_mutex: Arc::new(Mutex::new(())),
-            worker_id,
+            worker_id: config.worker_id,
             notification_tx,
         }
     }
@@ -192,12 +196,40 @@ impl GenerationQueue {
                         }
                     }
                 } else {
+                    error!(
+                        order_id = %request.order_id,
+                        "API_SERVICE_BASE_URL/API_SERVICE_API_KEY are required; meme-bot cannot deploy directly"
+                    );
                     sqlx::query(
-                        "UPDATE orders SET site_status = 'deploying', updated_at = datetime('now') WHERE id = ?",
+                        "UPDATE orders SET site_status = 'needs_manual_review', updated_at = datetime('now') WHERE id = ?",
                     )
                     .bind(request.order_id)
                     .execute(&self.pool)
                     .await?;
+                    sqlx::query(
+                        r#"
+                        UPDATE websites
+                        SET deployment_status = 'deployment_failed', updated_at = datetime('now')
+                        WHERE order_id = ?
+                        "#,
+                    )
+                    .bind(request.order_id)
+                    .execute(&self.pool)
+                    .await?;
+                    db::record_deployment_attempt(
+                        &self.pool,
+                        website_id,
+                        "pages_deploy",
+                        "failed",
+                        Some("API_SERVICE_BASE_URL and API_SERVICE_API_KEY are required; meme-bot cannot deploy directly"),
+                    )
+                    .await?;
+                    self.mark_manual_review(job_id, request.order_id).await?;
+                    self.notify_user(
+                        request.order_id,
+                        "⚠️ <b>Website deployment is not configured.</b>\n\nYour order needs manual review. Contact admin for assistance.",
+                    )
+                    .await;
                 }
             }
             Err(GenerationError::QuotaExhausted | GenerationError::ProviderUnavailable) => {

@@ -12,6 +12,7 @@ const PAGES_DEPLOYMENT_POLL_ATTEMPTS: usize = 36;
 const PAGES_DEPLOYMENT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const PAGES_DOMAIN_POLL_ATTEMPTS: usize = 12;
 const PAGES_DOMAIN_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const API_PAGES_DEPLOY_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeploymentRequest {
@@ -998,7 +999,7 @@ impl SiteDeployer for HttpClientPagesDeployer {
                 "publish_dir": publish_dir_from_site_dir(&request.site_dir),
                 "custom_domain": request.custom_domain,
             }))
-            .timeout(Duration::from_secs(60))
+            .timeout(API_PAGES_DEPLOY_TIMEOUT)
             .send()
             .await
             .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;

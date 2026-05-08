@@ -10,7 +10,7 @@ Rust monorepo for a Telegram bot that sells meme coin websites. Users pay USDT o
                       │         (XML API)            │
                       └────────▲─────────────────────┘
                                │
-                               │ direct API call
+                               │ server-side API call
                                │
 ┌──────────────┐     ┌────────┴───────┐     ┌─────────────┐
 │  Telegram    │     │   api-server   │     │  Cloudflare │
@@ -38,7 +38,7 @@ Rust monorepo for a Telegram bot that sells meme coin websites. Users pay USDT o
 
 Both compile from the same crate (`src/lib.rs`). The `meme-bot` binary runs the Telegram dispatcher and generation queue worker concurrently in a single process. All user orders are persisted to SQLite (`./db.sqlite3`, created automatically on first run) — no in-memory state that could be lost on restart.
 
-When `API_SERVICE_BASE_URL` is set, meme-bot calls the API server via HTTP. When omitted, it falls back to direct API calls — backward compatible for single-server deployments.
+`meme-bot` generates sites, creates the GitHub repo, and pushes the website code. Cloudflare deployment and custom-domain binding are delegated to `api-server` through `API_SERVICE_BASE_URL`/`API_SERVICE_API_KEY`; without those variables, paid generated sites are held for manual review instead of being deployed directly.
 
 ### Module map
 
@@ -51,7 +51,7 @@ When `API_SERVICE_BASE_URL` is set, meme-bot calls the API server via HTTP. When
 | `payment` | `PaymentVerifier` trait + real chain verifier for ERC20/TRON/SOL USDT. `PaymentService` checks expiry, recipient, amount, confirmations, and transaction age. |
 | `generation` | `SiteGenerationProvider` trait. `GenerationRouter` tries primary → fallback on recoverable errors. `CliGenerationProvider` runs Gemini/Codex as external CLI processes. |
 | `queue` | `GenerationQueue` with SQLite-backed job locking (mutex-guarded SELECT + UPDATE), global semaphore for concurrency control. |
-| `deployment` | `SiteDeployer` trait. `HttpClientPagesDeployer` calls the API server. `CloudflarePagesDeployer` talks to Cloudflare directly (fallback). |
+| `deployment` | `SiteDeployer` trait. `HttpClientPagesDeployer` lets `meme-bot` create/push GitHub repos, then asks `api-server` to deploy via Cloudflare Pages. `meme-bot` must not deploy directly to Cloudflare in production. |
 | `domain` | `DomainRegistrar` trait. `NamecheapRegistrar` calls Namecheap XML API. `HttpClientDomainRegistrar` proxies through the API server. `DnsProvisioner` trait with `NamecheapDnsProvisioner` / `HttpClientDnsProvisioner`. |
 | `telegram` | teloxide-based bot with `dptree` dispatch. Inline keyboard UI for 7-step order form, template deep-links (`/start tpl_<id>`). |
 | `app` | Wires `GenerationRouter` + `GenerationQueue` + deployer into `run_once()` for backend mode. |
@@ -384,7 +384,7 @@ API_SERVICE_BASE_URL=https://api.yourdomain.com
 API_SERVICE_API_KEY=<same-key-as-above>
 ```
 
-When both are set, the bot uses `HttpClientDomainRegistrar`, `HttpClientDnsProvisioner`, and `HttpClientPagesDeployer` instead of direct API calls. Namecheap and Cloudflare credentials are no longer needed on the bot server — only the two `API_SERVICE_*` vars.
+Both variables are required for production. The bot uses `HttpClientDomainRegistrar`, `HttpClientDnsProvisioner`, and `HttpClientPagesDeployer` instead of direct Namecheap/Cloudflare calls. Namecheap and Cloudflare credentials belong on the API server, not on the bot server. If the Pages API service is missing, generated sites are marked for manual review instead of being deployed directly by `meme-bot`.
 
 ### Security model
 
@@ -428,7 +428,7 @@ Production requires Namecheap API access enabled and the server IPv4 whitelisted
 
 ## Cloudflare Pages (Git Integration)
 
-The `POST /pages/deploy` endpoint creates a Cloudflare Pages project connected to a GitHub repository. Cloudflare watches the configured branch and auto-deploys on push. This eliminates the need for `wrangler` CLI on the server — the deployment is fully managed by Cloudflare.
+The `POST /pages/deploy` endpoint creates or verifies a Cloudflare Pages project connected to a GitHub repository, triggers a deployment, waits for deployment success, and optionally binds the custom domain. This keeps Cloudflare credentials and deployment responsibility inside `api-server`; `meme-bot` only generates the site and pushes code to GitHub.
 
 ### Configuration
 
