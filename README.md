@@ -276,15 +276,42 @@ curl -X POST http://127.0.0.1:8080/api/v1/domain/quote \
 # → {"domain":"test.xyz","available":...,"price":...,"currency":"USD","tld":"xyz",...}
 ```
 
-### Reverse proxy (Caddy example)
+### Reverse proxy (Caddy)
 
-The API server binds to `127.0.0.1` by default. Put Caddy in front for TLS, rate limiting, and IP allowlisting:
+The API server binds to `127.0.0.1` by default — only local processes can reach it. Caddy sits in front and handles TLS termination, rate limiting, and IP allowlisting.
 
+#### Install Caddy
+
+```bash
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
+curl -1sLf 'https://dl.cloudflare.com/caddy/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudflare.com/caddy/debian/deb.repo' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update
+sudo apt install caddy
 ```
-# /etc/caddy/Caddyfile
-api.yourdomain.com {
-    tls your@email.com
 
+#### Configure
+
+Edit `/etc/caddy/Caddyfile`:
+
+```caddyfile
+# Global options block (optional — set default email for ACME)
+{
+    email your@email.com
+}
+
+# API server reverse proxy
+api.yourdomain.com {
+    # Rate limiting: 10 requests per second per IP, burst 20
+    rate_limit {
+        zone dynamic {
+            key {remote_host}
+            events 10 20
+            window 1s
+        }
+    }
+
+    # IP allowlist — only your home server can reach the backend
     @allowed remote_ip <home-server-public-IP>
     handle @allowed {
         reverse_proxy 127.0.0.1:8080
@@ -292,14 +319,61 @@ api.yourdomain.com {
     handle {
         respond "Access denied" 403
     }
+
+    # Request logging
+    log {
+        output file /var/log/caddy/api-access.log
+    }
 }
 ```
 
+**Notes:**
+- Replace `api.yourdomain.com` with your actual API domain (e.g., `api.mymemebot.com`)
+- Replace `<home-server-public-IP>` with your home server's public IPv4 (run `curl -4 ifconfig.me` on the home server to find it)
+- Caddy auto-provisions and renews Let's Encrypt certificates — no extra steps needed
+- Ports 80 and 443 must be open on the VPS firewall
+- DNS A/AAAA record for `api.yourdomain.com` must point to the VPS public IP
+
+#### Start
+
 ```bash
-sudo systemctl reload caddy
+# Validate config
+sudo caddy validate --config /etc/caddy/Caddyfile
+
+# Start
+sudo systemctl enable --now caddy
+sudo systemctl status caddy
 ```
 
-Caddy auto-provisions Let's Encrypt certificates. The `@allowed` block restricts access to your home server's public IP — anyone else gets `403`.
+#### Verify
+
+```bash
+# Health check (no auth)
+curl https://api.yourdomain.com/api/v1/health
+# → {"status":"ok"}
+
+# Authenticated endpoint (should 401 without key)
+curl -X POST https://api.yourdomain.com/api/v1/domain/quote \
+  -H "Content-Type: application/json" \
+  -d '{"domain":"test.xyz"}'
+# → {"error":"unauthorized","message":"invalid API key"}
+
+# From a non-whitelisted IP (should 403)
+# (run this from a machine that is NOT the home server)
+curl https://api.yourdomain.com/api/v1/health
+# → Access denied
+```
+
+#### Firewall
+
+Allow only ports 80 and 443 from the internet. The API server port (8080) should NOT be exposed:
+
+```bash
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw deny 8080/tcp   # just to be explicit — default deny covers this
+sudo ufw enable
+```
 
 ## Connecting the bot to the API server
 
