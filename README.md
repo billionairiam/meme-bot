@@ -484,9 +484,9 @@ The generation worker runs Gemini/Codex as an external CLI in non-interactive mo
 
 ```bash
 GEMINI_AGENT_COMMAND=gemini
-GEMINI_AGENT_ARGS=--yolo --prompt-file {prompt_file}
+GEMINI_AGENT_ARGS="--yolo --prompt-file {prompt_file}"
 CODEX_AGENT_COMMAND=codex
-CODEX_AGENT_ARGS=exec --dangerously-bypass-approvals-and-sandbox --cd {output_dir} --file {prompt_file}
+CODEX_AGENT_ARGS="exec --dangerously-bypass-approvals-and-sandbox --cd {output_dir} --file {prompt_file}"
 AGENT_TIMEOUT_SECONDS=900
 GENERATION_PRIMARY_PROVIDER=gemini
 GENERATION_MAX_CONCURRENCY=2
@@ -507,7 +507,7 @@ The Telegram bot runs as part of the `meme-bot` binary. It requires:
 ```bash
 # Required
 TELEGRAM_BOT_TOKEN=<bot token>
-DATABASE_URL=sqlite://./db.sqlite3
+DATABASE_URL=sqlite://./db.sqlite3?mode=rwc
 TEMPLATE_CATALOG_URL=https://your-template-site.example
 ADMIN_CONTACT=@your_admin
 
