@@ -349,6 +349,7 @@ async fn handle_message(
             "/start" | "/help" => return show_main_menu(&bot, msg.chat.id, &config).await,
             "/create" => return show_create_menu(&bot, msg.chat.id).await,
             "/status" => return show_status(&bot, msg.chat.id, user_id, &sessions, &pool).await,
+            "/history" => return show_history(&bot, msg.chat.id, user_id, &pool).await,
             "/cancel" => {
                 cancel_user_order(&pool, user_id, &sessions).await;
                 return bot
@@ -439,6 +440,7 @@ async fn handle_callback(
         }
         Some("pay_menu") => edit_payment_chain_menu(&bot, target).await,
         Some("status") => edit_status(&bot, target, query.from.id, &sessions, &pool).await,
+        Some("history") => edit_history(&bot, target, query.from.id, &pool).await,
         Some("contact_admin") => edit_contact_admin(&bot, target, &config).await,
         Some("pay_erc20") => {
             edit_payment_chain_and_ask_tx(
@@ -1594,6 +1596,46 @@ async fn status_text(user_id: UserId, sessions: &Sessions, pool: &SqlitePool) ->
     }
 }
 
+async fn history_text(user_id: UserId, pool: &SqlitePool) -> String {
+    match db::get_user_paid_order_history(pool, user_id.0 as i64, 10).await {
+        Ok(items) if items.is_empty() => "🧾 <b>History</b>\nNo paid orders.".to_string(),
+        Ok(items) => {
+            let mut lines = vec!["🧾 <b>Paid Orders</b>".to_string()];
+            for (index, item) in items.iter().enumerate() {
+                let domain = item
+                    .custom_domain
+                    .as_deref()
+                    .or(item.requested_domain.as_deref())
+                    .or(item.cloudflare_pages_url.as_deref())
+                    .unwrap_or("—");
+                let chain = item.payment_chain.as_deref().unwrap_or("—");
+                let paid_at = item
+                    .paid_at
+                    .map(|value| value.format("%Y-%m-%d").to_string())
+                    .unwrap_or_else(|| "—".to_string());
+                lines.push(format!(
+                    "{}. {} · {} USDT · {} · {} · {}",
+                    index + 1,
+                    html_escape(domain),
+                    item.amount_usdt,
+                    chain,
+                    item.site_status,
+                    paid_at
+                ));
+            }
+            lines.join("\n")
+        }
+        Err(error) => {
+            warn!(
+                ?error,
+                user_id = user_id.0 as i64,
+                "failed to load paid order history"
+            );
+            "🧾 <b>History</b>\nCheck failed. Try later.".to_string()
+        }
+    }
+}
+
 fn payment_chain_text() -> &'static str {
     "💳 <b>Payment</b>\nChoose USDT chain."
 }
@@ -1694,6 +1736,21 @@ async fn show_status(
     .await
 }
 
+async fn show_history(
+    bot: &Bot,
+    chat_id: ChatId,
+    user_id: UserId,
+    pool: &SqlitePool,
+) -> ResponseResult<()> {
+    send_screen(
+        bot,
+        chat_id,
+        history_text(user_id, pool).await,
+        main_menu_keyboard(),
+    )
+    .await
+}
+
 async fn edit_status(
     bot: &Bot,
     target: UiMessage,
@@ -1705,6 +1762,21 @@ async fn edit_status(
         bot,
         target,
         status_text(user_id, sessions, pool).await,
+        main_menu_keyboard(),
+    )
+    .await
+}
+
+async fn edit_history(
+    bot: &Bot,
+    target: UiMessage,
+    user_id: UserId,
+    pool: &SqlitePool,
+) -> ResponseResult<()> {
+    edit_screen(
+        bot,
+        target,
+        history_text(user_id, pool).await,
         main_menu_keyboard(),
     )
     .await
@@ -2682,6 +2754,7 @@ fn main_menu_keyboard() -> InlineKeyboardMarkup {
             "create",
         )],
         vec![InlineKeyboardButton::callback("📊 Order Status", "status")],
+        vec![InlineKeyboardButton::callback("🧾 Paid History", "history")],
         vec![InlineKeyboardButton::callback(
             "👤 Contact Admin",
             "contact_admin",

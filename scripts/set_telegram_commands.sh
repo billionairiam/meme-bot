@@ -26,6 +26,10 @@ curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setMyCommand
         "description": "Check your order status"
       },
       {
+        "command": "history",
+        "description": "Show paid order history"
+      },
+      {
         "command": "cancel",
         "description": "Cancel the current order"
       }

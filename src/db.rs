@@ -1106,6 +1106,50 @@ pub async fn get_user_order(
     }))
 }
 
+pub async fn get_user_paid_order_history(
+    pool: &SqlitePool,
+    telegram_user_id: i64,
+    limit: i64,
+) -> anyhow::Result<Vec<UserOrderHistoryItem>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT o.id, o.amount_usdt, o.payment_chain, o.site_status, o.paid_at,
+               w.requested_domain, w.custom_domain, w.cloudflare_pages_url
+        FROM orders o
+        JOIN users u ON o.user_id = u.id
+        LEFT JOIN websites w ON w.order_id = o.id
+        WHERE u.telegram_user_id = ?
+          AND o.payment_status = 'paid'
+        ORDER BY COALESCE(o.paid_at, o.updated_at, o.created_at) DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(telegram_user_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(UserOrderHistoryItem {
+                order_id: uuid_from_row(&row, "id")?,
+                amount_usdt: Decimal::from_str_exact(row.get::<&str, _>("amount_usdt"))
+                    .unwrap_or_default(),
+                payment_chain: row.get("payment_chain"),
+                site_status: row.get("site_status"),
+                paid_at: row
+                    .get::<Option<String>, _>("paid_at")
+                    .as_deref()
+                    .map(parse_db_datetime)
+                    .transpose()?,
+                requested_domain: row.get("requested_domain"),
+                custom_domain: row.get("custom_domain"),
+                cloudflare_pages_url: row.get("cloudflare_pages_url"),
+            })
+        })
+        .collect()
+}
+
 pub async fn get_payment_context_by_order(
     pool: &SqlitePool,
     order_id: Uuid,
@@ -1243,6 +1287,18 @@ pub struct UserOrderStatus {
     pub amount_usdt: rust_decimal::Decimal,
     pub payment_chain: Option<String>,
     pub requested_domain: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserOrderHistoryItem {
+    pub order_id: Uuid,
+    pub amount_usdt: Decimal,
+    pub payment_chain: Option<String>,
+    pub site_status: String,
+    pub paid_at: Option<DateTime<Utc>>,
+    pub requested_domain: Option<String>,
+    pub custom_domain: Option<String>,
+    pub cloudflare_pages_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1418,6 +1474,47 @@ mod tests {
         assert_eq!(expired, 1);
         assert_eq!(order.get::<String, _>("payment_status"), "expired");
         assert_eq!(order.get::<String, _>("site_status"), "failed");
+    }
+
+    #[tokio::test]
+    async fn paid_order_history_only_returns_paid_orders() {
+        let pool = test_pool().await;
+        let user_id = upsert_user(&pool, 303, Some("ma"), None, None, true)
+            .await
+            .unwrap();
+        let paid_order_id = create_site_order(
+            &pool,
+            user_id,
+            BuildMode::AiFree,
+            None,
+            Decimal::new(50, 0),
+            None,
+        )
+        .await
+        .unwrap();
+        mark_order_paid(&pool, paid_order_id, PaymentChain::Tron, "tx303")
+            .await
+            .unwrap();
+
+        let unpaid_order_id = create_site_order(
+            &pool,
+            user_id,
+            BuildMode::Template,
+            Some("template_01"),
+            Decimal::new(30, 0),
+            None,
+        )
+        .await
+        .unwrap();
+        cancel_order_for_user(&pool, 303, Some(unpaid_order_id))
+            .await
+            .unwrap();
+
+        let history = get_user_paid_order_history(&pool, 303, 10).await.unwrap();
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].order_id, paid_order_id);
+        assert_eq!(history[0].payment_chain.as_deref(), Some("tron"));
     }
 
     async fn test_pool() -> SqlitePool {
