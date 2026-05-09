@@ -262,6 +262,15 @@ sudo systemctl enable --now api-server
 sudo systemctl status api-server
 ```
 
+If SELinux is enforcing (RHEL / AlmaLinux / CentOS), allow the service to run from `/opt` and read config from `/etc`:
+
+```bash
+sudo chcon -t bin_t /opt/api-server/api-server
+sudo chcon -t etc_t /etc/api-server/.env
+```
+
+Or configure a proper SELinux policy module if preferred.
+
 **Verify it's running:**
 
 ```bash
@@ -289,12 +298,23 @@ The API server binds to `127.0.0.1` by default — only local processes can reac
 
 #### Install Caddy
 
+**Debian / Ubuntu:**
+
 ```bash
 sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
 curl -1sLf 'https://dl.cloudflare.com/caddy/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -1sLf 'https://dl.cloudflare.com/caddy/debian/deb.repo' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
 sudo apt update
 sudo apt install caddy
+```
+
+**RHEL / AlmaLinux / CentOS:**
+
+```bash
+sudo dnf install -y epel-release
+sudo dnf install -y 'dnf-command(copr)'
+sudo dnf copr enable -y @caddy/caddy
+sudo dnf install -y caddy
 ```
 
 #### Configure
@@ -373,13 +393,23 @@ curl https://api.yourdomain.com/api/v1/health
 
 #### Firewall
 
-Allow only ports 80 and 443 from the internet. The API server port (8080) should NOT be exposed:
+Allow only ports 80 and 443 from the internet. The API server port (8080) should NOT be exposed.
+
+**Debian / Ubuntu (ufw):**
 
 ```bash
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
 sudo ufw deny 8080/tcp   # just to be explicit — default deny covers this
 sudo ufw enable
+```
+
+**RHEL / AlmaLinux / CentOS (firewalld):**
+
+```bash
+sudo firewall-cmd --permanent --add-service=http
+sudo firewall-cmd --permanent --add-service=https
+sudo firewall-cmd --reload
 ```
 
 ## Connecting the bot to the API server
