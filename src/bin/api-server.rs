@@ -9,7 +9,7 @@ use axum::{
     routing::{get, post},
 };
 use meme_bot::{
-    config::{NamecheapConfig, NamecheapContactConfig},
+    config::{NamecheapConfig, NamecheapContactConfig, load_env_file},
     domain::{
         ApiErrorResponse, CloudflareZoneResult, DnsProvisioner, DnsRecord, DomainError,
         DomainPurchaseRequest, DomainPurchaseResult, DomainQuote, DomainQuoteRequest,
@@ -36,13 +36,18 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
+    let env_file =
+        load_env_file("API_SERVER_ENV_FILE", ".env.api-server").expect("load api-server env file");
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-
-    dotenvy::dotenv().ok();
+    if let Some(path) = env_file {
+        info!(env_file = %path, "loaded api-server env file");
+    } else {
+        info!("api-server env file not found; using process environment only");
+    }
 
     let api_key = env::var("API_SERVICE_API_KEY")
         .expect("API_SERVICE_API_KEY must be set (min 32 characters)");

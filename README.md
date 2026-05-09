@@ -44,7 +44,7 @@ Both compile from the same crate (`src/lib.rs`). The `meme-bot` binary runs the 
 
 | Module | Role |
 |---|---|
-| `config` | Flat env var configuration (`Config::from_env()`). See `.env.example`. |
+| `config` | Flat env var configuration (`Config::from_env()`). See `.env.meme-bot.example` and `.env.api-server.example`. |
 | `models` | Shared domain types: `WebsiteInput`, `BuildMode`, `OrderType`, `PaymentChain`, `Order`, `Template`. |
 | `validation` | Regex-based input validation for tickers, contract addresses (EVM/SOL/TRON), X/TG links, domains. No user-provided prompts. |
 | `db` | Raw SQLx queries: `upsert_user`, `create_site_order`, `mark_order_paid`, `enqueue_generation_job`, `queue_position`. |
@@ -94,7 +94,8 @@ cargo test    # run all tests
 ### Run
 
 ```bash
-cp .env.example .env   # edit with your values
+cp .env.meme-bot.example .env.meme-bot
+cp .env.api-server.example .env.api-server
 
 # Main binary (Telegram bot + queue worker, DATABASE_URL defaults to sqlite://./db.sqlite3)
 cargo run
@@ -102,6 +103,8 @@ cargo run
 # API server
 cargo run --bin api-server
 ```
+
+`meme-bot` loads `.env.meme-bot` by default. `api-server` loads `.env.api-server` by default. Override with `MEME_BOT_ENV_FILE=/path/to/bot.env` or `API_SERVER_ENV_FILE=/path/to/api.env`.
 
 ## API Server
 
@@ -184,9 +187,9 @@ The health endpoint (`GET /api/v1/health`) is the only unauthenticated path — 
 
 ### Run the API server
 
-**Option A — Quick start with a `.env` file (development / testing):**
+**Option A — Quick start with `.env.api-server` (development / testing):**
 
-Create `.env` in the project root (or copy from `.env.example`):
+Create `.env.api-server` in the project root (or copy from `.env.api-server.example`):
 
 ```bash
 API_SERVICE_API_KEY=<output from openssl rand -base64 48>
@@ -213,7 +216,7 @@ Then run:
 cargo run --bin api-server
 ```
 
-The server reads `.env` automatically via `dotenvy::dotenv()`.
+The server reads `.env.api-server` automatically. Set `API_SERVER_ENV_FILE=/path/to/api.env` to use a different file.
 
 **Option B — Prod with systemd:**
 
@@ -235,7 +238,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=api-server
-EnvironmentFile=/etc/api-server/.env
+Environment=API_SERVER_ENV_FILE=/etc/api-server/.env
 ExecStart=/opt/api-server/api-server
 Restart=on-failure
 RestartSec=5
@@ -392,7 +395,7 @@ Both variables are required for production. The bot uses `HttpClientDomainRegist
 - **API key auth**: Every non-health request must carry `X-API-Key` matching the server's `API_SERVICE_API_KEY`. Mismatch → `401`.
 - **IP allowlist**: Caddy `remote_ip` matcher restricts which IPs can even reach the backend. Only your home server's public IP is allowed.
 - **No public ports on the service**: The API server binds to `127.0.0.1` — only the reverse proxy can reach it.
-- **Key from env, not config files**: The API key is a single env var, never checked into git. The `.env` file is in `.gitignore`.
+- **Key from env, not config files**: The API key is a single env var, never checked into git. `.env`, `.env.meme-bot`, and `.env.api-server` are in `.gitignore`.
 
 ## Namecheap
 

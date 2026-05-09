@@ -2,6 +2,18 @@ use std::env;
 
 use anyhow::{Context, Result};
 
+pub fn load_env_file(env_var_name: &str, default_path: &str) -> Result<Option<String>> {
+    let path = env::var(env_var_name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_path.to_string());
+    match dotenvy::from_filename(&path) {
+        Ok(_) => Ok(Some(path)),
+        Err(error) if error.not_found() => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("load env file {path}")),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub database_url: Option<String>,

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use meme_bot::app::App;
-use meme_bot::config::Config;
+use meme_bot::config::{Config, load_env_file};
 use meme_bot::telegram::run_bot;
 use sqlx::sqlite::SqlitePoolOptions;
 use teloxide::{prelude::*, types::ParseMode};
@@ -11,10 +11,15 @@ use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
+    let env_file = load_env_file("MEME_BOT_ENV_FILE", ".env.meme-bot")?;
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    if let Some(path) = env_file {
+        info!(env_file = %path, "loaded meme-bot env file");
+    } else {
+        info!("meme-bot env file not found; using process environment only");
+    }
 
     let config = Config::from_env()?;
 

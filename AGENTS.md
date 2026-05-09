@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a Rust 2024 crate with two binaries and one shared library. Binary entry points live in `src/bin/`: `meme-bot.rs` runs the Telegram bot plus queue worker, and `api-server.rs` exposes REST endpoints for Namecheap and Cloudflare operations. Shared modules live directly under `src/`: `config`, `db`, `telegram`, `queue`, `generation`, `deployment`, `domain`, `payment`, `validation`, `models`, and `app`. Database schema changes belong in `migrations/`; the current SQLite schema starts at `migrations/0001_init.sql`. Configuration examples are in `.env.example`.
+This is a Rust 2024 crate with two binaries and one shared library. Binary entry points live in `src/bin/`: `meme-bot.rs` runs the Telegram bot plus queue worker, and `api-server.rs` exposes REST endpoints for Namecheap and Cloudflare operations. Shared modules live directly under `src/`: `config`, `db`, `telegram`, `queue`, `generation`, `deployment`, `domain`, `payment`, `validation`, `models`, and `app`. Database schema changes belong in `migrations/`; the current SQLite schema starts at `migrations/0001_init.sql`. Configuration examples are split between `.env.meme-bot.example` and `.env.api-server.example`.
 
 ## Build, Test, and Development Commands
 
@@ -14,7 +14,7 @@ This is a Rust 2024 crate with two binaries and one shared library. Binary entry
 - `cargo clippy --all-targets --all-features` checks for common Rust issues.
 - `cargo build-musl-release` builds static Linux release binaries via the alias in `.cargo/config.toml`.
 
-Before running services locally, create `.env` from `.env.example` and fill required secrets such as `TELEGRAM_BOT_TOKEN` and API provider credentials.
+Before running services locally, create `.env.meme-bot` from `.env.meme-bot.example` and `.env.api-server` from `.env.api-server.example`. `meme-bot` and `api-server` load those files by default; use `MEME_BOT_ENV_FILE` or `API_SERVER_ENV_FILE` to override paths.
 
 ## Coding Style & Naming Conventions
 
@@ -30,4 +30,4 @@ Recent commits use short imperative summaries, for example `Migrate database fro
 
 ## Security & Configuration Tips
 
-Do not commit `.env`, real API keys, bot tokens, database files, or generated deployment artifacts. Keep new configuration as flat environment variables read through `Config::from_env()` and document additions in `.env.example`.
+Do not commit `.env`, `.env.meme-bot`, `.env.api-server`, real API keys, bot tokens, database files, or generated deployment artifacts. Keep new configuration as flat environment variables read through `Config::from_env()` and document additions in the matching split example file.

@@ -1,4 +1,6 @@
 /target
 .env
+.env.meme-bot
+.env.api-server
 .codex
 test
