@@ -26,6 +26,7 @@ pub struct GenerationQueueConfig {
     pub worker_id: String,
     pub repo_owner: String,
     pub github_token: String,
+    pub generated_sites_dir: String,
 }
 
 pub struct GenerationQueue {
@@ -34,6 +35,7 @@ pub struct GenerationQueue {
     deployer: Option<Arc<dyn SiteDeployer>>,
     repo_owner: String,
     github_token: String,
+    generated_sites_dir: String,
     semaphore: Arc<Semaphore>,
     lock_mutex: Arc<Mutex<()>>,
     worker_id: String,
@@ -54,6 +56,7 @@ impl GenerationQueue {
             deployer,
             repo_owner: config.repo_owner,
             github_token: config.github_token,
+            generated_sites_dir: config.generated_sites_dir,
             semaphore: Arc::new(Semaphore::new(config.max_concurrency.max(1))),
             lock_mutex: Arc::new(Mutex::new(())),
             worker_id: config.worker_id,
@@ -72,7 +75,7 @@ impl GenerationQueue {
         let job_id = job.job_id;
         let website_id = job.website_id;
         let attempt_count = job.attempt_count;
-        let request = job.into_generation_request();
+        let request = job.into_generation_request(&self.generated_sites_dir);
         sqlx::query(
             "UPDATE orders SET site_status = 'generating', updated_at = datetime('now') WHERE id = ?",
         )
@@ -577,11 +580,12 @@ struct GenerationJobRow {
 }
 
 impl GenerationJobRow {
-    fn into_generation_request(self) -> SiteGenerationRequest {
+    fn into_generation_request(self, generated_sites_dir: &str) -> SiteGenerationRequest {
         let dir_name = self
             .requested_domain
             .clone()
             .unwrap_or_else(|| format!("site-{}", &self.order_id.simple().to_string()[..8]));
+        let output_dir = std::path::Path::new(generated_sites_dir).join(dir_name);
         SiteGenerationRequest {
             order_id: self.order_id,
             build_mode: self.build_mode,
@@ -595,7 +599,39 @@ impl GenerationJobRow {
                 logo_asset_path: self.logo_asset_path,
                 requested_domain: self.requested_domain,
             },
-            output_dir: format!("/www/websites/{dir_name}").into(),
+            output_dir,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::GenerationJobRow;
+    #[test]
+    fn generation_request_uses_configured_sites_dir_and_domain_folder() {
+        let row = GenerationJobRow {
+            job_id: Uuid::new_v4(),
+            website_id: Uuid::new_v4(),
+            order_id: Uuid::new_v4(),
+            build_mode: "ai_free".to_string(),
+            template_id: None,
+            token_ticker: "AAA".to_string(),
+            token_name: "AAA BBB".to_string(),
+            contract_address: "0x123".to_string(),
+            x_url: "https://x.com/aaabbb".to_string(),
+            telegram_url: "https://t.me/aaabbb".to_string(),
+            logo_asset_path: "/tmp/logo.png".to_string(),
+            requested_domain: Some("aaabbb.com".to_string()),
+            attempt_count: 0,
+        };
+
+        let request = row.into_generation_request("/www/websites");
+
+        assert_eq!(
+            request.output_dir,
+            std::path::PathBuf::from("/www/websites/aaabbb.com")
+        );
     }
 }

@@ -13,7 +13,7 @@ const NAMECHEAP_PRODUCTION_URL: &str = "https://api.namecheap.com/xml.response";
 
 pub const SUPPORTED_TLDS: &[&str] = &[
     "com", "net", "org", "xyz", "fun", "site", "online", "io", "co", "me", "cc", "app", "dev",
-    "world", "space", "club", "store", "shop", "vip"
+    "world", "space", "club", "store", "shop", "vip",
 ];
 
 fn icann_fee() -> Decimal {

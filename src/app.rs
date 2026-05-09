@@ -65,6 +65,7 @@ impl App {
                 worker_id: "worker-1".to_string(),
                 repo_owner: self.config.github_owner.clone(),
                 github_token: self.config.github_token.clone(),
+                generated_sites_dir: self.config.generated_sites_dir.clone(),
             },
             notification_tx,
         )

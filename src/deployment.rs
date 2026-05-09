@@ -987,7 +987,7 @@ async fn ensure_site_gitignore(site_dir: &str) -> Result<(), DeploymentError> {
     };
 
     let mut changed = false;
-    for entry in ["agent_prompt.md", ".agent_done.json"] {
+    for entry in ["agent_prompt.md", "agent-promt.md", ".agent_done.json"] {
         if !existing.lines().any(|line| line.trim() == entry) {
             if !existing.is_empty() && !existing.ends_with('\n') {
                 existing.push('\n');

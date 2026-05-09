@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 use crate::{config::GenerationProviderName, models::WebsiteInput};
 
+const AGENT_PROMPT_FILE_NAME: &str = "agent-promt.md";
+
 #[derive(Clone, Debug)]
 pub struct SiteGenerationRequest {
     pub order_id: Uuid,
@@ -143,7 +145,7 @@ impl SiteGenerationProvider for CliGenerationProvider {
         prepare_output_dir(&request.output_dir)?;
 
         let prompt = agent_prompt(request, self.name);
-        let prompt_file = request.output_dir.join("agent_prompt.md");
+        let prompt_file = request.output_dir.join(AGENT_PROMPT_FILE_NAME);
         fs::write(&prompt_file, &prompt).map_err(|error| {
             GenerationError::Failed(format!("write agent prompt failed: {error}"))
         })?;
@@ -212,12 +214,16 @@ fn agent_prompt(request: &SiteGenerationRequest, provider_name: &str) -> String 
         && request.input.logo_asset_path.starts_with("./logos/");
     let logo_note = if has_logo {
         format!(
-            "A logo image is provided at `{logo_path}`. Use it as the primary visual anchor — place it prominently in the hero section and favicon. Extract the dominant colors from this image and build the entire color palette around them.",
+            "A logo image is provided at `{logo_path}`. Use it as the primary visual anchor — place it prominently in the hero section and favicon. Inspect the logo's visual style, including colors, shape language, line weight, texture, mood, and meme character energy. Build the entire website identity around that style.",
             logo_path = request.input.logo_asset_path
         )
     } else {
         "No logo image is available. Create a text-based or emoji-based logo/token icon that fits the meme theme.".to_string()
     };
+    let dextools_url = format!(
+        "https://www.dextools.io/app/en/token/{}",
+        request.input.contract_address
+    );
 
     format!(
         r#"You are a website generation agent running in YOLO/non-interactive mode. Create a production-ready static meme coin website.
@@ -229,13 +235,13 @@ fn agent_prompt(request: &SiteGenerationRequest, provider_name: &str) -> String 
 - **Required links on the page**:
   - X/Twitter: {x_url}
   - Telegram: {tg_url}
-  - DEXTOOL: https://www.dextools.io/app/en/token/{contract} (use this exact URL)
+  - DEXTools: {dextools_url} (use this exact URL)
 
 {logo_note}
 
 ## Design Requirements
 
-**Visual identity.** The website must feel like a real meme coin launch page. Derive the visual direction from the token name "{token_name}" — match its energy. If the name is animal-themed use that animal in graphics, if food-themed lean into food imagery, if abstract go bold and futuristic. The design should feel native to crypto culture.
+**Visual identity.** The website must feel like a real meme coin launch page. Derive the visual direction from the token name "{token_name}" and the uploaded logo style. If the name is animal-themed, use that animal in graphics; if food-themed, lean into food imagery; if abstract, go bold and futuristic. Match the logo's style, not just its colors: if the logo is pixel art, make the site and icons pixel-styled; if it is hand-drawn, use sketchy organic forms; if it is glossy 3D, use dimensional highlights; if it is flat/vector, keep the interface crisp and graphic. The design should feel native to crypto culture.
 
 **Color palette.** {color_instruction}
 
@@ -248,6 +254,15 @@ fn agent_prompt(request: &SiteGenerationRequest, provider_name: &str) -> String 
 4. **Links** — large, visible buttons for X (Twitter), Telegram, and DEXTOOL
 5. **How to Buy** — brief steps (create wallet, buy SOL/ETH, swap on DEX)
 6. **Footer** — links repeated, disclaimer
+
+## Required SVG Icons
+
+Generate custom inline SVG icons or local `.svg` files for all social/action links:
+- X/Twitter icon for `{x_url}`
+- Telegram icon for `{tg_url}`
+- DEXTools icon for `{dextools_url}`
+
+The icons must be original SVG artwork adapted to this site's visual style and logo mood. Do not use external icon CDNs, icon fonts, or remote SVGs. The icon colors, stroke weight, corner radius, shadows, texture, and decorative details must match the website design. Place each icon next to its label in the hero/action buttons and repeat them in the footer links.
 
 ## Generated Images
 
@@ -291,9 +306,10 @@ Structured spec for reference:
         contract = request.input.contract_address,
         x_url = request.input.x_url,
         tg_url = request.input.telegram_url,
+        dextools_url = dextools_url,
         logo_note = logo_note,
         color_instruction = if has_logo {
-            "Extract the dominant and accent colors from the provided logo image. Use those exact colors for backgrounds, buttons, headings, and borders. This creates a cohesive brand identity."
+            "Extract the dominant and accent colors from the provided logo image. Use those colors for backgrounds, buttons, headings, borders, and the custom SVG link icons. This creates a cohesive brand identity."
         } else {
             "Pick colors that match the token theme — bold, high-contrast, crypto-native. Use gradients and glow effects. Avoid muted corporate palettes."
         },
@@ -421,12 +437,17 @@ fn validate_html_entry(
         ));
     }
 
+    let dextools_url = format!(
+        "https://www.dextools.io/app/en/token/{}",
+        request.input.contract_address
+    );
     for required in [
         request.input.token_name.as_str(),
         request.input.token_ticker.as_str(),
         request.input.contract_address.as_str(),
         request.input.x_url.as_str(),
         request.input.telegram_url.as_str(),
+        dextools_url.as_str(),
     ] {
         if !normalized.contains(&required.to_ascii_lowercase()) {
             return Err(GenerationError::InvalidOutput(format!(

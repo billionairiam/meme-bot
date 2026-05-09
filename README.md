@@ -490,7 +490,10 @@ CODEX_AGENT_ARGS=exec --dangerously-bypass-approvals-and-sandbox --cd {output_di
 AGENT_TIMEOUT_SECONDS=900
 GENERATION_PRIMARY_PROVIDER=gemini
 GENERATION_MAX_CONCURRENCY=2
+GENERATED_SITES_DIR=/www/websites
 ```
+
+For a paid order using `aaabbb.com`, the worker creates `/www/websites/aaabbb.com`, asks the selected agent to write the static site there, creates/pushes the GitHub repository named `aaabbb.com`, then asks `api-server` to deploy that repo through Cloudflare Pages and bind `aaabbb.com`.
 
 The app considers the agent finished when:
 - the CLI exits successfully
