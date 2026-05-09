@@ -13,6 +13,7 @@ use crate::{
 };
 
 const MAX_JOB_ATTEMPTS: i64 = 3;
+const STALE_RUNNING_JOB_MINUTES: i64 = 120;
 
 #[derive(Clone, Debug)]
 pub struct UserNotification {
@@ -62,6 +63,7 @@ impl GenerationQueue {
 
     pub async fn tick(&self) -> anyhow::Result<()> {
         let _permit = self.semaphore.acquire().await?;
+        self.reclaim_stale_running_jobs().await?;
         let Some(job) = self.lock_next_job().await? else {
             return Ok(());
         };
@@ -288,18 +290,23 @@ impl GenerationQueue {
         };
 
         let job_id: Uuid = Uuid::parse_str(row.get::<&str, _>("job_id"))?;
-        sqlx::query(
+        let update = sqlx::query(
             r#"
             UPDATE generation_jobs
             SET status = 'running', started_at = COALESCE(started_at, datetime('now')),
                 locked_by = ?, locked_at = datetime('now'), attempt_count = attempt_count + 1
             WHERE id = ?
+              AND status = 'queued'
             "#,
         )
         .bind(&self.worker_id)
         .bind(job_id)
         .execute(&mut *tx)
         .await?;
+        if update.rows_affected() != 1 {
+            tx.commit().await?;
+            return Ok(None);
+        }
         tx.commit().await?;
 
         Ok(Some(GenerationJobRow {
@@ -319,6 +326,76 @@ impl GenerationQueue {
             requested_domain: row.get("requested_domain"),
             attempt_count: row.get::<i64, _>("attempt_count") + 1,
         }))
+    }
+
+    async fn reclaim_stale_running_jobs(&self) -> anyhow::Result<()> {
+        let stale_cutoff = format!("-{STALE_RUNNING_JOB_MINUTES} minutes");
+        let retry_rows = sqlx::query(
+            r#"
+            UPDATE generation_jobs
+            SET status = 'queued',
+                finished_at = NULL,
+                locked_by = NULL,
+                locked_at = NULL
+            WHERE status = 'running'
+              AND locked_at IS NOT NULL
+              AND locked_at < datetime('now', ?)
+              AND attempt_count < ?
+            RETURNING order_id
+            "#,
+        )
+        .bind(&stale_cutoff)
+        .bind(MAX_JOB_ATTEMPTS)
+        .fetch_all(&self.pool)
+        .await?;
+
+        for row in retry_rows {
+            let order_id: Uuid = Uuid::parse_str(row.get::<&str, _>("order_id"))?;
+            sqlx::query(
+                "UPDATE orders SET site_status = 'queued', updated_at = datetime('now') WHERE id = ?",
+            )
+            .bind(order_id)
+            .execute(&self.pool)
+            .await?;
+            warn!(%order_id, "requeued stale running generation job");
+        }
+
+        let review_rows = sqlx::query(
+            r#"
+            UPDATE generation_jobs
+            SET status = 'needs_manual_review',
+                finished_at = datetime('now'),
+                locked_by = NULL,
+                locked_at = NULL
+            WHERE status = 'running'
+              AND locked_at IS NOT NULL
+              AND locked_at < datetime('now', ?)
+              AND attempt_count >= ?
+            RETURNING order_id
+            "#,
+        )
+        .bind(&stale_cutoff)
+        .bind(MAX_JOB_ATTEMPTS)
+        .fetch_all(&self.pool)
+        .await?;
+
+        for row in review_rows {
+            let order_id: Uuid = Uuid::parse_str(row.get::<&str, _>("order_id"))?;
+            sqlx::query(
+                "UPDATE orders SET site_status = 'needs_manual_review', updated_at = datetime('now') WHERE id = ?",
+            )
+            .bind(order_id)
+            .execute(&self.pool)
+            .await?;
+            warn!(%order_id, "moved stale running generation job to manual review");
+            self.notify_user(
+                order_id,
+                "⚠️ <b>Website processing stalled after retries.</b>\n\nYour order needs manual review. Contact admin for assistance.",
+            )
+            .await;
+        }
+
+        Ok(())
     }
 
     async fn deploy_with_retries(

@@ -10,6 +10,12 @@ use crate::payment::{PaymentVerificationError, PaymentVerificationOutcome};
 
 pub const PAYMENT_WINDOW_MINUTES: i64 = 30;
 
+#[derive(Debug, Clone)]
+pub struct PaymentWindow {
+    pub started_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
 pub async fn upsert_user(
     pool: &SqlitePool,
     telegram_user_id: i64,
@@ -84,27 +90,34 @@ pub async fn attach_payment_chain(
     pool: &SqlitePool,
     order_id: Uuid,
     chain: PaymentChain,
-) -> anyhow::Result<()> {
-    let expires_at = (Utc::now() + Duration::minutes(PAYMENT_WINDOW_MINUTES)).to_rfc3339();
-    let result = sqlx::query(
+) -> anyhow::Result<PaymentWindow> {
+    let started_at = Utc::now();
+    let expires_at = started_at + Duration::minutes(PAYMENT_WINDOW_MINUTES);
+    let row = sqlx::query(
         r#"
         UPDATE orders
         SET payment_chain = ?,
+            payment_started_at = ?,
             payment_expires_at = ?,
             updated_at = datetime('now')
         WHERE id = ?
           AND payment_status = 'pending'
+        RETURNING payment_started_at, payment_expires_at
         "#,
     )
     .bind(chain.as_str())
-    .bind(expires_at)
+    .bind(started_at.to_rfc3339())
+    .bind(expires_at.to_rfc3339())
     .bind(order_id)
-    .execute(pool)
+    .fetch_optional(pool)
     .await?;
-    if result.rows_affected() != 1 {
+    let Some(row) = row else {
         anyhow::bail!("order is not pending or does not exist");
-    }
-    Ok(())
+    };
+    Ok(PaymentWindow {
+        started_at: parse_db_datetime(row.get::<&str, _>("payment_started_at"))?,
+        expires_at: parse_db_datetime(row.get::<&str, _>("payment_expires_at"))?,
+    })
 }
 
 pub async fn mark_order_paid(
@@ -142,7 +155,7 @@ pub async fn get_order_payment_info(
 ) -> anyhow::Result<OrderPaymentInfo> {
     let row = sqlx::query(
         r#"
-        SELECT id, user_id, amount_usdt, created_at, payment_expires_at, payment_status
+        SELECT id, user_id, amount_usdt, created_at, payment_started_at, payment_expires_at, payment_status
         FROM orders
         WHERE id = ?
         "#,
@@ -156,6 +169,11 @@ pub async fn get_order_payment_info(
         user_id: Uuid::parse_str(row.get::<&str, _>("user_id"))?,
         amount_usdt: Decimal::from_str_exact(row.get::<&str, _>("amount_usdt"))?,
         created_at: parse_db_datetime(row.get::<&str, _>("created_at"))?,
+        payment_started_at: row
+            .get::<Option<String>, _>("payment_started_at")
+            .as_deref()
+            .map(parse_db_datetime)
+            .transpose()?,
         payment_expires_at: row
             .get::<Option<String>, _>("payment_expires_at")
             .as_deref()
@@ -687,6 +705,7 @@ pub struct OrderPaymentInfo {
     pub user_id: Uuid,
     pub amount_usdt: Decimal,
     pub created_at: DateTime<Utc>,
+    pub payment_started_at: Option<DateTime<Utc>>,
     pub payment_expires_at: Option<DateTime<Utc>>,
     pub payment_status: String,
 }

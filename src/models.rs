@@ -83,6 +83,7 @@ pub struct Order {
     pub payment_chain: Option<PaymentChain>,
     pub payment_status: String,
     pub site_status: String,
+    pub payment_started_at: Option<DateTime<Utc>>,
     pub payment_expires_at: Option<DateTime<Utc>>,
     pub paid_at: Option<DateTime<Utc>>,
 }

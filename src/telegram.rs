@@ -886,8 +886,10 @@ async fn handle_order_step(
                     warn!(order_id = %order_id, "payment_expires_at is NULL, falling back to created_at + payment window");
                     payment_info.created_at + chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES)
                 });
-                let payment_started_at =
-                    payment_expires_at - chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES);
+                let payment_started_at = payment_info.payment_started_at.unwrap_or_else(|| {
+                    warn!(order_id = %order_id, "payment_started_at is NULL, falling back from payment_expires_at");
+                    payment_expires_at - chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES)
+                });
                 let verify_request = PaymentVerificationRequest {
                     order_id,
                     chain,
@@ -1387,39 +1389,49 @@ async fn edit_payment_chain_and_ask_tx(
         BuildModeDraft::AiFree => crate::models::BuildMode::AiFree,
     };
     let template_id = draft.template_id.as_deref();
-    let order_id = match db::create_site_order(
-        pool,
-        db_user_id,
-        build_mode,
-        template_id,
-        total,
-        draft.domain_quote_id,
-    )
-    .await
-    {
-        Ok(id) => id,
+    let order_id = if let Some(order_id) = draft.order_id {
+        order_id
+    } else {
+        let order_id = match db::create_site_order(
+            pool,
+            db_user_id,
+            build_mode,
+            template_id,
+            total,
+            draft.domain_quote_id,
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                warn!(?e, "failed to create site order");
+                return edit_screen(
+                    bot,
+                    target,
+                    "<b>Internal error.</b>\n\nFailed to create order. Please try again.",
+                    main_menu_keyboard(),
+                )
+                .await;
+            }
+        };
+        draft.order_id = Some(order_id);
+        set_session(user_id, draft.clone(), sessions);
+        order_id
+    };
+
+    let payment_window = match db::attach_payment_chain(pool, order_id, chain).await {
+        Ok(window) => window,
         Err(e) => {
-            warn!(?e, "failed to create site order");
+            warn!(?e, order_id = %order_id, "failed to attach payment chain");
             return edit_screen(
                 bot,
                 target,
-                "<b>Internal error.</b>\n\nFailed to create order. Please try again.",
+                "<b>Internal error.</b>\n\nFailed to start payment window. Please try again.",
                 main_menu_keyboard(),
             )
             .await;
         }
     };
-
-    if let Err(e) = db::attach_payment_chain(pool, order_id, chain).await {
-        warn!(?e, order_id = %order_id, "failed to attach payment chain");
-        return edit_screen(
-            bot,
-            target,
-            "<b>Internal error.</b>\n\nFailed to start payment window. Please try again.",
-            main_menu_keyboard(),
-        )
-        .await;
-    }
 
     draft.payment_chain = Some(chain);
     draft.step = DraftStep::WaitingTx;
@@ -1430,7 +1442,7 @@ async fn edit_payment_chain_and_ask_tx(
     edit_screen(
         bot,
         target,
-        payment_instruction(order_id, total, chain, address),
+        payment_instruction(order_id, total, chain, address, &payment_window),
         cancel_keyboard(),
     )
     .await
@@ -1978,11 +1990,13 @@ pub fn payment_instruction(
     amount_usdt: Decimal,
     chain: PaymentChain,
     address: &str,
+    payment_window: &db::PaymentWindow,
 ) -> String {
     format!(
-        "💳 <b>Payment details</b>\n\nOrder: <code>{order_id}</code>\nAmount: <b>{amount_usdt}</b> USDT\nChain: <b>{}</b>\nAddress:\n<code>{}</code>\n\nThe 30-minute payment window starts now. Send your TX hash in the next message. I will verify amount, recipient, token, confirmations, timestamp, and duplicate use.",
+        "💳 <b>Payment details</b>\n\nOrder: <code>{order_id}</code>\nAmount: <b>{amount_usdt}</b> USDT\nChain: <b>{}</b>\nAddress:\n<code>{}</code>\n\nThe payment window starts now and expires at <code>{}</code> UTC. Send your TX hash in the next message. I will verify amount, recipient, token, confirmations, timestamp, and duplicate use.",
         chain.as_str(),
-        html_escape(address)
+        html_escape(address),
+        payment_window.expires_at.format("%Y-%m-%d %H:%M:%S")
     )
 }
 
