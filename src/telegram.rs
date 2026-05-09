@@ -453,44 +453,42 @@ async fn handle_order_step(
     pool: &SqlitePool,
 ) -> ResponseResult<()> {
     let Some(mut draft) = get_session(user_id, &sessions) else {
-        return show_main_menu(
-            &bot,
-            msg.chat.id,
-            &TelegramUiConfig {
-                required_group: None,
-                template_catalog_url: String::new(),
-                admin_contact: "@admin".to_string(),
-                usdt_erc20_address: String::new(),
-                usdt_tron_address: String::new(),
-                usdt_sol_address: String::new(),
-                usdt_erc20_rpc_url: String::new(),
-                usdt_erc20_contract: String::new(),
-                usdt_erc20_min_confirmations: 12,
-                tron_grid_base_url: String::new(),
-                tron_grid_api_key: None,
-                usdt_tron_contract: String::new(),
-                usdt_tron_min_confirmations: 20,
-                solana_rpc_url: String::new(),
-                usdt_sol_mint: String::new(),
-                usdt_sol_min_confirmations: 1,
-                namecheap: config.namecheap.clone(),
-                generation_primary_provider: config.generation_primary_provider,
-                agent_timeout_seconds: config.agent_timeout_seconds,
-                gemini_agent_command: config.gemini_agent_command.clone(),
-                gemini_agent_args: config.gemini_agent_args.clone(),
-                codex_agent_command: config.codex_agent_command.clone(),
-                codex_agent_args: config.codex_agent_args.clone(),
-                generated_sites_dir: config.generated_sites_dir.clone(),
-                cloudflare_account_id: config.cloudflare_account_id.clone(),
-                cloudflare_api_token: config.cloudflare_api_token.clone(),
-                cloudflare_wrangler_command: config.cloudflare_wrangler_command.clone(),
-                cloudflare_wrangler_args: config.cloudflare_wrangler_args.clone(),
-                api_service_base_url: config.api_service_base_url.clone(),
-                api_service_api_key: config.api_service_api_key.clone(),
-                github_owner: config.github_owner.clone(),
-            },
-        )
-        .await;
+        if let Some(text) = msg.text().map(str::trim)
+            && looks_like_tx_hash(text)
+        {
+            match db::get_latest_pending_payment_context_for_user(pool, user_id.0 as i64).await {
+                Ok(Some(context)) => {
+                    return process_payment_tx_context(PaymentTxProcess {
+                        bot: &bot,
+                        chat_id: msg.chat.id,
+                        user_id,
+                        config: &config,
+                        sessions: &sessions,
+                        pool,
+                        context,
+                        tx_hash: text,
+                    })
+                    .await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(
+                        ?error,
+                        user_id = user_id.0 as i64,
+                        "failed to recover pending payment context"
+                    );
+                    return bot
+                        .send_message(
+                            msg.chat.id,
+                            "⚠️ <b>Payment check failed.</b>\n\nI could not recover your pending order. Contact admin.",
+                        )
+                        .parse_mode(ParseMode::Html)
+                        .await
+                        .map(|_| ());
+                }
+            }
+        }
+        return show_main_menu(&bot, msg.chat.id, &config).await;
     };
 
     match draft.step {
@@ -821,219 +819,43 @@ async fn handle_order_step(
                     .map(|_| ());
             }
 
-            let mut status_parts: Vec<String> = vec![];
+            let Some(order_id) = draft.order_id else {
+                return bot
+                    .send_message(
+                        msg.chat.id,
+                        "⚠️ <b>No order found.</b>\n\nPlease restart with /create.",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map(|_| ());
+            };
 
-            if let Some(order_id) = draft.order_id {
-                let chain = draft.payment_chain.unwrap_or(PaymentChain::Erc20);
-                let payment_info = match db::get_order_payment_info(pool, order_id).await {
-                    Ok(info) => info,
-                    Err(e) => {
-                        warn!(?e, order_id = %order_id, "failed to load payment info");
-                        return bot
-                            .send_message(msg.chat.id, "⚠️ <b>Payment check failed.</b>\n\nOrder not found. Contact admin.")
-                            .parse_mode(ParseMode::Html)
-                            .await
-                            .map(|_| ());
-                    }
-                };
-                if payment_info.payment_status == "paid" {
-                    return bot
-                        .send_message(msg.chat.id, "<b>Payment already confirmed.</b>\n\nYour website is queued for generation.")
-                        .parse_mode(ParseMode::Html)
-                        .reply_markup(status_keyboard())
-                        .await
-                        .map(|_| ());
-                }
-                match db::tx_hash_already_used(pool, chain, text).await {
-                    Ok(true) => {
-                        return bot
-                            .send_message(msg.chat.id, "<b>TX already used.</b>\n\nSend a transaction hash that has not been used for another order.")
-                            .parse_mode(ParseMode::Html)
-                            .await
-                            .map(|_| ());
-                    }
-                    Ok(false) => {}
-                    Err(e) => warn!(?e, "failed to check tx reuse"),
-                }
-
-                let expected_to_address =
-                    payment_address_for_chain(&config, chain).trim().to_string();
-                if expected_to_address.is_empty() {
+            let context = match db::get_payment_context_by_order(pool, order_id).await {
+                Ok(context) => context,
+                Err(error) => {
+                    warn!(?error, order_id = %order_id, "failed to load payment context");
                     return bot
                         .send_message(
                             msg.chat.id,
-                            "<b>Payment address is not configured.</b>\n\nSet the matching USDT receive address in <code>.env</code>, then restart the bot.",
+                            "⚠️ <b>Payment check failed.</b>\n\nOrder not found. Contact admin.",
                         )
                         .parse_mode(ParseMode::Html)
                         .await
                         .map(|_| ());
                 }
-                let verifier = ChainPaymentVerifier::new(
-                    config.usdt_erc20_rpc_url.clone(),
-                    config.usdt_erc20_contract.clone(),
-                    config.usdt_erc20_min_confirmations,
-                    config.tron_grid_base_url.clone(),
-                    config.tron_grid_api_key.clone(),
-                    config.usdt_tron_contract.clone(),
-                    config.usdt_tron_min_confirmations,
-                    config.solana_rpc_url.clone(),
-                    config.usdt_sol_mint.clone(),
-                    config.usdt_sol_min_confirmations,
-                );
-                let service = PaymentService::new(verifier);
-                let tx_submitted_at = chrono::Utc::now();
-                let payment_expires_at = payment_info.payment_expires_at.unwrap_or_else(|| {
-                    warn!(order_id = %order_id, "payment_expires_at is NULL, falling back to created_at + payment window");
-                    payment_info.created_at + chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES)
-                });
-                let payment_started_at = payment_info.payment_started_at.unwrap_or_else(|| {
-                    warn!(order_id = %order_id, "payment_started_at is NULL, falling back from payment_expires_at");
-                    payment_expires_at - chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES)
-                });
-                let verify_request = PaymentVerificationRequest {
-                    order_id,
-                    chain,
-                    tx_hash: text.to_string(),
-                    expected_to_address,
-                    required_amount_usdt: payment_info.amount_usdt,
-                    payment_started_at,
-                    submitted_at: tx_submitted_at,
-                    expires_at: payment_expires_at,
-                };
-                let verification = verify_payment_with_retries(&service, verify_request).await;
-                if let Err(e) = db::record_payment_attempt(
-                    pool,
-                    payment_info.id,
-                    payment_info.user_id,
-                    chain,
-                    text,
-                    verification.as_ref(),
-                )
-                .await
-                {
-                    warn!(?e, order_id = %order_id, "failed to record payment attempt");
-                }
+            };
 
-                let outcome = match verification {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        return bot
-                            .send_message(
-                                msg.chat.id,
-                                format!(
-                                    "❌ <b>Payment not confirmed.</b>\n\n{}\n\nIf you just paid, wait for confirmations and send the TX again.",
-                                    html_escape(&payment_error_for_user(&error))
-                                ),
-                            )
-                            .parse_mode(ParseMode::Html)
-                            .await
-                            .map(|_| ());
-                    }
-                };
-
-                if let Err(e) =
-                    db::confirm_payment_and_mark_paid(pool, order_id, chain, text, &outcome).await
-                {
-                    warn!(?e, order_id = %order_id, "failed to confirm payment transaction");
-                    return bot
-                        .send_message(msg.chat.id, "⚠️ <b>Payment already used or could not be recorded.</b>\n\nContact admin.")
-                        .parse_mode(ParseMode::Html)
-                        .await
-                        .map(|_| ());
-                }
-                status_parts.push(format!(
-                    "Payment verified: {} USDT, confirmations: {}.",
-                    outcome.observed_amount_usdt,
-                    outcome
-                        .confirmations
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "confirmed".to_string())
-                ));
-
-                // Download logo from Telegram before creating website
-                let logo_local_path = if let Some(ref file_id) = draft.logo_file_id {
-                    match download_telegram_logo(&bot, file_id, &order_id.to_string()).await {
-                        Ok(path) => Some(path),
-                        Err(e) => {
-                            warn!(?e, file_id = %file_id, "failed to download logo; using file_id as fallback");
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                if let (Some(db_uid), Some(mut input)) =
-                    (draft.db_user_id, website_input_from_draft(&draft))
-                {
-                    if let Some(ref path) = logo_local_path {
-                        input.logo_asset_path = path.clone();
-                    }
-                    match db::create_website(pool, db_uid, order_id, &input).await {
-                        Ok(website_id) => {
-                            if let Some(quote_id) = draft.domain_quote_id
-                                && let Err(e) =
-                                    db::attach_quote_website(pool, quote_id, website_id).await
-                            {
-                                warn!(?e, quote_id = %quote_id, website_id = %website_id, "failed to attach quote to website");
-                            }
-                            let (domain_ready, purchase_message) =
-                                maybe_purchase_domain_after_tx(&config, pool, &draft).await;
-                            if !purchase_message.is_empty() {
-                                status_parts.push(purchase_message.trim().to_string());
-                            }
-                            if !domain_ready {
-                                if let Err(e) = db::mark_order_manual_review(pool, order_id).await {
-                                    warn!(?e, order_id = %order_id, "failed to mark manual review");
-                                }
-                                status_parts.push(
-                                    "Your order requires manual review before generation. Contact admin."
-                                        .to_string(),
-                                );
-                            } else if let Err(e) =
-                                enqueue_generation_job_with_retries(pool, order_id, website_id)
-                                    .await
-                            {
-                                warn!(?e, order_id = %order_id, "failed to enqueue generation job after retries");
-                                let _ = db::mark_order_manual_review(pool, order_id).await;
-                                status_parts.push(
-                                    "⚠️ Failed to queue generation. Contact admin.".to_string(),
-                                );
-                            } else {
-                                status_parts.push("Website queued for generation.".to_string());
-                            }
-                        }
-                        Err(e) => {
-                            warn!(?e, order_id = %order_id, "failed to create website record");
-                            let _ = db::mark_order_manual_review(pool, order_id).await;
-                            status_parts.push("⚠️ Failed to create website record.".to_string());
-                        }
-                    }
-                } else {
-                    warn!(order_id = %order_id, "paid order is missing user id or website input");
-                    let _ = db::mark_order_manual_review(pool, order_id).await;
-                    status_parts.push(
-                        "⚠️ Payment was recorded, but website input is incomplete. Contact admin."
-                            .to_string(),
-                    );
-                }
-            } else {
-                status_parts.push("⚠️ No order found. Please restart with /create.".to_string());
-            }
-
-            draft.step = DraftStep::PaymentConfirmed;
-            set_session(user_id, draft, &sessions);
-            bot.send_message(
-                msg.chat.id,
-                format!(
-                    "✅ <b>TX received.</b>\n\n<b>Payment confirmed.</b>\n\n{}",
-                    status_parts.join("\n")
-                ),
-            )
-            .parse_mode(ParseMode::Html)
-            .reply_markup(status_keyboard())
+            process_payment_tx_context(PaymentTxProcess {
+                bot: &bot,
+                chat_id: msg.chat.id,
+                user_id,
+                config: &config,
+                sessions: &sessions,
+                pool,
+                context,
+                tx_hash: text,
+            })
             .await
-            .map(|_| ())
         }
         DraftStep::PaymentConfirmed => bot
             .send_message(
@@ -1045,6 +867,234 @@ async fn handle_order_step(
             .await
             .map(|_| ()),
     }
+}
+
+struct PaymentTxProcess<'a> {
+    bot: &'a Bot,
+    chat_id: ChatId,
+    user_id: UserId,
+    config: &'a TelegramUiConfig,
+    sessions: &'a Sessions,
+    pool: &'a SqlitePool,
+    context: db::PaymentOrderContext,
+    tx_hash: &'a str,
+}
+
+async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseResult<()> {
+    let PaymentTxProcess {
+        bot,
+        chat_id,
+        user_id,
+        config,
+        sessions,
+        pool,
+        context,
+        tx_hash,
+    } = request;
+    let order_id = context.order_id;
+    let chain = context.payment_chain;
+    let mut status_parts: Vec<String> = vec![];
+
+    if context.payment_status == "paid" {
+        return bot
+            .send_message(
+                chat_id,
+                "<b>Payment already confirmed.</b>\n\nYour website is queued for generation.",
+            )
+            .parse_mode(ParseMode::Html)
+            .reply_markup(status_keyboard())
+            .await
+            .map(|_| ());
+    }
+
+    match db::tx_hash_already_used(pool, chain, tx_hash).await {
+        Ok(true) => {
+            return bot
+                .send_message(
+                    chat_id,
+                    "<b>TX already used.</b>\n\nSend a transaction hash that has not been used for another order.",
+                )
+                .parse_mode(ParseMode::Html)
+                .await
+                .map(|_| ());
+        }
+        Ok(false) => {}
+        Err(error) => warn!(?error, "failed to check tx reuse"),
+    }
+
+    let expected_to_address = payment_address_for_chain(config, chain).trim().to_string();
+    if expected_to_address.is_empty() {
+        return bot
+            .send_message(
+                chat_id,
+                "<b>Payment address is not configured.</b>\n\nSet the matching USDT receive address in <code>.env</code>, then restart the bot.",
+            )
+            .parse_mode(ParseMode::Html)
+            .await
+            .map(|_| ());
+    }
+
+    let verifier = ChainPaymentVerifier::new(
+        config.usdt_erc20_rpc_url.clone(),
+        config.usdt_erc20_contract.clone(),
+        config.usdt_erc20_min_confirmations,
+        config.tron_grid_base_url.clone(),
+        config.tron_grid_api_key.clone(),
+        config.usdt_tron_contract.clone(),
+        config.usdt_tron_min_confirmations,
+        config.solana_rpc_url.clone(),
+        config.usdt_sol_mint.clone(),
+        config.usdt_sol_min_confirmations,
+    );
+    let service = PaymentService::new(verifier);
+    let tx_submitted_at = chrono::Utc::now();
+    let payment_expires_at = context.payment_expires_at.unwrap_or_else(|| {
+        warn!(order_id = %order_id, "payment_expires_at is NULL, falling back to created_at + payment window");
+        context.created_at + chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES)
+    });
+    let payment_started_at = context.payment_started_at.unwrap_or_else(|| {
+        warn!(order_id = %order_id, "payment_started_at is NULL, falling back from payment_expires_at");
+        payment_expires_at - chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES)
+    });
+    let verify_request = PaymentVerificationRequest {
+        order_id,
+        chain,
+        tx_hash: tx_hash.to_string(),
+        expected_to_address,
+        required_amount_usdt: context.amount_usdt,
+        payment_started_at,
+        submitted_at: tx_submitted_at,
+        expires_at: payment_expires_at,
+    };
+    let verification = verify_payment_with_retries(&service, verify_request).await;
+    if let Err(error) = db::record_payment_attempt(
+        pool,
+        order_id,
+        context.user_id,
+        chain,
+        tx_hash,
+        verification.as_ref(),
+    )
+    .await
+    {
+        warn!(?error, order_id = %order_id, "failed to record payment attempt");
+    }
+
+    let outcome = match verification {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return bot
+                .send_message(
+                    chat_id,
+                    format!(
+                        "❌ <b>Payment not confirmed.</b>\n\n{}\n\nIf you just paid, wait for confirmations and send the TX again.",
+                        html_escape(&payment_error_for_user(&error))
+                    ),
+                )
+                .parse_mode(ParseMode::Html)
+                .await
+                .map(|_| ());
+        }
+    };
+
+    if let Err(error) =
+        db::confirm_payment_and_mark_paid(pool, order_id, chain, tx_hash, &outcome).await
+    {
+        warn!(?error, order_id = %order_id, "failed to confirm payment transaction");
+        return bot
+            .send_message(
+                chat_id,
+                "⚠️ <b>Payment already used or could not be recorded.</b>\n\nContact admin.",
+            )
+            .parse_mode(ParseMode::Html)
+            .await
+            .map(|_| ());
+    }
+    status_parts.push(format!(
+        "Payment verified: {} USDT, confirmations: {}.",
+        outcome.observed_amount_usdt,
+        outcome
+            .confirmations
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "confirmed".to_string())
+    ));
+
+    match (context.website_id, context.website_input) {
+        (Some(website_id), Some(mut input)) => {
+            if !input.logo_asset_path.trim().is_empty()
+                && !Path::new(&input.logo_asset_path).exists()
+            {
+                match download_telegram_logo(bot, &input.logo_asset_path, &order_id.to_string())
+                    .await
+                {
+                    Ok(path) => {
+                        if let Err(error) =
+                            db::update_website_logo_path(pool, website_id, &path).await
+                        {
+                            warn!(?error, website_id = %website_id, "failed to persist downloaded logo path");
+                        }
+                        input.logo_asset_path = path;
+                    }
+                    Err(error) => {
+                        warn!(?error, order_id = %order_id, "failed to download logo; keeping stored logo reference");
+                    }
+                }
+            }
+
+            let (domain_ready, purchase_message) = maybe_purchase_domain_after_tx(
+                config,
+                pool,
+                context.domain_quote_id,
+                input.requested_domain.as_deref(),
+            )
+            .await;
+            if !purchase_message.is_empty() {
+                status_parts.push(purchase_message.trim().to_string());
+            }
+            if !domain_ready {
+                if let Err(error) = db::mark_order_manual_review(pool, order_id).await {
+                    warn!(?error, order_id = %order_id, "failed to mark manual review");
+                }
+                status_parts.push(
+                    "Your order requires manual review before generation. Contact admin."
+                        .to_string(),
+                );
+            } else if let Err(error) =
+                enqueue_generation_job_with_retries(pool, order_id, website_id).await
+            {
+                warn!(?error, order_id = %order_id, "failed to enqueue generation job after retries");
+                let _ = db::mark_order_manual_review(pool, order_id).await;
+                status_parts.push("⚠️ Failed to queue generation. Contact admin.".to_string());
+            } else {
+                status_parts.push("Website queued for generation.".to_string());
+            }
+        }
+        _ => {
+            warn!(order_id = %order_id, "paid order is missing persisted website input");
+            let _ = db::mark_order_manual_review(pool, order_id).await;
+            status_parts.push(
+                "⚠️ Payment was recorded, but website input is incomplete. Contact admin."
+                    .to_string(),
+            );
+        }
+    }
+
+    if let Some(mut draft) = get_session(user_id, sessions) {
+        draft.step = DraftStep::PaymentConfirmed;
+        set_session(user_id, draft, sessions);
+    }
+
+    bot.send_message(
+        chat_id,
+        format!(
+            "✅ <b>TX received.</b>\n\n<b>Payment confirmed.</b>\n\n{}",
+            status_parts.join("\n")
+        ),
+    )
+    .parse_mode(ParseMode::Html)
+    .reply_markup(status_keyboard())
+    .await
+    .map(|_| ())
 }
 
 async fn ensure_group_member(
@@ -1392,7 +1442,7 @@ async fn edit_payment_chain_and_ask_tx(
     let order_id = if let Some(order_id) = draft.order_id {
         order_id
     } else {
-        let order_id = match db::create_site_order(
+        let order_id = match db::get_or_create_site_order(
             pool,
             db_user_id,
             build_mode,
@@ -1418,6 +1468,34 @@ async fn edit_payment_chain_and_ask_tx(
         set_session(user_id, draft.clone(), sessions);
         order_id
     };
+
+    let Some(input) = website_input_from_draft(&draft) else {
+        return edit_screen(
+            bot,
+            target,
+            "<b>Payment not ready.</b>\n\nComplete logo, token links, and website URL before payment.",
+            cancel_keyboard(),
+        )
+        .await;
+    };
+    let website_id = match db::upsert_website_for_order(pool, db_user_id, order_id, &input).await {
+        Ok(id) => id,
+        Err(error) => {
+            warn!(?error, order_id = %order_id, "failed to persist website input before payment");
+            return edit_screen(
+                bot,
+                target,
+                "<b>Internal error.</b>\n\nFailed to persist website input. Please try again.",
+                main_menu_keyboard(),
+            )
+            .await;
+        }
+    };
+    if let Some(quote_id) = draft.domain_quote_id
+        && let Err(error) = db::attach_quote_website(pool, quote_id, website_id).await
+    {
+        warn!(?error, quote_id = %quote_id, website_id = %website_id, "failed to attach quote to website");
+    }
 
     let payment_window = match db::attach_payment_chain(pool, order_id, chain).await {
         Ok(window) => window,
@@ -1566,7 +1644,8 @@ fn remove_session(user_id: UserId, sessions: &Sessions) {
 async fn maybe_purchase_domain_after_tx(
     config: &TelegramUiConfig,
     pool: &SqlitePool,
-    draft: &OrderDraft,
+    quote_id: Option<Uuid>,
+    domain: Option<&str>,
 ) -> (bool, String) {
     if !config.namecheap.auto_purchase_after_tx {
         return (
@@ -1575,23 +1654,19 @@ async fn maybe_purchase_domain_after_tx(
         );
     }
 
-    let Some(domain) = draft.website_url.as_deref() else {
+    let Some(domain) = domain else {
         return (
             false,
             "\n\n<b>Domain purchase:</b> skipped because no domain is attached.".to_string(),
         );
     };
-    let Some(quote_id) = draft.domain_quote_id else {
+    let Some(quote_id) = quote_id else {
         return (
             false,
             "\n\n<b>Domain purchase:</b> skipped because no persisted quote is attached."
                 .to_string(),
         );
     };
-    if let Err(error) = db::record_domain_purchase_started(pool, quote_id).await {
-        warn!(?error, quote_id = %quote_id, "failed to record domain purchase start");
-    }
-
     let registrar: Box<dyn DomainRegistrar> = if let (Some(base_url), Some(api_key)) = (
         config.api_service_base_url.as_deref(),
         config.api_service_api_key.as_deref(),
@@ -1603,10 +1678,108 @@ async fn maybe_purchase_domain_after_tx(
     } else {
         Box::new(NamecheapRegistrar::new(config.namecheap.clone()))
     };
+
+    let quote_record = match db::get_domain_quote_for_purchase(pool, quote_id).await {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(?error, quote_id = %quote_id, "failed to load persisted domain quote");
+            let _ = db::mark_domain_purchase_manual_review(
+                pool,
+                quote_id,
+                "persisted domain quote could not be loaded before purchase",
+            )
+            .await;
+            return (
+                false,
+                "\n\n<b>Domain purchase needs manual review.</b>\nPersisted quote could not be loaded."
+                    .to_string(),
+            );
+        }
+    };
+    if !quote_record.domain.eq_ignore_ascii_case(domain) {
+        let _ = db::mark_domain_purchase_manual_review(
+            pool,
+            quote_id,
+            "persisted quote domain does not match requested domain",
+        )
+        .await;
+        return (
+            false,
+            "\n\n<b>Domain purchase needs manual review.</b>\nQuote/domain mismatch.".to_string(),
+        );
+    }
+
+    let price_tolerance = Decimal::new(1, 2);
+    match quote_domain_with_retries(registrar.as_ref(), domain).await {
+        Ok(current_quote) if current_quote.available && !current_quote.is_premium => {
+            if current_quote.price_usd > quote_record.quoted_amount_usdt + price_tolerance {
+                let reason = format!(
+                    "current Namecheap price {} exceeds paid domain quote {}",
+                    current_quote.price_usd, quote_record.quoted_amount_usdt
+                );
+                let _ = db::mark_domain_purchase_manual_review(pool, quote_id, &reason).await;
+                return (
+                    false,
+                    format!(
+                        "\n\n<b>Domain purchase needs manual review.</b>\nCurrent Namecheap price <code>{}</code> exceeds paid quote <code>{}</code>.",
+                        current_quote.price_usd, quote_record.quoted_amount_usdt
+                    ),
+                );
+            }
+        }
+        Ok(_) => {
+            let _ = db::mark_domain_purchase_manual_review(
+                pool,
+                quote_id,
+                "domain became unavailable or premium before purchase",
+            )
+            .await;
+            return (
+                false,
+                "\n\n<b>Domain purchase needs manual review.</b>\nDomain became unavailable or premium before purchase."
+                    .to_string(),
+            );
+        }
+        Err(error) => {
+            let _ = db::mark_domain_purchase_manual_review(
+                pool,
+                quote_id,
+                "domain price refresh failed before purchase",
+            )
+            .await;
+            return (
+                false,
+                format!(
+                    "\n\n<b>Domain purchase needs manual review.</b>\nCould not refresh Namecheap price: {}",
+                    html_escape(&domain_error_for_user(&error))
+                ),
+            );
+        }
+    }
+
+    if let Err(error) = db::record_domain_purchase_started(pool, quote_id).await {
+        warn!(?error, quote_id = %quote_id, "failed to record domain purchase start");
+    }
     match purchase_domain_with_retries(registrar.as_ref(), domain).await {
         Ok(result) => {
             if let Err(error) = db::record_domain_purchase_success(pool, quote_id, &result).await {
                 warn!(?error, quote_id = %quote_id, "failed to record domain purchase success");
+            }
+            if result.charged_amount_usd > quote_record.quoted_amount_usdt + price_tolerance {
+                let reason = format!(
+                    "Namecheap charged {} after paid domain quote {} (initial Namecheap quote {})",
+                    result.charged_amount_usd,
+                    quote_record.quoted_amount_usdt,
+                    quote_record.namecheap_price_usd
+                );
+                let _ = db::mark_domain_purchase_manual_review(pool, quote_id, &reason).await;
+                return (
+                    false,
+                    format!(
+                        "\n\n<b>Domain purchased but needs manual review.</b>\nNamecheap charged <code>{}</code>, which exceeds the paid domain quote <code>{}</code>.",
+                        result.charged_amount_usd, quote_record.quoted_amount_usdt
+                    ),
+                );
             }
             let dns_result = setup_cloudflare_dns_after_purchase_with_retries(config, domain).await;
             let dns_ready = match &dns_result {
@@ -1644,7 +1817,17 @@ async fn maybe_purchase_domain_after_tx(
             )
         }
         Err(error) => {
-            if let Err(db_error) = db::mark_domain_purchase_failed(pool, quote_id).await {
+            if matches!(&error, DomainError::AlreadyRegisteredToAccount) {
+                if let Err(db_error) = db::mark_domain_purchase_manual_review(
+                    pool,
+                    quote_id,
+                    "domain appears registered in Namecheap account; reconcile order manually",
+                )
+                .await
+                {
+                    warn!(?db_error, quote_id = %quote_id, "failed to record domain purchase manual review");
+                }
+            } else if let Err(db_error) = db::mark_domain_purchase_failed(pool, quote_id).await {
                 warn!(?db_error, quote_id = %quote_id, "failed to record domain purchase failure");
             }
             (
@@ -2138,6 +2321,10 @@ fn domain_error_for_user(error: &DomainError) -> String {
             "Unsupported TLD. Supported: .com, .net, .org, .xyz, .fun, .site, .online, .io, .co, .me, .cc, .app, .dev, .world, .space, .club, .store, .shop".to_string()
         }
         DomainError::Unavailable => "Domain is unavailable.".to_string(),
+        DomainError::AlreadyRegisteredToAccount => {
+            "Domain appears registered in the Namecheap account. Contact admin for reconciliation."
+                .to_string()
+        }
         DomainError::PremiumRejected => "Premium/EAP domains require manual handling.".to_string(),
         DomainError::Namecheap(value) => format!("Namecheap returned an error: {value}"),
         DomainError::Http(value) => format!("Namecheap HTTP request failed: {value}"),

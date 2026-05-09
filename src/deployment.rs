@@ -211,11 +211,16 @@ impl SiteDeployer for CloudflarePagesDeployer {
             )
             .await?;
             push_site_to_github(request).await?;
+            let commit_sha = git_output(&request.site_dir, &["rev-parse", "HEAD"]).await?;
             let deployment = self
                 .trigger_pages_deployment(&request.cloudflare_project_name)
                 .await?;
             let deployment = self
-                .wait_pages_deployment_success(&request.cloudflare_project_name, &deployment.id)
+                .wait_pages_deployment_success(
+                    &request.cloudflare_project_name,
+                    &deployment.id,
+                    Some(commit_sha.trim()),
+                )
                 .await?;
             self.ensure_git_project(
                 &request.cloudflare_project_name,
@@ -229,7 +234,6 @@ impl SiteDeployer for CloudflarePagesDeployer {
                 self.bind_custom_domain(&request.cloudflare_project_name, domain)
                     .await?;
             }
-            let commit_sha = git_output(&request.site_dir, &["rev-parse", "HEAD"]).await?;
             return Ok(DeploymentResult {
                 github_owner: request.repo_owner.clone(),
                 github_repo_name: request.repo_name.clone(),
@@ -395,6 +399,7 @@ impl CloudflarePagesDeployer {
         &self,
         project_name: &str,
         deployment_id: &str,
+        expected_commit_sha: Option<&str>,
     ) -> Result<PagesDeploymentStatus, DeploymentError> {
         for _ in 0..PAGES_DEPLOYMENT_POLL_ATTEMPTS {
             let url = format!(
@@ -411,7 +416,10 @@ impl CloudflarePagesDeployer {
                 .map_err(|error| DeploymentError::CloudflarePages(error.to_string()))?;
             let deployment = parse_pages_deployment_response(response).await?;
             match deployment.stage_status.as_deref() {
-                Some("success") => return Ok(deployment),
+                Some("success") => {
+                    verify_deployment_commit(&deployment, expected_commit_sha)?;
+                    return Ok(deployment);
+                }
                 Some("failure") | Some("canceled") => {
                     return Err(DeploymentError::CloudflarePages(format!(
                         "deployment {} ended with status {}",
@@ -472,6 +480,7 @@ struct PagesDeploymentStatus {
     id: String,
     url: Option<String>,
     stage_status: Option<String>,
+    commit_hash: Option<String>,
 }
 
 async fn ensure_cloudflare_success<F>(
@@ -588,12 +597,57 @@ async fn parse_pages_deployment_response(
         .and_then(|stage| stage.get("status"))
         .and_then(|item| item.as_str())
         .map(String::from);
+    let commit_hash = extract_deployment_commit_hash(result);
 
     Ok(PagesDeploymentStatus {
         id,
         url,
         stage_status,
+        commit_hash,
     })
+}
+
+fn extract_deployment_commit_hash(result: &serde_json::Value) -> Option<String> {
+    [
+        &["deployment_trigger", "metadata", "commit_hash"][..],
+        &["deployment_trigger", "metadata", "commit_sha"][..],
+        &["source", "config", "commit_hash"][..],
+        &["source", "config", "commit_sha"][..],
+    ]
+    .iter()
+    .find_map(|path| {
+        let mut value = result;
+        for key in *path {
+            value = value.get(key)?;
+        }
+        value
+            .as_str()
+            .filter(|hash| !hash.trim().is_empty())
+            .map(|hash| hash.trim().to_string())
+    })
+}
+
+fn verify_deployment_commit(
+    deployment: &PagesDeploymentStatus,
+    expected_commit_sha: Option<&str>,
+) -> Result<(), DeploymentError> {
+    let Some(expected) = expected_commit_sha
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    match deployment.commit_hash.as_deref() {
+        Some(actual) if actual.eq_ignore_ascii_case(expected) => Ok(()),
+        Some(actual) => Err(DeploymentError::CloudflarePages(format!(
+            "deployment {} used commit {}, expected {}",
+            deployment.id, actual, expected
+        ))),
+        None => Err(DeploymentError::CloudflarePages(format!(
+            "deployment {} did not report a commit hash; expected {}",
+            deployment.id, expected
+        ))),
+    }
 }
 
 async fn parse_pages_domain_status_response(
@@ -618,7 +672,10 @@ async fn parse_pages_domain_status_response(
 
 fn ensure_domain_status_not_failed(domain: &str, status: &str) -> Result<(), DeploymentError> {
     match status {
-        "active" | "pending" | "initializing" => Ok(()),
+        "active" => Ok(()),
+        "pending" | "initializing" => Err(DeploymentError::DomainBind(format!(
+            "custom domain {domain} is not active yet; Cloudflare status {status}"
+        ))),
         "blocked" | "error" | "deactivated" => Err(DeploymentError::DomainBind(format!(
             "custom domain {domain} has Cloudflare status {status}"
         ))),
@@ -689,6 +746,34 @@ async fn run_git(dir: impl AsRef<Path>, args: &[&str]) -> Result<(), DeploymentE
         .current_dir(dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|error| DeploymentError::GitPush(error.to_string()))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(DeploymentError::GitPush(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ))
+    }
+}
+
+async fn run_git_with_env(
+    dir: impl AsRef<Path>,
+    args: &[&str],
+    envs: &[(&str, String)],
+) -> Result<(), DeploymentError> {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command
         .output()
         .await
         .map_err(|error| DeploymentError::GitPush(error.to_string()))?;
@@ -847,9 +932,9 @@ async fn github_authenticated_login(
 }
 
 async fn push_site_to_github(request: &DeploymentRequest) -> Result<(), DeploymentError> {
-    let authed_repo_url = format!(
-        "https://x-access-token:{}@github.com/{}/{}.git",
-        request.github_token, request.repo_owner, request.repo_name
+    let repo_url = format!(
+        "https://github.com/{}/{}.git",
+        request.repo_owner, request.repo_name
     );
 
     run_git(&request.site_dir, &["init"]).await?;
@@ -871,22 +956,20 @@ async fn push_site_to_github(request: &DeploymentRequest) -> Result<(), Deployme
         &["commit", "-m", "Deploy generated website"],
     )
     .await?;
-    if run_git(
+    let _ = run_git(&request.site_dir, &["remote", "remove", "origin"]).await;
+    let auth_header = format!("AUTHORIZATION: bearer {}", request.github_token);
+    let refspec = format!("HEAD:{}", request.production_branch);
+    run_git_with_env(
         &request.site_dir,
-        &["remote", "set-url", "origin", &authed_repo_url],
-    )
-    .await
-    .is_err()
-    {
-        run_git(
-            &request.site_dir,
-            &["remote", "add", "origin", &authed_repo_url],
-        )
-        .await?;
-    }
-    run_git(
-        &request.site_dir,
-        &["push", "-u", "origin", &request.production_branch],
+        &["push", &repo_url, &refspec],
+        &[
+            ("GIT_CONFIG_COUNT", "1".to_string()),
+            (
+                "GIT_CONFIG_KEY_0",
+                "http.https://github.com/.extraheader".to_string(),
+            ),
+            ("GIT_CONFIG_VALUE_0", auth_header),
+        ],
     )
     .await
 }
@@ -998,6 +1081,7 @@ impl SiteDeployer for HttpClientPagesDeployer {
                 "production_branch": request.production_branch,
                 "publish_dir": publish_dir_from_site_dir(&request.site_dir),
                 "custom_domain": request.custom_domain,
+                "expected_commit_sha": commit_sha.trim(),
             }))
             .timeout(API_PAGES_DEPLOY_TIMEOUT)
             .send()
@@ -1083,10 +1167,37 @@ mod tests {
     #[test]
     fn rejects_failed_pages_domain_statuses() {
         assert!(ensure_domain_status_not_failed("example.com", "active").is_ok());
-        assert!(ensure_domain_status_not_failed("example.com", "pending").is_ok());
-        assert!(ensure_domain_status_not_failed("example.com", "initializing").is_ok());
+        assert!(ensure_domain_status_not_failed("example.com", "pending").is_err());
+        assert!(ensure_domain_status_not_failed("example.com", "initializing").is_err());
         assert!(ensure_domain_status_not_failed("example.com", "error").is_err());
         assert!(ensure_domain_status_not_failed("example.com", "blocked").is_err());
+    }
+
+    #[test]
+    fn extracts_cloudflare_pages_commit_hash() {
+        let deployment = serde_json::json!({
+            "deployment_trigger": {
+                "metadata": {
+                    "commit_hash": "abc123"
+                }
+            }
+        });
+        assert_eq!(
+            extract_deployment_commit_hash(&deployment),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_mismatched_cloudflare_pages_commit_hash() {
+        let deployment = PagesDeploymentStatus {
+            id: "dep_1".to_string(),
+            url: None,
+            stage_status: Some("success".to_string()),
+            commit_hash: Some("abc123".to_string()),
+        };
+        assert!(verify_deployment_commit(&deployment, Some("abc123")).is_ok());
+        assert!(verify_deployment_commit(&deployment, Some("def456")).is_err());
     }
 
     #[test]

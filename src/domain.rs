@@ -58,6 +58,10 @@ pub enum DomainError {
     UnsupportedTld,
     #[error("domain unavailable")]
     Unavailable,
+    #[error(
+        "domain appears to be registered in the Namecheap account; manual reconciliation required"
+    )]
+    AlreadyRegisteredToAccount,
     #[error("premium or EAP domain requires manual handling")]
     PremiumRejected,
     #[error("missing Namecheap configuration: {0}")]
@@ -246,6 +250,36 @@ impl NamecheapRegistrar {
         })
     }
 
+    async fn account_owns_domain(&self, domain: &str) -> Result<bool, DomainError> {
+        match self
+            .call_namecheap(
+                "namecheap.domains.getInfo",
+                vec![("DomainName".to_string(), domain.to_string())],
+            )
+            .await
+        {
+            Ok(xml) => {
+                let Some(attrs) = first_tag_attrs(&xml, "DomainGetInfoResult") else {
+                    return Ok(false);
+                };
+                let result_domain = attrs
+                    .get("DomainName")
+                    .or_else(|| attrs.get("Domain"))
+                    .map(|value| value.eq_ignore_ascii_case(domain))
+                    .unwrap_or(true);
+                let is_owner = attrs
+                    .get("IsOwner")
+                    .map(|value| {
+                        matches!(value.to_ascii_lowercase().as_str(), "true" | "yes" | "1")
+                    })
+                    .unwrap_or(true);
+                Ok(result_domain && is_owner)
+            }
+            Err(DomainError::Namecheap(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn registration_price(&self, tld: &str, years: i32) -> Result<Decimal, DomainError> {
         let xml = self
             .call_namecheap(
@@ -323,6 +357,9 @@ impl DomainRegistrar for NamecheapRegistrar {
 
         let check = self.check_domain(&domain).await?;
         if !check.available {
+            if self.account_owns_domain(&domain).await? {
+                return Err(DomainError::AlreadyRegisteredToAccount);
+            }
             return Err(DomainError::Unavailable);
         }
         if check.is_premium || check.eap_fee.unwrap_or(Decimal::ZERO) > Decimal::ZERO {
@@ -384,6 +421,7 @@ async fn map_http_error(response: reqwest::Response) -> DomainError {
         Ok(api_err) => match api_err.error.as_str() {
             "unsupported_tld" => DomainError::UnsupportedTld,
             "unavailable" => DomainError::Unavailable,
+            "already_registered_to_account" => DomainError::AlreadyRegisteredToAccount,
             "premium_rejected" => DomainError::PremiumRejected,
             "missing_config" => DomainError::MissingConfig(api_err.message),
             "namecheap_error" => DomainError::Namecheap(api_err.message),
@@ -1460,6 +1498,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_domain_get_info_owner_result() {
+        let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainGetInfoResult DomainName="pepe.xyz" IsOwner="true" /></CommandResponse></ApiResponse>"#;
+        let attrs = first_tag_attrs(xml, "DomainGetInfoResult").unwrap();
+        assert_eq!(attrs.get("DomainName").unwrap(), "pepe.xyz");
+        assert_eq!(attrs.get("IsOwner").unwrap(), "true");
+    }
+
+    #[test]
     fn attr_bool_accepts_truthy_values() {
         let mut attrs = HashMap::new();
         attrs.insert("Test".to_string(), "yes".to_string());
@@ -1616,7 +1662,9 @@ mod tests {
 
     #[test]
     fn no_icann_fee_for_other_tlds() {
-        for tld in ["xyz", "fun", "site", "online", "io", "co", "me", "cc", "app", "dev"] {
+        for tld in [
+            "xyz", "fun", "site", "online", "io", "co", "me", "cc", "app", "dev",
+        ] {
             assert_eq!(icann_fee(tld), Decimal::ZERO);
         }
     }

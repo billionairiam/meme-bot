@@ -62,8 +62,33 @@ pub async fn create_site_order(
     amount_usdt: Decimal,
     domain_quote_id: Option<Uuid>,
 ) -> anyhow::Result<Uuid> {
+    get_or_create_site_order(
+        pool,
+        user_id,
+        build_mode,
+        template_id,
+        amount_usdt,
+        domain_quote_id,
+    )
+    .await
+}
+
+pub async fn get_or_create_site_order(
+    pool: &SqlitePool,
+    user_id: Uuid,
+    build_mode: BuildMode,
+    template_id: Option<&str>,
+    amount_usdt: Decimal,
+    domain_quote_id: Option<Uuid>,
+) -> anyhow::Result<Uuid> {
+    if let Some(quote_id) = domain_quote_id
+        && let Some(existing) = find_order_by_domain_quote(pool, quote_id).await?
+    {
+        return Ok(existing);
+    }
+
     let id = Uuid::new_v4();
-    let row = sqlx::query(
+    let result = sqlx::query(
         r#"
         INSERT INTO orders (
             id, user_id, order_type, build_mode, template_id, amount_usdt,
@@ -81,9 +106,41 @@ pub async fn create_site_order(
     .bind(amount_usdt.to_string())
     .bind(domain_quote_id)
     .fetch_one(pool)
+    .await;
+
+    match result {
+        Ok(row) => Ok(Uuid::parse_str(row.get::<&str, _>("id"))?),
+        Err(error) => {
+            if let Some(quote_id) = domain_quote_id
+                && let Some(existing) = find_order_by_domain_quote(pool, quote_id).await?
+            {
+                return Ok(existing);
+            }
+            Err(error.into())
+        }
+    }
+}
+
+async fn find_order_by_domain_quote(
+    pool: &SqlitePool,
+    quote_id: Uuid,
+) -> anyhow::Result<Option<Uuid>> {
+    let row = sqlx::query(
+        r#"
+        SELECT id
+        FROM orders
+        WHERE domain_quote_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(quote_id)
+    .fetch_optional(pool)
     .await?;
 
-    Ok(Uuid::parse_str(row.get::<&str, _>("id"))?)
+    Ok(row
+        .map(|row| Uuid::parse_str(row.get::<&str, _>("id")))
+        .transpose()?)
 }
 
 pub async fn attach_payment_chain(
@@ -91,14 +148,14 @@ pub async fn attach_payment_chain(
     order_id: Uuid,
     chain: PaymentChain,
 ) -> anyhow::Result<PaymentWindow> {
-    let started_at = Utc::now();
-    let expires_at = started_at + Duration::minutes(PAYMENT_WINDOW_MINUTES);
+    let now = Utc::now();
+    let expires_at = now + Duration::minutes(PAYMENT_WINDOW_MINUTES);
     let row = sqlx::query(
         r#"
         UPDATE orders
         SET payment_chain = ?,
-            payment_started_at = ?,
-            payment_expires_at = ?,
+            payment_started_at = COALESCE(payment_started_at, ?),
+            payment_expires_at = COALESCE(payment_expires_at, ?),
             updated_at = datetime('now')
         WHERE id = ?
           AND payment_status = 'pending'
@@ -106,7 +163,7 @@ pub async fn attach_payment_chain(
         "#,
     )
     .bind(chain.as_str())
-    .bind(started_at.to_rfc3339())
+    .bind(now.to_rfc3339())
     .bind(expires_at.to_rfc3339())
     .bind(order_id)
     .fetch_optional(pool)
@@ -396,6 +453,63 @@ pub async fn create_website(
     Ok(Uuid::parse_str(row.get::<&str, _>("id"))?)
 }
 
+pub async fn upsert_website_for_order(
+    pool: &SqlitePool,
+    user_id: Uuid,
+    order_id: Uuid,
+    input: &WebsiteInput,
+) -> anyhow::Result<Uuid> {
+    let id = Uuid::new_v4();
+    let row = sqlx::query(
+        r#"
+        INSERT INTO websites (
+            id, user_id, order_id, token_ticker, token_name, contract_address,
+            x_url, telegram_url, logo_asset_path, requested_domain
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(order_id) DO UPDATE SET
+            token_ticker = EXCLUDED.token_ticker,
+            token_name = EXCLUDED.token_name,
+            contract_address = EXCLUDED.contract_address,
+            x_url = EXCLUDED.x_url,
+            telegram_url = EXCLUDED.telegram_url,
+            logo_asset_path = EXCLUDED.logo_asset_path,
+            requested_domain = EXCLUDED.requested_domain,
+            updated_at = datetime('now')
+        RETURNING id
+        "#,
+    )
+    .bind(id)
+    .bind(user_id)
+    .bind(order_id)
+    .bind(&input.token_ticker)
+    .bind(&input.token_name)
+    .bind(&input.contract_address)
+    .bind(&input.x_url)
+    .bind(&input.telegram_url)
+    .bind(&input.logo_asset_path)
+    .bind(&input.requested_domain)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(Uuid::parse_str(row.get::<&str, _>("id"))?)
+}
+
+pub async fn update_website_logo_path(
+    pool: &SqlitePool,
+    website_id: Uuid,
+    logo_asset_path: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE websites SET logo_asset_path = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(logo_asset_path)
+    .bind(website_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn record_domain_quote(
     pool: &SqlitePool,
     user_id: Uuid,
@@ -473,6 +587,7 @@ pub async fn record_domain_purchase_success(
         UPDATE domain_registrations
         SET namecheap_order_id = ?,
             namecheap_transaction_id = ?,
+            charged_amount_usd = ?,
             registration_status = 'registered',
             updated_at = datetime('now')
         WHERE domain_quote_id = ?
@@ -480,6 +595,7 @@ pub async fn record_domain_purchase_success(
     )
     .bind(&purchase.namecheap_order_id)
     .bind(&purchase.namecheap_transaction_id)
+    .bind(purchase.charged_amount_usd.to_string())
     .bind(quote_id)
     .execute(pool)
     .await?;
@@ -548,6 +664,31 @@ pub async fn mark_domain_purchase_failed(pool: &SqlitePool, quote_id: Uuid) -> a
     .bind(quote_id)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+pub async fn mark_domain_purchase_manual_review(
+    pool: &SqlitePool,
+    quote_id: Uuid,
+    reason: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE domain_registrations
+        SET registration_status = 'needs_manual_review', updated_at = datetime('now')
+        WHERE domain_quote_id = ?
+        "#,
+    )
+    .bind(quote_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE domain_quotes SET status = 'failed', updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(quote_id)
+    .execute(pool)
+    .await?;
+    tracing::warn!(%quote_id, %reason, "domain purchase requires manual review");
     Ok(())
 }
 
@@ -690,6 +831,141 @@ pub async fn get_user_order(
     }))
 }
 
+pub async fn get_payment_context_by_order(
+    pool: &SqlitePool,
+    order_id: Uuid,
+) -> anyhow::Result<PaymentOrderContext> {
+    let sql = payment_context_select_sql("o.id = ?");
+    let row = sqlx::query(&sql).bind(order_id).fetch_one(pool).await?;
+    payment_context_from_row(&row)
+}
+
+pub async fn get_latest_pending_payment_context_for_user(
+    pool: &SqlitePool,
+    telegram_user_id: i64,
+) -> anyhow::Result<Option<PaymentOrderContext>> {
+    let row = sqlx::query(
+        r#"
+        SELECT o.id AS order_id, o.user_id, o.amount_usdt, o.created_at,
+               o.payment_started_at, o.payment_expires_at, o.payment_status,
+               o.payment_chain, o.domain_quote_id,
+               w.id AS website_id, w.token_ticker, w.token_name, w.contract_address,
+               w.x_url, w.telegram_url, w.logo_asset_path, w.requested_domain
+        FROM orders o
+        JOIN users u ON u.id = o.user_id
+        LEFT JOIN websites w ON w.order_id = o.id
+        WHERE u.telegram_user_id = ?
+          AND o.payment_status = 'pending'
+          AND o.payment_chain IS NOT NULL
+          AND o.payment_started_at IS NOT NULL
+        ORDER BY o.payment_started_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(telegram_user_id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.as_ref().map(payment_context_from_row).transpose()
+}
+
+pub async fn get_domain_quote_for_purchase(
+    pool: &SqlitePool,
+    quote_id: Uuid,
+) -> anyhow::Result<DomainQuoteForPurchase> {
+    let row = sqlx::query(
+        r#"
+        SELECT domain, namecheap_price_usd, quoted_amount_usdt
+        FROM domain_quotes
+        WHERE id = ?
+        "#,
+    )
+    .bind(quote_id)
+    .fetch_one(pool)
+    .await?;
+
+    let namecheap_price_usd = row
+        .get::<Option<String>, _>("namecheap_price_usd")
+        .ok_or_else(|| anyhow::anyhow!("domain quote missing Namecheap price"))?;
+    let quoted_amount_usdt = row
+        .get::<Option<String>, _>("quoted_amount_usdt")
+        .ok_or_else(|| anyhow::anyhow!("domain quote missing quoted amount"))?;
+
+    Ok(DomainQuoteForPurchase {
+        domain: row.get("domain"),
+        namecheap_price_usd: Decimal::from_str_exact(&namecheap_price_usd)?,
+        quoted_amount_usdt: Decimal::from_str_exact(&quoted_amount_usdt)?,
+    })
+}
+
+fn payment_context_select_sql(where_clause: &str) -> String {
+    format!(
+        r#"
+        SELECT o.id AS order_id, o.user_id, o.amount_usdt, o.created_at,
+               o.payment_started_at, o.payment_expires_at, o.payment_status,
+               o.payment_chain, o.domain_quote_id,
+               w.id AS website_id, w.token_ticker, w.token_name, w.contract_address,
+               w.x_url, w.telegram_url, w.logo_asset_path, w.requested_domain
+        FROM orders o
+        LEFT JOIN websites w ON w.order_id = o.id
+        WHERE {where_clause}
+        LIMIT 1
+        "#
+    )
+}
+
+fn payment_context_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<PaymentOrderContext> {
+    let chain_value = row
+        .get::<Option<String>, _>("payment_chain")
+        .ok_or_else(|| anyhow::anyhow!("order payment chain is not set"))?;
+    let payment_chain = PaymentChain::from_db(&chain_value)
+        .ok_or_else(|| anyhow::anyhow!("unsupported payment chain: {chain_value}"))?;
+    let website_id = row
+        .get::<Option<String>, _>("website_id")
+        .as_deref()
+        .map(Uuid::parse_str)
+        .transpose()?;
+    let website_input = if website_id.is_some() {
+        Some(WebsiteInput {
+            token_ticker: row.get("token_ticker"),
+            token_name: row.get("token_name"),
+            contract_address: row.get("contract_address"),
+            x_url: row.get("x_url"),
+            telegram_url: row.get("telegram_url"),
+            logo_asset_path: row.get("logo_asset_path"),
+            requested_domain: row.get("requested_domain"),
+        })
+    } else {
+        None
+    };
+
+    Ok(PaymentOrderContext {
+        order_id: Uuid::parse_str(row.get::<&str, _>("order_id"))?,
+        user_id: Uuid::parse_str(row.get::<&str, _>("user_id"))?,
+        amount_usdt: Decimal::from_str_exact(row.get::<&str, _>("amount_usdt"))?,
+        created_at: parse_db_datetime(row.get::<&str, _>("created_at"))?,
+        payment_started_at: row
+            .get::<Option<String>, _>("payment_started_at")
+            .as_deref()
+            .map(parse_db_datetime)
+            .transpose()?,
+        payment_expires_at: row
+            .get::<Option<String>, _>("payment_expires_at")
+            .as_deref()
+            .map(parse_db_datetime)
+            .transpose()?,
+        payment_status: row.get("payment_status"),
+        payment_chain,
+        domain_quote_id: row
+            .get::<Option<String>, _>("domain_quote_id")
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()?,
+        website_id,
+        website_input,
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct UserOrderStatus {
     pub payment_status: String,
@@ -697,6 +973,28 @@ pub struct UserOrderStatus {
     pub amount_usdt: rust_decimal::Decimal,
     pub payment_chain: Option<String>,
     pub requested_domain: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaymentOrderContext {
+    pub order_id: Uuid,
+    pub user_id: Uuid,
+    pub amount_usdt: Decimal,
+    pub created_at: DateTime<Utc>,
+    pub payment_started_at: Option<DateTime<Utc>>,
+    pub payment_expires_at: Option<DateTime<Utc>>,
+    pub payment_status: String,
+    pub payment_chain: PaymentChain,
+    pub domain_quote_id: Option<Uuid>,
+    pub website_id: Option<Uuid>,
+    pub website_input: Option<WebsiteInput>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DomainQuoteForPurchase {
+    pub domain: String,
+    pub namecheap_price_usd: Decimal,
+    pub quoted_amount_usdt: Decimal,
 }
 
 #[derive(Debug, Clone)]

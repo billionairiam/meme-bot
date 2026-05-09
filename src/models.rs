@@ -51,6 +51,15 @@ impl PaymentChain {
             Self::Sol => "sol",
         }
     }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "erc20" => Some(Self::Erc20),
+            "tron" => Some(Self::Tron),
+            "sol" => Some(Self::Sol),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

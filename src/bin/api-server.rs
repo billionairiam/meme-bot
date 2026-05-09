@@ -294,6 +294,8 @@ struct PagesDeployRequest {
     publish_dir: String,
     #[serde(default)]
     custom_domain: Option<String>,
+    #[serde(default)]
+    expected_commit_sha: Option<String>,
 }
 
 fn default_pages_publish_dir() -> String {
@@ -412,8 +414,13 @@ async fn pages_deploy(
     }
 
     let deployment = trigger_pages_deployment(&state, &request.project_name).await?;
-    let deployment =
-        wait_pages_deployment_success(&state, &request.project_name, &deployment.id).await?;
+    let deployment = wait_pages_deployment_success(
+        &state,
+        &request.project_name,
+        &deployment.id,
+        request.expected_commit_sha.as_deref(),
+    )
+    .await?;
 
     // Bind custom domain if requested
     if let Some(domain) = &request.custom_domain {
@@ -436,6 +443,7 @@ struct ApiPagesDeploymentStatus {
     id: String,
     url: Option<String>,
     stage_status: Option<String>,
+    commit_hash: Option<String>,
 }
 
 async fn trigger_pages_deployment(
@@ -461,6 +469,7 @@ async fn wait_pages_deployment_success(
     state: &AppState,
     project_name: &str,
     deployment_id: &str,
+    expected_commit_sha: Option<&str>,
 ) -> Result<ApiPagesDeploymentStatus, ApiError> {
     for _ in 0..PAGES_DEPLOYMENT_POLL_ATTEMPTS {
         let url = format!(
@@ -476,7 +485,10 @@ async fn wait_pages_deployment_success(
             .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
         let deployment = parse_pages_deployment_response(response).await?;
         match deployment.stage_status.as_deref() {
-            Some("success") => return Ok(deployment),
+            Some("success") => {
+                verify_deployment_commit(&deployment, expected_commit_sha)?;
+                return Ok(deployment);
+            }
             Some("failure") | Some("canceled") => {
                 return Err(DomainError::Cloudflare(format!(
                     "deployment {} ended with status {}",
@@ -529,11 +541,56 @@ async fn parse_pages_deployment_response(
         .and_then(|stage| stage.get("status"))
         .and_then(|item| item.as_str())
         .map(String::from);
+    let commit_hash = extract_deployment_commit_hash(result);
     Ok(ApiPagesDeploymentStatus {
         id,
         url,
         stage_status,
+        commit_hash,
     })
+}
+
+fn extract_deployment_commit_hash(result: &serde_json::Value) -> Option<String> {
+    [
+        &["deployment_trigger", "metadata", "commit_hash"][..],
+        &["deployment_trigger", "metadata", "commit_sha"][..],
+        &["source", "config", "commit_hash"][..],
+        &["source", "config", "commit_sha"][..],
+    ]
+    .iter()
+    .find_map(|path| {
+        let mut value = result;
+        for key in *path {
+            value = value.get(key)?;
+        }
+        value
+            .as_str()
+            .filter(|hash| !hash.trim().is_empty())
+            .map(|hash| hash.trim().to_string())
+    })
+}
+
+fn verify_deployment_commit(
+    deployment: &ApiPagesDeploymentStatus,
+    expected_commit_sha: Option<&str>,
+) -> Result<(), ApiError> {
+    let Some(expected) = expected_commit_sha
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    match deployment.commit_hash.as_deref() {
+        Some(actual) if actual.eq_ignore_ascii_case(expected) => Ok(()),
+        Some(actual) => Err(DomainError::Cloudflare(format!(
+            "deployment {} used commit {}, expected {}",
+            deployment.id, actual, expected
+        )))?,
+        None => Err(DomainError::Cloudflare(format!(
+            "deployment {} did not report a commit hash; expected {}",
+            deployment.id, expected
+        )))?,
+    }
 }
 
 async fn bind_pages_custom_domain(
@@ -630,7 +687,10 @@ async fn get_pages_domain_status(
 
 fn ensure_domain_status_not_failed(domain: &str, status: &str) -> Result<(), ApiError> {
     match status {
-        "active" | "pending" | "initializing" => Ok(()),
+        "active" => Ok(()),
+        "pending" | "initializing" => Err(DomainError::Cloudflare(format!(
+            "custom domain {domain} is not active yet; Cloudflare status {status}"
+        )))?,
         "blocked" | "error" | "deactivated" => Err(DomainError::Cloudflare(format!(
             "custom domain {domain} has Cloudflare status {status}"
         )))?,
@@ -711,6 +771,9 @@ impl IntoResponse for ApiError {
         let (status, error_code) = match &self.0 {
             DomainError::UnsupportedTld => (StatusCode::BAD_REQUEST, "unsupported_tld"),
             DomainError::Unavailable => (StatusCode::BAD_REQUEST, "unavailable"),
+            DomainError::AlreadyRegisteredToAccount => {
+                (StatusCode::CONFLICT, "already_registered_to_account")
+            }
             DomainError::PremiumRejected => (StatusCode::BAD_REQUEST, "premium_rejected"),
             DomainError::MissingConfig(_) => (StatusCode::INTERNAL_SERVER_ERROR, "missing_config"),
             DomainError::Http(_) => (StatusCode::BAD_GATEWAY, "upstream_http_error"),

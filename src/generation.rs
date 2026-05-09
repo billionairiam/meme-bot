@@ -209,10 +209,7 @@ fn agent_prompt(request: &SiteGenerationRequest, provider_name: &str) -> String 
 
     let token_name = &request.input.token_name;
     let has_logo = !request.input.logo_asset_path.is_empty()
-        && request
-            .input
-            .logo_asset_path
-            .starts_with("./logos/");
+        && request.input.logo_asset_path.starts_with("./logos/");
     let logo_note = if has_logo {
         format!(
             "A logo image is provided at `{logo_path}`. Use it as the primary visual anchor — place it prominently in the hero section and favicon. Extract the dominant colors from this image and build the entire color palette around them.",
