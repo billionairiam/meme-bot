@@ -4,13 +4,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build / Run / Test
 
+First-time setup:
+
 ```bash
+cp .env.meme-bot.example .env.meme-bot
+cp .env.api-server.example .env.api-server
+# edit both .env files with real values
+```
+
+```bash
+cargo build                        # debug build
 cargo run                          # runs meme-bot (Telegram dispatcher + queue worker)
 cargo run --bin api-server         # start API server
 cargo test                         # run all tests
 cargo test <test_name>             # run a single test (e.g. cargo test renders_wrangler_args)
 cargo test -- --nocapture          # run tests with println/output visible
 ```
+
+`meme-bot` loads `.env.meme-bot` by default; `api-server` loads `.env.api-server` by default. Override with `MEME_BOT_ENV_FILE` or `API_SERVER_ENV_FILE`.
 
 Set `RUST_LOG=debug` (or `trace`) to enable verbose logging — both binaries use `tracing-subscriber` with `EnvFilter`.
 
@@ -64,7 +75,7 @@ Telegram user → /create → 7-step wizard → select payment chain
 
 | Module | Role |
 |---|---|
-| `config` | All configuration from env vars (see `.env.example`). `Config::from_env()` reads everything. |
+| `config` | All configuration from env vars. `Config::from_env()` reads everything. See `.env.meme-bot.example` and `.env.api-server.example`. |
 | `models` | Shared domain types: `WebsiteInput`, `BuildMode`, `OrderType`, `PaymentChain`, `Order`, `Template`. |
 | `validation` | Regex-based input validation for tickers, contract addresses (EVM/SOL/TRON), X/TG links, domains. No user-provided prompts — all input is structured fields. |
 | `db` | Raw SQLx queries: `upsert_user`, `create_site_order`, `mark_order_paid`, `create_website`, `enqueue_generation_job`, `queue_position`. |
@@ -72,16 +83,16 @@ Telegram user → /create → 7-step wizard → select payment chain
 | `generation` | `SiteGenerationProvider` trait. `GenerationRouter` tries providers in order (primary → fallback) on recoverable errors. `CliGenerationProvider` runs Gemini/Codex as external CLI processes with a 900s timeout, validates output via `.agent_done.json` + static file checks. `StaticTemplateProvider` exists for tests. |
 | `queue` | `GenerationQueue` with SQLite-backed job locking (mutex-guarded SELECT + UPDATE). One `tick()` picks a queued job, generates, optionally deploys. Uses a `tokio::sync::Semaphore` for concurrency control. |
 | `deployment` | `SiteDeployer` trait with four impls. `HttpClientPagesDeployer`: meme-bot creates GitHub repo + pushes code, then calls `POST /api/v1/pages/deploy` on the API server which creates the CF Pages project (git-connected), triggers deployment, and binds the custom domain. `CloudflarePagesDeployer` (fallback when `API_SERVICE_BASE_URL` is unset): does everything locally — creates repo, pushes, wires CF Pages (git integration if `GITHUB_TOKEN` is set, otherwise wrangler direct upload). `GitCliCloudflareDeployer`: git push only, no CF setup. `DryRunDeployer` for testing. |
-| `domain` | `DomainRegistrar` trait. `NamecheapRegistrar` calls Namecheap XML API (check → getPricing → create). `DnsProvisioner` trait with `DryRunDnsProvisioner`. Supported TLDs: `.com`, `.net`, `.org`, `.xyz`, `.fun`, `.site`, `.online`, `.io`, `.co`, `.me`, `.cc`, `.app`, `.dev`, `.world`, `.space`, `.club`, `.store`, `.shop`. |
-| `telegram` | teloxide-based bot with `dptree` dispatch. Inline keyboard UI flow: main menu → template/AI mode → 7-step form (logo, ticker, name, contract, X, TG, domain) → payment chain selection (writes order to DB) → TX hash submission (marks paid, enqueues generation job). When a requested domain is unavailable, queries all 18 supported TLDs for the same base name and shows available alternatives with prices. Template deep-links via `/start tpl_<id>`. Uses `SqlitePool` via dptree dependency injection. |
+| `domain` | `DomainRegistrar` trait. `NamecheapRegistrar` calls Namecheap XML API (check → getPricing → create). `DnsProvisioner` trait with `DryRunDnsProvisioner`. Supported TLDs: `.com`, `.net`, `.org`, `.xyz`, `.fun`, `.site`, `.online`, `.io`, `.co`, `.me`, `.cc`, `.app`, `.dev`, `.world`, `.space`, `.club`, `.store`, `.shop`, `.vip`. |
+| `telegram` | teloxide-based bot with `dptree` dispatch. Inline keyboard UI flow: main menu → template/AI mode → 7-step form (logo, ticker, name, contract, X, TG, domain) → payment chain selection (writes order to DB) → TX hash submission (marks paid, enqueues generation job). When a requested domain is unavailable, queries all 19 supported TLDs for the same base name and shows available alternatives with prices. Template deep-links via `/start tpl_<id>`. Uses `SqlitePool` via dptree dependency injection. |
 | `app` | Wires `GenerationRouter` + `GenerationQueue` + `SiteDeployer` for the queue worker. `build_queue()` creates a reusable `GenerationQueue` for the tick loop. |
 
 ### Key design patterns
 
 - **Traits for external boundaries**: `PaymentVerifier`, `SiteGenerationProvider`, `SiteDeployer`, `DomainRegistrar`, `DnsProvisioner` — each has a stub/dry-run impl for testing and a real impl behind the trait.
 - **Generation provider failover**: `GenerationRouter` iterates providers in configured order. Recoverable errors (`QuotaExhausted`, `RateLimited`, `ProviderUnavailable`) trigger failover; non-recoverable errors stop immediately.
-- **Config is flat env vars**: No config files. `Config::from_env()` reads everything. See `.env.example` for all supported vars.
+- **Config is flat env vars**: No config files. `Config::from_env()` reads everything. See `.env.meme-bot.example` and `.env.api-server.example` for all supported vars.
 - **SQLite pool is single-connection** (`max_connections(1)`). The mutex in `lock_next_job` provides an additional guard, but the single connection ensures SQLite never sees concurrent writes.
 - **API server proxy mode**: When `API_SERVICE_BASE_URL` is set, the bot uses `HttpClient*` trait impls that call the API server over HTTPS. When unset, it falls back to direct Namecheap/Cloudflare API calls — useful for single-server deployments.
-- **`NAMECHEAP_AUTO_PURCHASE_AFTER_TX` defaults to `false`** in code (`.env.example` suggests `true`). When `false`, paid orders pause for manual review before domain purchase and generation.
+- **`NAMECHEAP_AUTO_PURCHASE_AFTER_TX` defaults to `false`** in code (`.env.meme-bot.example` suggests `true`). When `false`, paid orders pause for manual review before domain purchase and generation.
 - **SQLite schema** in `migrations/0001_init.sql`: `users`, `orders`, `websites`, `templates`, `payment_attempts`, `payment_transactions`, `generation_jobs`, `generation_attempts`, `domain_quotes`, `domain_registrations`, `deployment_attempts`.

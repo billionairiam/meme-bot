@@ -13,14 +13,11 @@ const NAMECHEAP_PRODUCTION_URL: &str = "https://api.namecheap.com/xml.response";
 
 pub const SUPPORTED_TLDS: &[&str] = &[
     "com", "net", "org", "xyz", "fun", "site", "online", "io", "co", "me", "cc", "app", "dev",
-    "world", "space", "club", "store", "shop",
+    "world", "space", "club", "store", "shop", "vip"
 ];
 
-fn icann_fee(tld: &str) -> Decimal {
-    match tld {
-        "com" | "net" | "org" => Decimal::new(20, 2),
-        _ => Decimal::ZERO,
-    }
+fn icann_fee() -> Decimal {
+    Decimal::new(20, 2)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -122,6 +119,7 @@ impl NamecheapRegistrar {
                 "club".to_string(),
                 "store".to_string(),
                 "shop".to_string(),
+                "vip".to_string(),
             ],
         }
     }
@@ -336,7 +334,7 @@ impl DomainRegistrar for NamecheapRegistrar {
             });
         }
 
-        let price_usd = self.registration_price(&tld, 1).await? + icann_fee(&tld);
+        let price_usd = self.registration_price(&tld, 1).await? + icann_fee();
         Ok(DomainQuote {
             domain,
             tld,
@@ -1654,19 +1652,8 @@ mod tests {
     }
 
     #[test]
-    fn adds_icann_fee_for_com_net_org() {
-        assert_eq!(icann_fee("com"), Decimal::new(20, 2));
-        assert_eq!(icann_fee("net"), Decimal::new(20, 2));
-        assert_eq!(icann_fee("org"), Decimal::new(20, 2));
-    }
-
-    #[test]
-    fn no_icann_fee_for_other_tlds() {
-        for tld in [
-            "xyz", "fun", "site", "online", "io", "co", "me", "cc", "app", "dev",
-        ] {
-            assert_eq!(icann_fee(tld), Decimal::ZERO);
-        }
+    fn icann_fee_is_20_cents() {
+        assert_eq!(icann_fee(), Decimal::new(20, 2));
     }
 
     // ---- Real Namecheap sandbox API tests ----

@@ -674,7 +674,7 @@ async fn handle_order_step(
             let domain = normalize_domain(text);
             if validate_domain(&domain).is_err() {
                 return bot
-                    .send_message(msg.chat.id, "<b>Invalid or unsupported domain.</b>\n\nSupported TLDs:\n<code>.com</code> <code>.net</code> <code>.org</code> <code>.xyz</code> <code>.fun</code> <code>.site</code> <code>.online</code> <code>.io</code> <code>.co</code> <code>.me</code> <code>.cc</code> <code>.app</code> <code>.dev</code> <code>.world</code> <code>.space</code> <code>.club</code> <code>.store</code> <code>.shop</code>")
+                    .send_message(msg.chat.id, "<b>Invalid or unsupported domain.</b>\n\nSupported TLDs:\n<code>.com</code> <code>.net</code> <code>.org</code> <code>.xyz</code> <code>.fun</code> <code>.site</code> <code>.online</code> <code>.io</code> <code>.co</code> <code>.me</code> <code>.cc</code> <code>.app</code> <code>.dev</code> <code>.world</code> <code>.space</code> <code>.club</code> <code>.store</code> <code>.shop</code> <code>.vip</code>")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
@@ -2318,7 +2318,7 @@ fn domain_error_for_user(error: &DomainError) -> String {
             format!("Namecheap configuration is missing: {value}")
         }
         DomainError::UnsupportedTld => {
-            "Unsupported TLD. Supported: .com, .net, .org, .xyz, .fun, .site, .online, .io, .co, .me, .cc, .app, .dev, .world, .space, .club, .store, .shop".to_string()
+            "Unsupported TLD. Supported: .com, .net, .org, .xyz, .fun, .site, .online, .io, .co, .me, .cc, .app, .dev, .world, .space, .club, .store, .shop, .vip".to_string()
         }
         DomainError::Unavailable => "Domain is unavailable.".to_string(),
         DomainError::AlreadyRegisteredToAccount => {
