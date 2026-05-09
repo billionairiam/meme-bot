@@ -1,11 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ENV_FILE="${MEME_BOT_ENV_FILE:-.env.meme-bot}"
+
+if [ -f "${ENV_FILE}" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+  set +a
+fi
+
 if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
   echo "Error: TELEGRAM_BOT_TOKEN is not set"
   echo "Usage:"
-  echo "  export TELEGRAM_BOT_TOKEN=your_bot_token"
-  echo "  ./set_telegram_commands.sh"
+  echo "  ./scripts/set_telegram_commands.sh"
+  echo "  MEME_BOT_ENV_FILE=.env.meme-bot ./scripts/set_telegram_commands.sh"
   exit 1
 fi
 
@@ -15,23 +24,23 @@ curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setMyCommand
     "commands": [
       {
         "command": "start",
-        "description": "Open the main menu"
+        "description": "Main menu"
       },
       {
         "command": "create",
-        "description": "Create a new order"
+        "description": "Create order"
       },
       {
         "command": "status",
-        "description": "Check your order status"
+        "description": "Order status"
       },
       {
         "command": "history",
-        "description": "Show paid order history"
+        "description": "Paid history"
       },
       {
         "command": "cancel",
-        "description": "Cancel the current order"
+        "description": "Cancel order"
       }
     ]
   }'
