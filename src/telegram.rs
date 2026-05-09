@@ -201,6 +201,23 @@ enum DraftStep {
     PaymentConfirmed,
 }
 
+impl DraftStep {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::WaitingLogo => "waiting_logo",
+            Self::WaitingTicker => "waiting_ticker",
+            Self::WaitingTokenName => "waiting_token_name",
+            Self::WaitingContractAddress => "waiting_contract_address",
+            Self::WaitingXLink => "waiting_x_link",
+            Self::WaitingTelegramLink => "waiting_telegram_link",
+            Self::WaitingWebsiteUrl => "waiting_website_url",
+            Self::ReadyToPay => "ready_to_pay",
+            Self::WaitingTx => "waiting_tx",
+            Self::PaymentConfirmed => "payment_confirmed",
+        }
+    }
+}
+
 impl OrderDraft {
     fn new_ai() -> Self {
         Self::new(BuildModeDraft::AiFree, Decimal::new(50, 0), None)
@@ -293,9 +310,22 @@ async fn handle_message(
     }
 
     let Some(user) = msg.from.as_ref() else {
+        info!(
+            chat_id = %msg.chat.id,
+            message_kind = message_kind(&msg),
+            "telegram message without user"
+        );
         return show_main_menu(&bot, msg.chat.id, &config).await;
     };
     let user_id = user.id;
+    let current_step = session_step_name(user_id, &sessions).await;
+    info!(
+        user_id = user_id.0 as i64,
+        chat_id = %msg.chat.id,
+        message_kind = message_kind(&msg),
+        session_step = current_step.unwrap_or("none"),
+        "telegram message received"
+    );
 
     if let Some(text) = msg.text() {
         if let Some(template_id) = parse_template_deep_link(text) {
@@ -339,6 +369,14 @@ async fn handle_callback(
         chat_id,
         message_id: message.id(),
     };
+    let current_step = session_step_name(query.from.id, &sessions).await;
+    info!(
+        user_id = query.from.id.0 as i64,
+        chat_id = %chat_id,
+        callback = query.data.as_deref().unwrap_or("<none>"),
+        session_step = current_step.unwrap_or("none"),
+        "telegram callback received"
+    );
 
     if !ensure_group_member_for_user(&bot, chat_id, query.from.id, &config).await? {
         return Ok(());
@@ -351,6 +389,12 @@ async fn handle_callback(
         Some("ai_mode") => {
             clear_screen_keyboard(&bot, target).await?;
             set_session(query.from.id, OrderDraft::new_ai(), &sessions);
+            info!(
+                user_id = query.from.id.0 as i64,
+                build_mode = "ai_free",
+                next_step = DraftStep::WaitingLogo.as_str(),
+                "new order session started"
+            );
             edit_ask_logo(&bot, target).await
         }
         Some("pay_menu") => edit_payment_chain_menu(&bot, target).await,
@@ -401,6 +445,13 @@ async fn handle_callback(
                 Some(template) => {
                     clear_screen_keyboard(&bot, target).await?;
                     set_session(query.from.id, OrderDraft::new_template(template), &sessions);
+                    info!(
+                        user_id = query.from.id.0 as i64,
+                        build_mode = "template",
+                        template_id = template.id,
+                        next_step = DraftStep::WaitingLogo.as_str(),
+                        "new order session started"
+                    );
                     edit_ask_logo(&bot, target).await
                 }
                 None => {
@@ -505,6 +556,12 @@ async fn handle_order_step(
             };
             draft.logo_file_id = Some(photo.file.id.0.clone());
             draft.step = DraftStep::WaitingTicker;
+            info!(
+                user_id = user_id.0 as i64,
+                chat_id = %msg.chat.id,
+                next_step = DraftStep::WaitingTicker.as_str(),
+                "logo received; advancing order wizard"
+            );
             set_session(user_id, draft, &sessions);
             bot.send_message(
                 msg.chat.id,
@@ -538,6 +595,12 @@ async fn handle_order_step(
             }
             draft.ticker = Some(ticker);
             draft.step = DraftStep::WaitingTokenName;
+            info!(
+                user_id = user_id.0 as i64,
+                chat_id = %msg.chat.id,
+                next_step = DraftStep::WaitingTokenName.as_str(),
+                "ticker accepted; advancing order wizard"
+            );
             set_session(user_id, draft, &sessions);
             bot.send_message(
                 msg.chat.id,
@@ -567,6 +630,12 @@ async fn handle_order_step(
             }
             draft.token_name = Some(text.to_string());
             draft.step = DraftStep::WaitingContractAddress;
+            info!(
+                user_id = user_id.0 as i64,
+                chat_id = %msg.chat.id,
+                next_step = DraftStep::WaitingContractAddress.as_str(),
+                "token name accepted; advancing order wizard"
+            );
             set_session(user_id, draft, &sessions);
             bot.send_message(
                 msg.chat.id,
@@ -599,6 +668,12 @@ async fn handle_order_step(
             }
             draft.contract_address = Some(text.to_string());
             draft.step = DraftStep::WaitingXLink;
+            info!(
+                user_id = user_id.0 as i64,
+                chat_id = %msg.chat.id,
+                next_step = DraftStep::WaitingXLink.as_str(),
+                "contract address accepted; advancing order wizard"
+            );
             set_session(user_id, draft, &sessions);
             bot.send_message(msg.chat.id, "✅ <b>Contract address saved.</b>\n\n✕ <b>Step 5/7</b>\nSend X link, for example:\n<code>https://x.com/yourproject</code>")
                 .parse_mode(ParseMode::Html)
@@ -625,6 +700,12 @@ async fn handle_order_step(
             }
             draft.x_link = Some(text.to_string());
             draft.step = DraftStep::WaitingTelegramLink;
+            info!(
+                user_id = user_id.0 as i64,
+                chat_id = %msg.chat.id,
+                next_step = DraftStep::WaitingTelegramLink.as_str(),
+                "x link accepted; advancing order wizard"
+            );
             set_session(user_id, draft, &sessions);
             bot.send_message(msg.chat.id, "✅ <b>X link saved.</b>\n\n💬 <b>Step 6/7</b>\nSend Telegram link, for example:\n<code>https://t.me/yourgroup</code>")
                 .parse_mode(ParseMode::Html)
@@ -654,6 +735,12 @@ async fn handle_order_step(
             }
             draft.telegram_link = Some(text.to_string());
             draft.step = DraftStep::WaitingWebsiteUrl;
+            info!(
+                user_id = user_id.0 as i64,
+                chat_id = %msg.chat.id,
+                next_step = DraftStep::WaitingWebsiteUrl.as_str(),
+                "telegram link accepted; advancing order wizard"
+            );
             set_session(user_id, draft, &sessions);
             bot.send_message(msg.chat.id, "✅ <b>Telegram link saved.</b>\n\n🌐 <b>Step 7/7</b>\nSend desired website URL/domain, for example:\n<code>pepe.xyz</code>\n\nI will check availability and price.")
                 .parse_mode(ParseMode::Html)
@@ -672,6 +759,12 @@ async fn handle_order_step(
                     .map(|_| ());
             };
             let domain = normalize_domain(text);
+            info!(
+                user_id = user_id.0 as i64,
+                chat_id = %msg.chat.id,
+                domain = %domain,
+                "checking requested domain"
+            );
             if validate_domain(&domain).is_err() {
                 return bot
                     .send_message(msg.chat.id, "<b>Invalid or unsupported domain.</b>\n\nSupported TLDs:\n<code>.com</code> <code>.net</code> <code>.org</code> <code>.xyz</code> <code>.fun</code> <code>.site</code> <code>.online</code> <code>.io</code> <code>.co</code> <code>.me</code> <code>.cc</code> <code>.app</code> <code>.dev</code> <code>.world</code> <code>.space</code> <code>.club</code> <code>.store</code> <code>.shop</code> <code>.vip</code>")
@@ -693,6 +786,13 @@ async fn handle_order_step(
             };
             match quote_domain_with_retries(registrar.as_ref(), &domain).await {
                 Ok(quote) if quote.available && !quote.is_premium => {
+                    info!(
+                        user_id = user_id.0 as i64,
+                        chat_id = %msg.chat.id,
+                        domain = %quote.domain,
+                        price_usd = %quote.price_usd,
+                        "domain quote available"
+                    );
                     let db_user_id = match db::upsert_user(
                         pool,
                         user_id.0 as i64,
@@ -725,7 +825,15 @@ async fn handle_order_step(
                     draft.domain_price_usdt = Some(quote.price_usd);
                     let total = draft.site_price_usdt + quote.price_usd;
                     match db::record_domain_quote(pool, db_user_id, &quote, quote.price_usd).await {
-                        Ok(quote_id) => draft.domain_quote_id = Some(quote_id),
+                        Ok(quote_id) => {
+                            info!(
+                                user_id = user_id.0 as i64,
+                                quote_id = %quote_id,
+                                domain = %quote.domain,
+                                "domain quote persisted"
+                            );
+                            draft.domain_quote_id = Some(quote_id)
+                        }
                         Err(e) => {
                             warn!(?e, "failed to record domain quote");
                             return bot
@@ -740,6 +848,14 @@ async fn handle_order_step(
                     }
                     draft.total_usdt = Some(total);
                     draft.step = DraftStep::ReadyToPay;
+                    info!(
+                        user_id = user_id.0 as i64,
+                        chat_id = %msg.chat.id,
+                        domain = %quote.domain,
+                        total_usdt = %total,
+                        next_step = DraftStep::ReadyToPay.as_str(),
+                        "order ready for payment chain selection"
+                    );
                     set_session(user_id, draft.clone(), &sessions);
                     bot.send_message(
                         msg.chat.id,
@@ -754,6 +870,12 @@ async fn handle_order_step(
                     .map(|_| ())
                 }
                 Ok(_) | Err(_) => {
+                    info!(
+                        user_id = user_id.0 as i64,
+                        chat_id = %msg.chat.id,
+                        domain = %domain,
+                        "requested domain unavailable; checking alternatives"
+                    );
                     let tld = domain.rsplit_once('.').map(|(_, t)| t).unwrap_or("");
                     let base_name = domain
                         .rsplit_once('.')
@@ -894,8 +1016,20 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
     let order_id = context.order_id;
     let chain = context.payment_chain;
     let mut status_parts: Vec<String> = vec![];
+    info!(
+        user_id = user_id.0 as i64,
+        order_id = %order_id,
+        chain = chain.as_str(),
+        required_amount_usdt = %context.amount_usdt,
+        "payment tx submitted; starting verification"
+    );
 
     if context.payment_status == "paid" {
+        info!(
+            user_id = user_id.0 as i64,
+            order_id = %order_id,
+            "payment tx ignored because order is already paid"
+        );
         return bot
             .send_message(
                 chat_id,
@@ -909,6 +1043,12 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
 
     match db::tx_hash_already_used(pool, chain, tx_hash).await {
         Ok(true) => {
+            warn!(
+                user_id = user_id.0 as i64,
+                order_id = %order_id,
+                chain = chain.as_str(),
+                "reused tx rejected"
+            );
             return bot
                 .send_message(
                     chat_id,
@@ -918,7 +1058,14 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
                 .await
                 .map(|_| ());
         }
-        Ok(false) => {}
+        Ok(false) => {
+            info!(
+                user_id = user_id.0 as i64,
+                order_id = %order_id,
+                chain = chain.as_str(),
+                "tx reuse check passed"
+            );
+        }
         Err(error) => warn!(?error, "failed to check tx reuse"),
     }
 
@@ -981,8 +1128,26 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
     }
 
     let outcome = match verification {
-        Ok(outcome) => outcome,
+        Ok(outcome) => {
+            info!(
+                user_id = user_id.0 as i64,
+                order_id = %order_id,
+                chain = chain.as_str(),
+                observed_amount_usdt = %outcome.observed_amount_usdt,
+                confirmations = outcome.confirmations.map(|value| value as i64),
+                confirmed_at = %outcome.confirmed_at,
+                "payment verified on chain"
+            );
+            outcome
+        }
         Err(error) => {
+            warn!(
+                user_id = user_id.0 as i64,
+                order_id = %order_id,
+                chain = chain.as_str(),
+                error = %error,
+                "payment verification failed"
+            );
             return bot
                 .send_message(
                     chat_id,
@@ -1010,6 +1175,12 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
             .await
             .map(|_| ());
     }
+    info!(
+        user_id = user_id.0 as i64,
+        order_id = %order_id,
+        chain = chain.as_str(),
+        "payment recorded and order marked paid"
+    );
     status_parts.push(format!(
         "Payment verified: {} USDT, confirmations: {}.",
         outcome.observed_amount_usdt,
@@ -1024,10 +1195,23 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
             if !input.logo_asset_path.trim().is_empty()
                 && !Path::new(&input.logo_asset_path).exists()
             {
+                info!(
+                    user_id = user_id.0 as i64,
+                    order_id = %order_id,
+                    website_id = %website_id,
+                    "downloading telegram logo before queueing generation"
+                );
                 match download_telegram_logo(bot, &input.logo_asset_path, &order_id.to_string())
                     .await
                 {
                     Ok(path) => {
+                        info!(
+                            user_id = user_id.0 as i64,
+                            order_id = %order_id,
+                            website_id = %website_id,
+                            logo_path = %path,
+                            "telegram logo downloaded"
+                        );
                         if let Err(error) =
                             db::update_website_logo_path(pool, website_id, &path).await
                         {
@@ -1052,6 +1236,12 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
                 status_parts.push(purchase_message.trim().to_string());
             }
             if !domain_ready {
+                warn!(
+                    user_id = user_id.0 as i64,
+                    order_id = %order_id,
+                    website_id = %website_id,
+                    "domain not ready; order moved toward manual review"
+                );
                 if let Err(error) = db::mark_order_manual_review(pool, order_id).await {
                     warn!(?error, order_id = %order_id, "failed to mark manual review");
                 }
@@ -1066,6 +1256,12 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
                 let _ = db::mark_order_manual_review(pool, order_id).await;
                 status_parts.push("⚠️ Failed to queue generation. Contact admin.".to_string());
             } else {
+                info!(
+                    user_id = user_id.0 as i64,
+                    order_id = %order_id,
+                    website_id = %website_id,
+                    "generation job queued"
+                );
                 status_parts.push("Website queued for generation.".to_string());
             }
         }
@@ -1465,6 +1661,13 @@ async fn edit_payment_chain_and_ask_tx(
             }
         };
         draft.order_id = Some(order_id);
+        info!(
+            user_id = user_id.0 as i64,
+            order_id = %order_id,
+            total_usdt = %total,
+            chain = chain.as_str(),
+            "site order created before payment"
+        );
         set_session(user_id, draft.clone(), sessions);
         order_id
     };
@@ -1479,7 +1682,16 @@ async fn edit_payment_chain_and_ask_tx(
         .await;
     };
     let website_id = match db::upsert_website_for_order(pool, db_user_id, order_id, &input).await {
-        Ok(id) => id,
+        Ok(id) => {
+            info!(
+                user_id = user_id.0 as i64,
+                order_id = %order_id,
+                website_id = %id,
+                domain = input.requested_domain.as_deref().unwrap_or("<none>"),
+                "website input persisted before payment"
+            );
+            id
+        }
         Err(error) => {
             warn!(?error, order_id = %order_id, "failed to persist website input before payment");
             return edit_screen(
@@ -1498,7 +1710,17 @@ async fn edit_payment_chain_and_ask_tx(
     }
 
     let payment_window = match db::attach_payment_chain(pool, order_id, chain).await {
-        Ok(window) => window,
+        Ok(window) => {
+            info!(
+                user_id = user_id.0 as i64,
+                order_id = %order_id,
+                chain = chain.as_str(),
+                payment_started_at = %window.started_at,
+                payment_expires_at = %window.expires_at,
+                "payment window started"
+            );
+            window
+        }
         Err(e) => {
             warn!(?e, order_id = %order_id, "failed to attach payment chain");
             return edit_screen(
@@ -1515,6 +1737,13 @@ async fn edit_payment_chain_and_ask_tx(
     draft.step = DraftStep::WaitingTx;
     draft.order_id = Some(order_id);
     draft.db_user_id = Some(db_user_id);
+    info!(
+        user_id = user_id.0 as i64,
+        order_id = %order_id,
+        chain = chain.as_str(),
+        next_step = DraftStep::WaitingTx.as_str(),
+        "waiting for payment transaction"
+    );
     set_session(user_id, draft, sessions);
 
     edit_screen(
@@ -1637,6 +1866,26 @@ fn get_session(user_id: UserId, sessions: &Sessions) -> Option<OrderDraft> {
         .cloned()
 }
 
+async fn session_step_name(user_id: UserId, sessions: &Sessions) -> Option<&'static str> {
+    sessions
+        .lock()
+        .expect("sessions lock")
+        .get(&user_id)
+        .map(|draft| draft.step.as_str())
+}
+
+fn message_kind(msg: &Message) -> &'static str {
+    if msg.text().is_some() {
+        "text"
+    } else if msg.photo().is_some() {
+        "photo"
+    } else if msg.document().is_some() {
+        "document"
+    } else {
+        "other"
+    }
+}
+
 fn remove_session(user_id: UserId, sessions: &Sessions) {
     sessions.lock().expect("sessions lock").remove(&user_id);
 }
@@ -1648,6 +1897,11 @@ async fn maybe_purchase_domain_after_tx(
     domain: Option<&str>,
 ) -> (bool, String) {
     if !config.namecheap.auto_purchase_after_tx {
+        info!(
+            quote_id = %quote_id.map(|id| id.to_string()).unwrap_or_else(|| "<none>".to_string()),
+            domain = domain.unwrap_or("<none>"),
+            "automatic domain purchase disabled"
+        );
         return (
             false,
             "\n\n<b>Domain purchase:</b> skipped. Set <code>NAMECHEAP_AUTO_PURCHASE_AFTER_TX=true</code> to enable automatic Namecheap purchase after TX.".to_string(),
@@ -1655,18 +1909,31 @@ async fn maybe_purchase_domain_after_tx(
     }
 
     let Some(domain) = domain else {
+        warn!(
+            quote_id = %quote_id.map(|id| id.to_string()).unwrap_or_else(|| "<none>".to_string()),
+            "domain purchase skipped because no domain is attached"
+        );
         return (
             false,
             "\n\n<b>Domain purchase:</b> skipped because no domain is attached.".to_string(),
         );
     };
     let Some(quote_id) = quote_id else {
+        warn!(
+            domain = %domain,
+            "domain purchase skipped because no persisted quote is attached"
+        );
         return (
             false,
             "\n\n<b>Domain purchase:</b> skipped because no persisted quote is attached."
                 .to_string(),
         );
     };
+    info!(
+        quote_id = %quote_id,
+        domain = %domain,
+        "starting post-payment domain purchase flow"
+    );
     let registrar: Box<dyn DomainRegistrar> = if let (Some(base_url), Some(api_key)) = (
         config.api_service_base_url.as_deref(),
         config.api_service_api_key.as_deref(),
@@ -1697,6 +1964,12 @@ async fn maybe_purchase_domain_after_tx(
         }
     };
     if !quote_record.domain.eq_ignore_ascii_case(domain) {
+        warn!(
+            quote_id = %quote_id,
+            requested_domain = %domain,
+            quoted_domain = %quote_record.domain,
+            "domain quote mismatch before purchase"
+        );
         let _ = db::mark_domain_purchase_manual_review(
             pool,
             quote_id,
@@ -1712,6 +1985,13 @@ async fn maybe_purchase_domain_after_tx(
     let price_tolerance = Decimal::new(1, 2);
     match quote_domain_with_retries(registrar.as_ref(), domain).await {
         Ok(current_quote) if current_quote.available && !current_quote.is_premium => {
+            info!(
+                quote_id = %quote_id,
+                domain = %domain,
+                current_price_usd = %current_quote.price_usd,
+                paid_quote_usdt = %quote_record.quoted_amount_usdt,
+                "domain price refreshed before purchase"
+            );
             if current_quote.price_usd > quote_record.quoted_amount_usdt + price_tolerance {
                 let reason = format!(
                     "current Namecheap price {} exceeds paid domain quote {}",
@@ -1760,8 +2040,20 @@ async fn maybe_purchase_domain_after_tx(
     if let Err(error) = db::record_domain_purchase_started(pool, quote_id).await {
         warn!(?error, quote_id = %quote_id, "failed to record domain purchase start");
     }
+    info!(
+        quote_id = %quote_id,
+        domain = %domain,
+        "submitting domain purchase"
+    );
     match purchase_domain_with_retries(registrar.as_ref(), domain).await {
         Ok(result) => {
+            info!(
+                quote_id = %quote_id,
+                domain = %domain,
+                namecheap_order_id = %result.namecheap_order_id,
+                charged_amount_usd = %result.charged_amount_usd,
+                "domain purchase succeeded"
+            );
             if let Err(error) = db::record_domain_purchase_success(pool, quote_id, &result).await {
                 warn!(?error, quote_id = %quote_id, "failed to record domain purchase success");
             }
@@ -1784,6 +2076,13 @@ async fn maybe_purchase_domain_after_tx(
             let dns_result = setup_cloudflare_dns_after_purchase_with_retries(config, domain).await;
             let dns_ready = match &dns_result {
                 Ok(zone) => {
+                    info!(
+                        quote_id = %quote_id,
+                        domain = %domain,
+                        cloudflare_zone_id = %zone.zone_id,
+                        nameservers = ?zone.nameservers,
+                        "dns setup succeeded after domain purchase"
+                    );
                     if let Err(error) = db::record_domain_dns_result(pool, quote_id, Ok(zone)).await
                     {
                         warn!(?error, quote_id = %quote_id, "failed to record dns success");
@@ -1791,6 +2090,12 @@ async fn maybe_purchase_domain_after_tx(
                     true
                 }
                 Err(message) => {
+                    warn!(
+                        quote_id = %quote_id,
+                        domain = %domain,
+                        error = %message,
+                        "dns setup failed after domain purchase"
+                    );
                     if let Err(error) =
                         db::record_domain_dns_result(pool, quote_id, Err(message.as_str())).await
                     {
@@ -1817,6 +2122,12 @@ async fn maybe_purchase_domain_after_tx(
             )
         }
         Err(error) => {
+            warn!(
+                quote_id = %quote_id,
+                domain = %domain,
+                error = %error,
+                "domain purchase failed"
+            );
             if matches!(&error, DomainError::AlreadyRegisteredToAccount) {
                 if let Err(db_error) = db::mark_domain_purchase_manual_review(
                     pool,
@@ -1898,15 +2209,45 @@ where
 {
     let mut last_error = None;
     for attempt in 1..=EXTERNAL_STEP_MAX_ATTEMPTS {
+        info!(
+            order_id = %request.order_id,
+            chain = request.chain.as_str(),
+            attempt,
+            "checking payment transaction"
+        );
         match service.verify_tx(request.clone()).await {
-            Ok(outcome) => return Ok(outcome),
+            Ok(outcome) => {
+                info!(
+                    order_id = %request.order_id,
+                    chain = request.chain.as_str(),
+                    attempt,
+                    "payment transaction check succeeded"
+                );
+                return Ok(outcome);
+            }
             Err(error)
                 if retryable_payment_error(&error) && attempt < EXTERNAL_STEP_MAX_ATTEMPTS =>
             {
+                warn!(
+                    order_id = %request.order_id,
+                    chain = request.chain.as_str(),
+                    attempt,
+                    error = %error,
+                    "payment transaction check failed; retrying"
+                );
                 last_error = Some(error);
                 sleep(TokioDuration::from_secs(attempt as u64 * 2)).await;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                warn!(
+                    order_id = %request.order_id,
+                    chain = request.chain.as_str(),
+                    attempt,
+                    error = %error,
+                    "payment transaction check failed"
+                );
+                return Err(error);
+            }
         }
     }
     Err(last_error.unwrap_or(PaymentVerificationError::Provider(
@@ -1927,8 +2268,19 @@ async fn quote_domain_with_retries(
     };
     let mut last_error = None;
     for attempt in 1..=EXTERNAL_STEP_MAX_ATTEMPTS {
+        info!(%domain, attempt, "checking domain quote");
         match registrar.quote(&request).await {
-            Ok(quote) => return Ok(quote),
+            Ok(quote) => {
+                info!(
+                    %domain,
+                    attempt,
+                    available = quote.available,
+                    premium = quote.is_premium,
+                    price_usd = %quote.price_usd,
+                    "domain quote check succeeded"
+                );
+                return Ok(quote);
+            }
             Err(error)
                 if retryable_domain_error(&error) && attempt < EXTERNAL_STEP_MAX_ATTEMPTS =>
             {
@@ -1954,8 +2306,18 @@ async fn purchase_domain_with_retries(
     };
     let mut last_error = None;
     for attempt in 1..=EXTERNAL_STEP_MAX_ATTEMPTS {
+        info!(%domain, attempt, "purchasing domain");
         match registrar.purchase(&request).await {
-            Ok(result) => return Ok(result),
+            Ok(result) => {
+                info!(
+                    %domain,
+                    attempt,
+                    namecheap_order_id = %result.namecheap_order_id,
+                    charged_amount_usd = %result.charged_amount_usd,
+                    "domain purchase call succeeded"
+                );
+                return Ok(result);
+            }
             Err(error)
                 if retryable_domain_error(&error) && attempt < EXTERNAL_STEP_MAX_ATTEMPTS =>
             {
@@ -1977,14 +2339,27 @@ async fn setup_cloudflare_dns_after_purchase_with_retries(
 ) -> Result<crate::domain::CloudflareZoneResult, String> {
     let mut last_error = None;
     for attempt in 1..=EXTERNAL_STEP_MAX_ATTEMPTS {
+        info!(%domain, attempt, "setting up cloudflare/namecheap dns");
         match setup_cloudflare_dns_after_purchase(config, domain).await {
-            Ok(zone) => return Ok(zone),
+            Ok(zone) => {
+                info!(
+                    %domain,
+                    attempt,
+                    cloudflare_zone_id = %zone.zone_id,
+                    nameservers = ?zone.nameservers,
+                    "dns setup call succeeded"
+                );
+                return Ok(zone);
+            }
             Err(error) if attempt < EXTERNAL_STEP_MAX_ATTEMPTS => {
                 warn!(%domain, attempt, error = %error, "dns setup failed; retrying");
                 last_error = Some(error);
                 sleep(TokioDuration::from_secs(attempt as u64 * 3)).await;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                warn!(%domain, attempt, error = %error, "dns setup failed");
+                return Err(error);
+            }
         }
     }
     Err(last_error.unwrap_or_else(|| {
@@ -2008,12 +2383,21 @@ async fn setup_cloudflare_dns_after_purchase(
         config.api_service_api_key.as_deref(),
     ) {
         let dns = HttpClientDnsProvisioner::new(base_url.to_string(), api_key.to_string());
+        info!(%domain, "creating cloudflare zone through api-server");
         return match dns.create_zone(domain).await {
             Ok(zone) => match dns
                 .set_namecheap_nameservers(domain, &zone.nameservers)
                 .await
             {
-                Ok(()) => Ok(zone),
+                Ok(()) => {
+                    info!(
+                        %domain,
+                        cloudflare_zone_id = %zone.zone_id,
+                        nameservers = ?zone.nameservers,
+                        "namecheap nameservers updated through api-server"
+                    );
+                    Ok(zone)
+                }
                 Err(error) => Err(format!(
                     "\n<b>DNS nameserver update failed.</b> {}",
                     html_escape(&domain_error_for_user(&error))
@@ -2031,12 +2415,21 @@ async fn setup_cloudflare_dns_after_purchase(
         config.cloudflare_api_token.clone(),
     );
     let namecheap = NamecheapDnsProvisioner::new(config.namecheap.clone());
+    info!(%domain, "creating cloudflare zone directly");
     match cloudflare.create_zone(domain).await {
         Ok(zone) => match namecheap
             .set_namecheap_nameservers(domain, &zone.nameservers)
             .await
         {
-            Ok(()) => Ok(zone),
+            Ok(()) => {
+                info!(
+                    %domain,
+                    cloudflare_zone_id = %zone.zone_id,
+                    nameservers = ?zone.nameservers,
+                    "namecheap nameservers updated directly"
+                );
+                Ok(zone)
+            }
             Err(error) => Err(format!(
                 "\n<b>DNS nameserver update failed.</b> {}",
                 html_escape(&domain_error_for_user(&error))

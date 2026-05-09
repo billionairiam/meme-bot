@@ -13,7 +13,9 @@ use tracing::{error, info, warn};
 async fn main() -> anyhow::Result<()> {
     let env_file = load_env_file("MEME_BOT_ENV_FILE", ".env.meme-bot")?;
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .init();
     if let Some(path) = env_file {
         info!(env_file = %path, "loaded meme-bot env file");
@@ -37,6 +39,9 @@ async fn main() -> anyhow::Result<()> {
         .run(&pool)
         .await
         .context("run migrations")?;
+    meme_bot::db::normalize_sqlite_uuid_storage(&pool)
+        .await
+        .context("normalize sqlite uuid storage")?;
 
     let (notification_tx, mut notification_rx) =
         mpsc::unbounded_channel::<meme_bot::queue::UserNotification>();

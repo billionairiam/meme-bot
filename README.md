@@ -508,6 +508,7 @@ The Telegram bot runs as part of the `meme-bot` binary. It requires:
 # Required
 TELEGRAM_BOT_TOKEN=<bot token>
 DATABASE_URL=sqlite://./db.sqlite3?mode=rwc
+RUST_LOG=info
 TEMPLATE_CATALOG_URL=https://your-template-site.example
 ADMIN_CONTACT=@your_admin
 

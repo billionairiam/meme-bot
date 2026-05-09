@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use rust_decimal::Decimal;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use uuid::Uuid;
 
 use crate::deployment::DeploymentResult;
@@ -9,6 +9,92 @@ use crate::models::{BuildMode, OrderType, PaymentChain, WebsiteInput};
 use crate::payment::{PaymentVerificationError, PaymentVerificationOutcome};
 
 pub const PAYMENT_WINDOW_MINUTES: i64 = 30;
+
+fn uuid_value(id: Uuid) -> String {
+    id.to_string()
+}
+
+fn optional_uuid_value(id: Option<Uuid>) -> Option<String> {
+    id.map(uuid_value)
+}
+
+fn uuid_from_row(row: &SqliteRow, column: &str) -> anyhow::Result<Uuid> {
+    if let Ok(value) = row.try_get::<String, _>(column) {
+        return Ok(Uuid::parse_str(&value)?);
+    }
+    let bytes = row.try_get::<Vec<u8>, _>(column)?;
+    Ok(Uuid::from_slice(&bytes)?)
+}
+
+fn optional_uuid_from_row(row: &SqliteRow, column: &str) -> anyhow::Result<Option<Uuid>> {
+    if let Ok(value) = row.try_get::<Option<String>, _>(column) {
+        return value
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(Into::into);
+    }
+    let bytes = row.try_get::<Option<Vec<u8>>, _>(column)?;
+    bytes
+        .as_deref()
+        .map(Uuid::from_slice)
+        .transpose()
+        .map_err(Into::into)
+}
+
+pub async fn normalize_sqlite_uuid_storage(pool: &SqlitePool) -> anyhow::Result<()> {
+    const UUID_COLUMNS: &[(&str, &str)] = &[
+        ("payment_attempts", "id"),
+        ("payment_attempts", "order_id"),
+        ("payment_attempts", "user_id"),
+        ("payment_transactions", "id"),
+        ("payment_transactions", "order_id"),
+        ("generation_jobs", "id"),
+        ("generation_jobs", "order_id"),
+        ("generation_jobs", "website_id"),
+        ("generation_attempts", "id"),
+        ("generation_attempts", "site_order_id"),
+        ("domain_registrations", "id"),
+        ("domain_registrations", "domain_quote_id"),
+        ("domain_quotes", "id"),
+        ("domain_quotes", "user_id"),
+        ("domain_quotes", "website_id"),
+        ("deployment_attempts", "id"),
+        ("deployment_attempts", "website_id"),
+        ("websites", "id"),
+        ("websites", "user_id"),
+        ("websites", "order_id"),
+        ("orders", "id"),
+        ("orders", "user_id"),
+        ("orders", "domain_quote_id"),
+        ("templates", "id"),
+        ("users", "id"),
+    ];
+
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(pool)
+        .await?;
+    for (table, column) in UUID_COLUMNS {
+        let select_sql =
+            format!("SELECT rowid, {column} AS value FROM {table} WHERE typeof({column}) = 'blob'");
+        let rows = sqlx::query(&select_sql).fetch_all(pool).await?;
+        for row in rows {
+            let rowid: i64 = row.get("rowid");
+            let bytes: Vec<u8> = row.get("value");
+            let uuid = Uuid::from_slice(&bytes)?;
+            let update_sql = format!("UPDATE {table} SET {column} = ? WHERE rowid = ?");
+            sqlx::query(&update_sql)
+                .bind(uuid_value(uuid))
+                .bind(rowid)
+                .execute(pool)
+                .await?;
+        }
+    }
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct PaymentWindow {
@@ -42,7 +128,7 @@ pub async fn upsert_user(
         RETURNING id
         "#,
     )
-    .bind(id)
+    .bind(uuid_value(id))
     .bind(telegram_user_id)
     .bind(username)
     .bind(first_name)
@@ -51,7 +137,7 @@ pub async fn upsert_user(
     .fetch_one(pool)
     .await?;
 
-    Ok(Uuid::parse_str(row.get::<&str, _>("id"))?)
+    uuid_from_row(&row, "id")
 }
 
 pub async fn create_site_order(
@@ -98,18 +184,18 @@ pub async fn get_or_create_site_order(
         RETURNING id
         "#,
     )
-    .bind(id)
-    .bind(user_id)
+    .bind(uuid_value(id))
+    .bind(uuid_value(user_id))
     .bind(OrderType::SiteFee.as_str())
     .bind(build_mode.as_str())
     .bind(template_id)
     .bind(amount_usdt.to_string())
-    .bind(domain_quote_id)
+    .bind(optional_uuid_value(domain_quote_id))
     .fetch_one(pool)
     .await;
 
     match result {
-        Ok(row) => Ok(Uuid::parse_str(row.get::<&str, _>("id"))?),
+        Ok(row) => uuid_from_row(&row, "id"),
         Err(error) => {
             if let Some(quote_id) = domain_quote_id
                 && let Some(existing) = find_order_by_domain_quote(pool, quote_id).await?
@@ -134,13 +220,11 @@ async fn find_order_by_domain_quote(
         LIMIT 1
         "#,
     )
-    .bind(quote_id)
+    .bind(uuid_value(quote_id))
     .fetch_optional(pool)
     .await?;
 
-    Ok(row
-        .map(|row| Uuid::parse_str(row.get::<&str, _>("id")))
-        .transpose()?)
+    row.as_ref().map(|row| uuid_from_row(row, "id")).transpose()
 }
 
 pub async fn attach_payment_chain(
@@ -165,7 +249,7 @@ pub async fn attach_payment_chain(
     .bind(chain.as_str())
     .bind(now.to_rfc3339())
     .bind(expires_at.to_rfc3339())
-    .bind(order_id)
+    .bind(uuid_value(order_id))
     .fetch_optional(pool)
     .await?;
     let Some(row) = row else {
@@ -200,7 +284,7 @@ pub async fn mark_order_paid(
     )
     .bind(chain.as_str())
     .bind(tx_hash)
-    .bind(order_id)
+    .bind(uuid_value(order_id))
     .execute(pool)
     .await?;
     Ok(())
@@ -217,13 +301,13 @@ pub async fn get_order_payment_info(
         WHERE id = ?
         "#,
     )
-    .bind(order_id)
+    .bind(uuid_value(order_id))
     .fetch_one(pool)
     .await?;
 
     Ok(OrderPaymentInfo {
-        id: Uuid::parse_str(row.get::<&str, _>("id"))?,
-        user_id: Uuid::parse_str(row.get::<&str, _>("user_id"))?,
+        id: uuid_from_row(&row, "id")?,
+        user_id: uuid_from_row(&row, "user_id")?,
         amount_usdt: Decimal::from_str_exact(row.get::<&str, _>("amount_usdt"))?,
         created_at: parse_db_datetime(row.get::<&str, _>("created_at"))?,
         payment_started_at: row
@@ -294,9 +378,9 @@ pub async fn record_payment_attempt(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         "#,
     )
-    .bind(id)
-    .bind(order_id)
-    .bind(user_id)
+    .bind(uuid_value(id))
+    .bind(uuid_value(order_id))
+    .bind(uuid_value(user_id))
     .bind(chain.as_str())
     .bind(tx_hash)
     .bind(status)
@@ -325,10 +409,10 @@ pub async fn record_payment_transaction(
         VALUES (?, ?, ?, ?, ?, ?, ?)
         "#,
     )
-    .bind(Uuid::new_v4())
+    .bind(uuid_value(Uuid::new_v4()))
     .bind(chain.as_str())
     .bind(&canonical_tx_hash)
-    .bind(order_id)
+    .bind(uuid_value(order_id))
     .bind(outcome.observed_amount_usdt.to_string())
     .bind(&outcome.observed_to_address)
     .bind(outcome.confirmed_at.to_rfc3339())
@@ -376,7 +460,7 @@ pub async fn confirm_payment_and_mark_paid(
     )
     .bind(chain.as_str())
     .bind(&canonical_tx_hash)
-    .bind(order_id)
+    .bind(uuid_value(order_id))
     .execute(&mut *tx)
     .await?;
     if update_result.rows_affected() != 1 {
@@ -391,10 +475,10 @@ pub async fn confirm_payment_and_mark_paid(
         VALUES (?, ?, ?, ?, ?, ?, ?)
         "#,
     )
-    .bind(Uuid::new_v4())
+    .bind(uuid_value(Uuid::new_v4()))
     .bind(chain.as_str())
     .bind(&canonical_tx_hash)
-    .bind(order_id)
+    .bind(uuid_value(order_id))
     .bind(outcome.observed_amount_usdt.to_string())
     .bind(&outcome.observed_to_address)
     .bind(outcome.confirmed_at.to_rfc3339())
@@ -404,7 +488,7 @@ pub async fn confirm_payment_and_mark_paid(
     sqlx::query(
         "UPDATE domain_quotes SET status = 'paid', updated_at = datetime('now') WHERE id = (SELECT domain_quote_id FROM orders WHERE id = ?)",
     )
-    .bind(order_id)
+    .bind(uuid_value(order_id))
     .execute(&mut *tx)
     .await?;
 
@@ -437,9 +521,9 @@ pub async fn create_website(
         RETURNING id
         "#,
     )
-    .bind(id)
-    .bind(user_id)
-    .bind(order_id)
+    .bind(uuid_value(id))
+    .bind(uuid_value(user_id))
+    .bind(uuid_value(order_id))
     .bind(&input.token_ticker)
     .bind(&input.token_name)
     .bind(&input.contract_address)
@@ -450,7 +534,7 @@ pub async fn create_website(
     .fetch_one(pool)
     .await?;
 
-    Ok(Uuid::parse_str(row.get::<&str, _>("id"))?)
+    uuid_from_row(&row, "id")
 }
 
 pub async fn upsert_website_for_order(
@@ -479,9 +563,9 @@ pub async fn upsert_website_for_order(
         RETURNING id
         "#,
     )
-    .bind(id)
-    .bind(user_id)
-    .bind(order_id)
+    .bind(uuid_value(id))
+    .bind(uuid_value(user_id))
+    .bind(uuid_value(order_id))
     .bind(&input.token_ticker)
     .bind(&input.token_name)
     .bind(&input.contract_address)
@@ -492,7 +576,7 @@ pub async fn upsert_website_for_order(
     .fetch_one(pool)
     .await?;
 
-    Ok(Uuid::parse_str(row.get::<&str, _>("id"))?)
+    uuid_from_row(&row, "id")
 }
 
 pub async fn update_website_logo_path(
@@ -504,7 +588,7 @@ pub async fn update_website_logo_path(
         "UPDATE websites SET logo_asset_path = ?, updated_at = datetime('now') WHERE id = ?",
     )
     .bind(logo_asset_path)
-    .bind(website_id)
+    .bind(uuid_value(website_id))
     .execute(pool)
     .await?;
     Ok(())
@@ -527,8 +611,8 @@ pub async fn record_domain_quote(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'quoted')
         "#,
     )
-    .bind(id)
-    .bind(user_id)
+    .bind(uuid_value(id))
+    .bind(uuid_value(user_id))
     .bind(&quote.domain)
     .bind(&quote.tld)
     .bind(quote.available)
@@ -549,8 +633,8 @@ pub async fn attach_quote_website(
     sqlx::query(
         "UPDATE domain_quotes SET website_id = ?, updated_at = datetime('now') WHERE id = ?",
     )
-    .bind(website_id)
-    .bind(quote_id)
+    .bind(uuid_value(website_id))
+    .bind(uuid_value(quote_id))
     .execute(pool)
     .await?;
     Ok(())
@@ -570,8 +654,8 @@ pub async fn record_domain_purchase_started(
             updated_at = datetime('now')
         "#,
     )
-    .bind(id)
-    .bind(quote_id)
+    .bind(uuid_value(id))
+    .bind(uuid_value(quote_id))
     .execute(pool)
     .await?;
     Ok(id)
@@ -596,13 +680,13 @@ pub async fn record_domain_purchase_success(
     .bind(&purchase.namecheap_order_id)
     .bind(&purchase.namecheap_transaction_id)
     .bind(purchase.charged_amount_usd.to_string())
-    .bind(quote_id)
+    .bind(uuid_value(quote_id))
     .execute(pool)
     .await?;
     sqlx::query(
         "UPDATE domain_quotes SET status = 'purchased', updated_at = datetime('now') WHERE id = ?",
     )
-    .bind(quote_id)
+    .bind(uuid_value(quote_id))
     .execute(pool)
     .await?;
     Ok(())
@@ -625,7 +709,7 @@ pub async fn record_domain_dns_result(
                 "#,
             )
             .bind(&zone.zone_id)
-            .bind(quote_id)
+            .bind(uuid_value(quote_id))
             .execute(pool)
             .await?;
         }
@@ -639,7 +723,7 @@ pub async fn record_domain_dns_result(
                 WHERE domain_quote_id = ?
                 "#,
             )
-            .bind(quote_id)
+            .bind(uuid_value(quote_id))
             .execute(pool)
             .await?;
         }
@@ -655,13 +739,13 @@ pub async fn mark_domain_purchase_failed(pool: &SqlitePool, quote_id: Uuid) -> a
         WHERE domain_quote_id = ?
         "#,
     )
-    .bind(quote_id)
+    .bind(uuid_value(quote_id))
     .execute(pool)
     .await?;
     sqlx::query(
         "UPDATE domain_quotes SET status = 'failed', updated_at = datetime('now') WHERE id = ?",
     )
-    .bind(quote_id)
+    .bind(uuid_value(quote_id))
     .execute(pool)
     .await?;
     Ok(())
@@ -679,13 +763,13 @@ pub async fn mark_domain_purchase_manual_review(
         WHERE domain_quote_id = ?
         "#,
     )
-    .bind(quote_id)
+    .bind(uuid_value(quote_id))
     .execute(pool)
     .await?;
     sqlx::query(
         "UPDATE domain_quotes SET status = 'failed', updated_at = datetime('now') WHERE id = ?",
     )
-    .bind(quote_id)
+    .bind(uuid_value(quote_id))
     .execute(pool)
     .await?;
     tracing::warn!(%quote_id, %reason, "domain purchase requires manual review");
@@ -696,7 +780,7 @@ pub async fn mark_order_manual_review(pool: &SqlitePool, order_id: Uuid) -> anyh
     sqlx::query(
         "UPDATE orders SET site_status = 'needs_manual_review', updated_at = datetime('now') WHERE id = ?",
     )
-    .bind(order_id)
+    .bind(uuid_value(order_id))
     .execute(pool)
     .await?;
     Ok(())
@@ -729,7 +813,7 @@ pub async fn update_website_deployment_success(
     .bind(&deployment.cloudflare_project_name)
     .bind(&deployment.cloudflare_pages_url)
     .bind(&deployment.custom_domain)
-    .bind(order_id)
+    .bind(uuid_value(order_id))
     .execute(pool)
     .await?;
     Ok(())
@@ -750,8 +834,8 @@ pub async fn record_deployment_attempt(
         VALUES (?, ?, ?, ?, ?, CASE WHEN ? <> 'running' THEN datetime('now') ELSE NULL END)
         "#,
     )
-    .bind(Uuid::new_v4())
-    .bind(website_id)
+    .bind(uuid_value(Uuid::new_v4()))
+    .bind(uuid_value(website_id))
     .bind(stage)
     .bind(status)
     .bind(error_message)
@@ -775,13 +859,13 @@ pub async fn enqueue_generation_job(
         RETURNING id
         "#,
     )
-    .bind(id)
-    .bind(order_id)
-    .bind(website_id)
+    .bind(uuid_value(id))
+    .bind(uuid_value(order_id))
+    .bind(uuid_value(website_id))
     .fetch_one(pool)
     .await?;
 
-    Ok(Uuid::parse_str(row.get::<&str, _>("id"))?)
+    uuid_from_row(&row, "id")
 }
 
 pub async fn queue_position(pool: &SqlitePool, job_id: Uuid) -> anyhow::Result<i64> {
@@ -794,7 +878,7 @@ pub async fn queue_position(pool: &SqlitePool, job_id: Uuid) -> anyhow::Result<i
           AND earlier.queued_at < current.queued_at
         "#,
     )
-    .bind(job_id)
+    .bind(uuid_value(job_id))
     .fetch_one(pool)
     .await?;
 
@@ -836,7 +920,10 @@ pub async fn get_payment_context_by_order(
     order_id: Uuid,
 ) -> anyhow::Result<PaymentOrderContext> {
     let sql = payment_context_select_sql("o.id = ?");
-    let row = sqlx::query(&sql).bind(order_id).fetch_one(pool).await?;
+    let row = sqlx::query(&sql)
+        .bind(uuid_value(order_id))
+        .fetch_one(pool)
+        .await?;
     payment_context_from_row(&row)
 }
 
@@ -880,7 +967,7 @@ pub async fn get_domain_quote_for_purchase(
         WHERE id = ?
         "#,
     )
-    .bind(quote_id)
+    .bind(uuid_value(quote_id))
     .fetch_one(pool)
     .await?;
 
@@ -920,11 +1007,7 @@ fn payment_context_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Pay
         .ok_or_else(|| anyhow::anyhow!("order payment chain is not set"))?;
     let payment_chain = PaymentChain::from_db(&chain_value)
         .ok_or_else(|| anyhow::anyhow!("unsupported payment chain: {chain_value}"))?;
-    let website_id = row
-        .get::<Option<String>, _>("website_id")
-        .as_deref()
-        .map(Uuid::parse_str)
-        .transpose()?;
+    let website_id = optional_uuid_from_row(row, "website_id")?;
     let website_input = if website_id.is_some() {
         Some(WebsiteInput {
             token_ticker: row.get("token_ticker"),
@@ -940,8 +1023,8 @@ fn payment_context_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Pay
     };
 
     Ok(PaymentOrderContext {
-        order_id: Uuid::parse_str(row.get::<&str, _>("order_id"))?,
-        user_id: Uuid::parse_str(row.get::<&str, _>("user_id"))?,
+        order_id: uuid_from_row(row, "order_id")?,
+        user_id: uuid_from_row(row, "user_id")?,
         amount_usdt: Decimal::from_str_exact(row.get::<&str, _>("amount_usdt"))?,
         created_at: parse_db_datetime(row.get::<&str, _>("created_at"))?,
         payment_started_at: row
@@ -956,11 +1039,7 @@ fn payment_context_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Pay
             .transpose()?,
         payment_status: row.get("payment_status"),
         payment_chain,
-        domain_quote_id: row
-            .get::<Option<String>, _>("domain_quote_id")
-            .as_deref()
-            .map(Uuid::parse_str)
-            .transpose()?,
+        domain_quote_id: optional_uuid_from_row(row, "domain_quote_id")?,
         website_id,
         website_input,
     })
@@ -1014,4 +1093,49 @@ fn parse_db_datetime(value: &str) -> anyhow::Result<DateTime<Utc>> {
     }
     let naive = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")?;
     Ok(DateTime::from_naive_utc_and_offset(naive, Utc))
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn normalizes_legacy_blob_user_ids_before_upsert() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        let id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO users (
+                id, telegram_user_id, is_group_member, last_membership_checked_at
+            )
+            VALUES (?, ?, 0, datetime('now'))
+            "#,
+        )
+        .bind(id)
+        .bind(12345_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        normalize_sqlite_uuid_storage(&pool).await.unwrap();
+        let returned_id = upsert_user(&pool, 12345, Some("ma"), None, None, true)
+            .await
+            .unwrap();
+        let row = sqlx::query("SELECT typeof(id) AS id_type FROM users WHERE telegram_user_id = ?")
+            .bind(12345_i64)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(returned_id, id);
+        assert_eq!(row.get::<String, _>("id_type"), "text");
+    }
 }

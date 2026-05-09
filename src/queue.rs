@@ -15,6 +15,10 @@ use crate::{
 const MAX_JOB_ATTEMPTS: i64 = 3;
 const STALE_RUNNING_JOB_MINUTES: i64 = 120;
 
+fn uuid_value(id: Uuid) -> String {
+    id.to_string()
+}
+
 #[derive(Clone, Debug)]
 pub struct UserNotification {
     pub telegram_user_id: i64,
@@ -71,20 +75,42 @@ impl GenerationQueue {
             return Ok(());
         };
 
-        info!(job_id = %job.job_id, order_id = %job.order_id, "running generation job");
+        info!(
+            job_id = %job.job_id,
+            order_id = %job.order_id,
+            website_id = %job.website_id,
+            attempt = job.attempt_count + 1,
+            domain = job.requested_domain.as_deref().unwrap_or("<none>"),
+            "locked generation job"
+        );
         let job_id = job.job_id;
         let website_id = job.website_id;
         let attempt_count = job.attempt_count;
         let request = job.into_generation_request(&self.generated_sites_dir);
+        info!(
+            job_id = %job_id,
+            order_id = %request.order_id,
+            output_dir = %request.output_dir.display(),
+            build_mode = %request.build_mode,
+            domain = request.input.requested_domain.as_deref().unwrap_or("<none>"),
+            "starting site generation"
+        );
         sqlx::query(
             "UPDATE orders SET site_status = 'generating', updated_at = datetime('now') WHERE id = ?",
         )
-        .bind(request.order_id)
+        .bind(uuid_value(request.order_id))
         .execute(&self.pool)
         .await?;
 
         match self.router.generate(&request).await {
             Ok(result) => {
+                info!(
+                    job_id = %job_id,
+                    order_id = %request.order_id,
+                    provider = %result.provider_name,
+                    output_dir = %request.output_dir.display(),
+                    "site generation succeeded"
+                );
                 sqlx::query(
                     r#"
                     UPDATE generation_jobs
@@ -92,7 +118,7 @@ impl GenerationQueue {
                     WHERE id = ?
                     "#,
                 )
-                .bind(job_id)
+                .bind(uuid_value(job_id))
                 .execute(&self.pool)
                 .await?;
 
@@ -104,7 +130,7 @@ impl GenerationQueue {
                     "#,
                 )
                 .bind(result.provider_name)
-                .bind(request.order_id)
+                .bind(uuid_value(request.order_id))
                 .execute(&self.pool)
                 .await?;
 
@@ -112,22 +138,41 @@ impl GenerationQueue {
                     sqlx::query(
                         "UPDATE orders SET site_status = 'deploying', updated_at = datetime('now') WHERE id = ?",
                     )
-                    .bind(request.order_id)
+                    .bind(uuid_value(request.order_id))
                     .execute(&self.pool)
                     .await?;
                     sqlx::query(
                         "UPDATE websites SET deployment_status = 'deploying', updated_at = datetime('now') WHERE id = ?",
                     )
-                    .bind(website_id)
+                    .bind(uuid_value(website_id))
                     .execute(&self.pool)
                     .await?;
                     let deployment_request =
                         request.deployment_request(&self.repo_owner, &self.github_token);
+                    info!(
+                        order_id = %request.order_id,
+                        website_id = %website_id,
+                        repo_owner = %deployment_request.repo_owner,
+                        repo_name = %deployment_request.repo_name,
+                        project_name = %deployment_request.cloudflare_project_name,
+                        custom_domain = deployment_request.custom_domain.as_deref().unwrap_or("<none>"),
+                        site_dir = %deployment_request.site_dir,
+                        "starting site deployment"
+                    );
                     let deployment = self
                         .deploy_with_retries(deployer.as_ref(), &deployment_request, website_id)
                         .await;
                     match deployment {
                         Ok(deployment) => {
+                            info!(
+                                order_id = %request.order_id,
+                                website_id = %website_id,
+                                repo = %format!("{}/{}", deployment.github_owner, deployment.github_repo_name),
+                                commit_sha = %deployment.github_commit_sha,
+                                pages_url = %deployment.cloudflare_pages_url,
+                                custom_domain = deployment.custom_domain.as_deref().unwrap_or("<none>"),
+                                "site deployment succeeded"
+                            );
                             for stage in [
                                 "github_create",
                                 "git_push",
@@ -153,7 +198,7 @@ impl GenerationQueue {
                             sqlx::query(
                                 "UPDATE orders SET site_status = 'live', updated_at = datetime('now') WHERE id = ?",
                             )
-                            .bind(request.order_id)
+                            .bind(uuid_value(request.order_id))
                             .execute(&self.pool)
                             .await?;
 
@@ -171,7 +216,13 @@ impl GenerationQueue {
                             .await;
                         }
                         Err(error) => {
-                            error!(order_id = %request.order_id, error = %error, "deployment failed");
+                            error!(
+                                order_id = %request.order_id,
+                                website_id = %website_id,
+                                stage = error.stage(),
+                                error = %error,
+                                "deployment failed"
+                            );
                             let deployment_status = if error.stage() == "domain_bind" {
                                 "domain_bind_failed"
                             } else {
@@ -185,7 +236,7 @@ impl GenerationQueue {
                                 "#,
                             )
                             .bind(deployment_status)
-                            .bind(request.order_id)
+                            .bind(uuid_value(request.order_id))
                             .execute(&self.pool)
                             .await?;
                             let went_to_review = self
@@ -208,7 +259,7 @@ impl GenerationQueue {
                     sqlx::query(
                         "UPDATE orders SET site_status = 'needs_manual_review', updated_at = datetime('now') WHERE id = ?",
                     )
-                    .bind(request.order_id)
+                    .bind(uuid_value(request.order_id))
                     .execute(&self.pool)
                     .await?;
                     sqlx::query(
@@ -218,7 +269,7 @@ impl GenerationQueue {
                         WHERE order_id = ?
                         "#,
                     )
-                    .bind(request.order_id)
+                    .bind(uuid_value(request.order_id))
                     .execute(&self.pool)
                     .await?;
                     db::record_deployment_attempt(
@@ -238,6 +289,12 @@ impl GenerationQueue {
                 }
             }
             Err(GenerationError::QuotaExhausted | GenerationError::ProviderUnavailable) => {
+                warn!(
+                    job_id = %job_id,
+                    order_id = %request.order_id,
+                    attempt = attempt_count,
+                    "generation provider unavailable or quota exhausted"
+                );
                 let went_to_review = self
                     .retry_or_manual_review(job_id, request.order_id, attempt_count)
                     .await?;
@@ -250,7 +307,13 @@ impl GenerationQueue {
                 }
             }
             Err(error) => {
-                error!(order_id = %request.order_id, error = %error, "generation failed");
+                error!(
+                    job_id = %job_id,
+                    order_id = %request.order_id,
+                    attempt = attempt_count,
+                    error = %error,
+                    "generation failed"
+                );
                 let went_to_review = self
                     .retry_or_manual_review(job_id, request.order_id, attempt_count)
                     .await?;
@@ -303,7 +366,7 @@ impl GenerationQueue {
             "#,
         )
         .bind(&self.worker_id)
-        .bind(job_id)
+        .bind(uuid_value(job_id))
         .execute(&mut *tx)
         .await?;
         if update.rows_affected() != 1 {
@@ -357,7 +420,7 @@ impl GenerationQueue {
             sqlx::query(
                 "UPDATE orders SET site_status = 'queued', updated_at = datetime('now') WHERE id = ?",
             )
-            .bind(order_id)
+            .bind(uuid_value(order_id))
             .execute(&self.pool)
             .await?;
             warn!(%order_id, "requeued stale running generation job");
@@ -387,7 +450,7 @@ impl GenerationQueue {
             sqlx::query(
                 "UPDATE orders SET site_status = 'needs_manual_review', updated_at = datetime('now') WHERE id = ?",
             )
-            .bind(order_id)
+            .bind(uuid_value(order_id))
             .execute(&self.pool)
             .await?;
             warn!(%order_id, "moved stale running generation job to manual review");
@@ -409,8 +472,27 @@ impl GenerationQueue {
     ) -> Result<crate::deployment::DeploymentResult, crate::deployment::DeploymentError> {
         let mut last_error = None;
         for attempt in 1..=MAX_JOB_ATTEMPTS {
+            info!(
+                repo_owner = %request.repo_owner,
+                repo_name = %request.repo_name,
+                project_name = %request.cloudflare_project_name,
+                custom_domain = request.custom_domain.as_deref().unwrap_or("<none>"),
+                attempt,
+                "deployment attempt started"
+            );
             match deployer.deploy(request).await {
-                Ok(result) => return Ok(result),
+                Ok(result) => {
+                    info!(
+                        repo_owner = %request.repo_owner,
+                        repo_name = %request.repo_name,
+                        project_name = %request.cloudflare_project_name,
+                        commit_sha = %result.github_commit_sha,
+                        pages_url = %result.cloudflare_pages_url,
+                        attempt,
+                        "deployment attempt succeeded"
+                    );
+                    return Ok(result);
+                }
                 Err(error) => {
                     error!(
                         order_id = %request.custom_domain.as_deref().unwrap_or(&request.repo_name),
@@ -448,7 +530,7 @@ impl GenerationQueue {
         sqlx::query(
             "UPDATE orders SET site_status = 'needs_manual_review', updated_at = datetime('now') WHERE id = ?",
         )
-        .bind(order_id)
+        .bind(uuid_value(order_id))
         .execute(&self.pool)
         .await?;
         sqlx::query(
@@ -458,7 +540,7 @@ impl GenerationQueue {
             WHERE id = ?
             "#,
         )
-        .bind(job_id)
+        .bind(uuid_value(job_id))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -471,10 +553,17 @@ impl GenerationQueue {
         attempt_count: i64,
     ) -> anyhow::Result<bool> {
         if attempt_count < MAX_JOB_ATTEMPTS {
+            warn!(
+                order_id = %order_id,
+                job_id = %job_id,
+                attempt = attempt_count,
+                max_attempts = MAX_JOB_ATTEMPTS,
+                "requeueing job for retry"
+            );
             sqlx::query(
                 "UPDATE orders SET site_status = 'queued', updated_at = datetime('now') WHERE id = ?",
             )
-            .bind(order_id)
+            .bind(uuid_value(order_id))
             .execute(&self.pool)
             .await?;
             sqlx::query(
@@ -484,13 +573,20 @@ impl GenerationQueue {
                 WHERE id = ?
                 "#,
             )
-            .bind(job_id)
+            .bind(uuid_value(job_id))
             .execute(&self.pool)
             .await?;
             return Ok(false);
         }
 
         self.mark_manual_review(job_id, order_id).await?;
+        warn!(
+            order_id = %order_id,
+            job_id = %job_id,
+            attempt = attempt_count,
+            max_attempts = MAX_JOB_ATTEMPTS,
+            "job moved to manual review after retries"
+        );
         Ok(true)
     }
 
@@ -501,7 +597,7 @@ impl GenerationQueue {
         match sqlx::query(
             "SELECT u.telegram_user_id FROM users u JOIN orders o ON o.user_id = u.id WHERE o.id = ?",
         )
-        .bind(order_id)
+        .bind(uuid_value(order_id))
         .fetch_optional(&self.pool)
         .await
         {
