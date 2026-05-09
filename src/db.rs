@@ -9,6 +9,7 @@ use crate::models::{BuildMode, OrderType, PaymentChain, WebsiteInput};
 use crate::payment::{PaymentVerificationError, PaymentVerificationOutcome};
 
 pub const PAYMENT_WINDOW_MINUTES: i64 = 30;
+pub const ASSET_COLLECTION_TIMEOUT_MINUTES: i64 = 60;
 
 fn uuid_value(id: Uuid) -> String {
     id.to_string()
@@ -205,6 +206,194 @@ pub async fn get_or_create_site_order(
             Err(error.into())
         }
     }
+}
+
+pub async fn prepare_order_for_payment(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    amount_usdt: Decimal,
+    domain_quote_id: Option<Uuid>,
+) -> anyhow::Result<()> {
+    let result = sqlx::query(
+        r#"
+        UPDATE orders
+        SET amount_usdt = ?,
+            domain_quote_id = ?,
+            updated_at = datetime('now')
+        WHERE id = ?
+          AND payment_status = 'pending'
+          AND site_status = 'collecting_assets'
+        "#,
+    )
+    .bind(amount_usdt.to_string())
+    .bind(optional_uuid_value(domain_quote_id))
+    .bind(uuid_value(order_id))
+    .execute(pool)
+    .await?;
+    if result.rows_affected() != 1 {
+        anyhow::bail!("order is not collecting assets or does not exist");
+    }
+    Ok(())
+}
+
+pub async fn cancel_active_pending_orders_for_user(
+    pool: &SqlitePool,
+    user_id: Uuid,
+) -> anyhow::Result<u64> {
+    let mut tx = pool.begin().await?;
+
+    let quote_rows = sqlx::query(
+        r#"
+        SELECT domain_quote_id
+        FROM orders
+        WHERE user_id = ?
+          AND payment_status = 'pending'
+          AND site_status IN ('draft', 'collecting_assets')
+          AND domain_quote_id IS NOT NULL
+        "#,
+    )
+    .bind(uuid_value(user_id))
+    .fetch_all(&mut *tx)
+    .await?;
+    for row in quote_rows {
+        let quote_id = uuid_from_row(&row, "domain_quote_id")?;
+        sqlx::query(
+            "UPDATE domain_quotes SET status = 'expired', updated_at = datetime('now') WHERE id = ? AND status = 'quoted'",
+        )
+        .bind(uuid_value(quote_id))
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let result = sqlx::query(
+        r#"
+        UPDATE orders
+        SET payment_status = 'cancelled',
+            site_status = 'cancelled',
+            payment_expires_at = COALESCE(payment_expires_at, datetime('now')),
+            updated_at = datetime('now')
+        WHERE user_id = ?
+          AND payment_status = 'pending'
+          AND site_status IN ('draft', 'collecting_assets')
+        "#,
+    )
+    .bind(uuid_value(user_id))
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(result.rows_affected())
+}
+
+pub async fn cancel_order_for_user(
+    pool: &SqlitePool,
+    telegram_user_id: i64,
+    order_id: Option<Uuid>,
+) -> anyhow::Result<u64> {
+    let mut tx = pool.begin().await?;
+    let mut sql = r#"
+        SELECT o.id, o.domain_quote_id
+        FROM orders o
+        JOIN users u ON u.id = o.user_id
+        WHERE u.telegram_user_id = ?
+          AND o.payment_status = 'pending'
+          AND o.site_status IN ('draft', 'collecting_assets')
+    "#
+    .to_string();
+    if order_id.is_some() {
+        sql.push_str(" AND o.id = ?");
+    }
+    let mut query = sqlx::query(&sql).bind(telegram_user_id);
+    if let Some(order_id) = order_id {
+        query = query.bind(uuid_value(order_id));
+    }
+    let rows = query.fetch_all(&mut *tx).await?;
+    for row in &rows {
+        if let Some(quote_id) = optional_uuid_from_row(row, "domain_quote_id")? {
+            sqlx::query(
+                "UPDATE domain_quotes SET status = 'expired', updated_at = datetime('now') WHERE id = ? AND status = 'quoted'",
+            )
+            .bind(uuid_value(quote_id))
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    for row in &rows {
+        let id = uuid_from_row(row, "id")?;
+        sqlx::query(
+            r#"
+            UPDATE orders
+            SET payment_status = 'cancelled',
+                site_status = 'cancelled',
+                payment_expires_at = COALESCE(payment_expires_at, datetime('now')),
+                updated_at = datetime('now')
+            WHERE id = ?
+              AND payment_status = 'pending'
+            "#,
+        )
+        .bind(uuid_value(id))
+        .execute(&mut *tx)
+        .await?;
+    }
+    let cancelled = rows.len() as u64;
+    tx.commit().await?;
+    Ok(cancelled)
+}
+
+pub async fn expire_stale_pending_orders_for_user(
+    pool: &SqlitePool,
+    telegram_user_id: i64,
+) -> anyhow::Result<u64> {
+    let mut tx = pool.begin().await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT o.id, o.domain_quote_id
+        FROM orders o
+        JOIN users u ON u.id = o.user_id
+        WHERE u.telegram_user_id = ?
+          AND o.payment_status = 'pending'
+          AND (
+            (o.site_status IN ('draft', 'collecting_assets') AND datetime(o.updated_at) < datetime('now', ?))
+            OR (o.payment_expires_at IS NOT NULL AND datetime(o.payment_expires_at) < datetime('now'))
+          )
+        "#,
+    )
+    .bind(telegram_user_id)
+    .bind(format!("-{ASSET_COLLECTION_TIMEOUT_MINUTES} minutes"))
+    .fetch_all(&mut *tx)
+    .await?;
+    for row in &rows {
+        if let Some(quote_id) = optional_uuid_from_row(row, "domain_quote_id")? {
+            sqlx::query(
+                "UPDATE domain_quotes SET status = 'expired', updated_at = datetime('now') WHERE id = ? AND status IN ('quoted', 'paid')",
+            )
+            .bind(uuid_value(quote_id))
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    for row in &rows {
+        let id = uuid_from_row(row, "id")?;
+        sqlx::query(
+            r#"
+            UPDATE orders
+            SET payment_status = 'expired',
+                site_status = CASE
+                    WHEN site_status IN ('draft', 'collecting_assets') THEN 'failed'
+                    ELSE site_status
+                END,
+                updated_at = datetime('now')
+            WHERE id = ?
+              AND payment_status = 'pending'
+            "#,
+        )
+        .bind(uuid_value(id))
+        .execute(&mut *tx)
+        .await?;
+    }
+    let expired = rows.len() as u64;
+    tx.commit().await?;
+    Ok(expired)
 }
 
 async fn find_order_by_domain_quote(
@@ -1097,6 +1286,7 @@ fn parse_db_datetime(value: &str) -> anyhow::Result<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::DomainQuote;
     use sqlx::sqlite::SqlitePoolOptions;
 
     use super::*;
@@ -1137,5 +1327,103 @@ mod tests {
 
         assert_eq!(returned_id, id);
         assert_eq!(row.get::<String, _>("id_type"), "text");
+    }
+
+    #[tokio::test]
+    async fn cancels_pending_order_and_expires_attached_quote() {
+        let pool = test_pool().await;
+        let user_id = upsert_user(&pool, 101, Some("ma"), None, None, true)
+            .await
+            .unwrap();
+        let quote_id = record_domain_quote(
+            &pool,
+            user_id,
+            &DomainQuote {
+                domain: "aaabbb.com".to_string(),
+                tld: "com".to_string(),
+                available: true,
+                is_premium: false,
+                price_usd: Decimal::new(12, 0),
+                years: 1,
+            },
+            Decimal::new(12, 0),
+        )
+        .await
+        .unwrap();
+        let order_id = create_site_order(
+            &pool,
+            user_id,
+            BuildMode::AiFree,
+            None,
+            Decimal::new(62, 0),
+            Some(quote_id),
+        )
+        .await
+        .unwrap();
+
+        let cancelled = cancel_order_for_user(&pool, 101, Some(order_id))
+            .await
+            .unwrap();
+
+        let order = sqlx::query("SELECT payment_status, site_status FROM orders WHERE id = ?")
+            .bind(uuid_value(order_id))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let quote = sqlx::query("SELECT status FROM domain_quotes WHERE id = ?")
+            .bind(uuid_value(quote_id))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(cancelled, 1);
+        assert_eq!(order.get::<String, _>("payment_status"), "cancelled");
+        assert_eq!(order.get::<String, _>("site_status"), "cancelled");
+        assert_eq!(quote.get::<String, _>("status"), "expired");
+    }
+
+    #[tokio::test]
+    async fn expires_stale_asset_collection_orders() {
+        let pool = test_pool().await;
+        let user_id = upsert_user(&pool, 202, Some("ma"), None, None, true)
+            .await
+            .unwrap();
+        let order_id = create_site_order(
+            &pool,
+            user_id,
+            BuildMode::Template,
+            Some("template_01"),
+            Decimal::new(30, 0),
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE orders SET updated_at = datetime('now', '-90 minutes') WHERE id = ?")
+            .bind(uuid_value(order_id))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let expired = expire_stale_pending_orders_for_user(&pool, 202)
+            .await
+            .unwrap();
+
+        let order = sqlx::query("SELECT payment_status, site_status FROM orders WHERE id = ?")
+            .bind(uuid_value(order_id))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(expired, 1);
+        assert_eq!(order.get::<String, _>("payment_status"), "expired");
+        assert_eq!(order.get::<String, _>("site_status"), "failed");
+    }
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
     }
 }

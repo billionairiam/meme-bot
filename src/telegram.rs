@@ -41,6 +41,7 @@ use crate::{
 type Sessions = Arc<Mutex<HashMap<UserId, OrderDraft>>>;
 
 const EXTERNAL_STEP_MAX_ATTEMPTS: usize = 3;
+const DRAFT_SESSION_TIMEOUT_MINUTES: i64 = db::ASSET_COLLECTION_TIMEOUT_MINUTES;
 
 const TEMPLATE_OPTIONS: [TemplateOption; 12] = [
     TemplateOption::new("template_01", "example1.web", 30),
@@ -179,6 +180,7 @@ struct OrderDraft {
     payment_chain: Option<PaymentChain>,
     order_id: Option<Uuid>,
     db_user_id: Option<Uuid>,
+    updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Clone, Debug)]
@@ -255,7 +257,17 @@ impl OrderDraft {
             payment_chain: None,
             order_id: None,
             db_user_id: None,
+            updated_at: chrono::Utc::now(),
         }
+    }
+
+    fn touch(&mut self) {
+        self.updated_at = chrono::Utc::now();
+    }
+
+    fn is_expired(&self) -> bool {
+        chrono::Utc::now() - self.updated_at
+            > chrono::Duration::minutes(DRAFT_SESSION_TIMEOUT_MINUTES)
     }
 }
 
@@ -326,6 +338,7 @@ async fn handle_message(
         session_step = current_step.unwrap_or("none"),
         "telegram message received"
     );
+    expire_stale_orders_for_user(&pool, user_id).await;
 
     if let Some(text) = msg.text() {
         if let Some(template_id) = parse_template_deep_link(text) {
@@ -337,9 +350,12 @@ async fn handle_message(
             "/create" => return show_create_menu(&bot, msg.chat.id).await,
             "/status" => return show_status(&bot, msg.chat.id, user_id, &sessions, &pool).await,
             "/cancel" => {
-                remove_session(user_id, &sessions);
+                cancel_user_order(&pool, user_id, &sessions).await;
                 return bot
-                    .send_message(msg.chat.id, "<b>Order cancelled.</b>")
+                    .send_message(
+                        msg.chat.id,
+                        "<b>Order cancelled.</b>\n\nYour pending payment window, if any, is closed.",
+                    )
                     .parse_mode(ParseMode::Html)
                     .reply_markup(main_menu_keyboard())
                     .await
@@ -381,6 +397,7 @@ async fn handle_callback(
     if !ensure_group_member_for_user(&bot, chat_id, query.from.id, &config).await? {
         return Ok(());
     }
+    expire_stale_orders_for_user(&pool, query.from.id).await;
 
     match query.data.as_deref() {
         Some("main") => edit_main_menu(&bot, target, &config).await,
@@ -388,7 +405,33 @@ async fn handle_callback(
         Some("template_mode") => edit_template_mode(&bot, target).await,
         Some("ai_mode") => {
             clear_screen_keyboard(&bot, target).await?;
-            set_session(query.from.id, OrderDraft::new_ai(), &sessions);
+            let draft = match start_new_order_session(
+                &pool,
+                query.from.id,
+                query.from.username.as_deref(),
+                Some(query.from.first_name.as_str()),
+                query.from.last_name.as_deref(),
+                OrderDraft::new_ai(),
+            )
+            .await
+            {
+                Ok(draft) => draft,
+                Err(error) => {
+                    warn!(
+                        ?error,
+                        user_id = query.from.id.0 as i64,
+                        "failed to start ai order session"
+                    );
+                    return edit_screen(
+                        &bot,
+                        target,
+                        "<b>Internal error.</b>\n\nFailed to start a new order. Please try again.",
+                        main_menu_keyboard(),
+                    )
+                    .await;
+                }
+            };
+            set_session(query.from.id, draft, &sessions);
             info!(
                 user_id = query.from.id.0 as i64,
                 build_mode = "ai_free",
@@ -444,7 +487,34 @@ async fn handle_callback(
             match find_template(data.trim_start_matches("confirm_tpl:")) {
                 Some(template) => {
                     clear_screen_keyboard(&bot, target).await?;
-                    set_session(query.from.id, OrderDraft::new_template(template), &sessions);
+                    let draft = match start_new_order_session(
+                        &pool,
+                        query.from.id,
+                        query.from.username.as_deref(),
+                        Some(query.from.first_name.as_str()),
+                        query.from.last_name.as_deref(),
+                        OrderDraft::new_template(template),
+                    )
+                    .await
+                    {
+                        Ok(draft) => draft,
+                        Err(error) => {
+                            warn!(
+                                ?error,
+                                user_id = query.from.id.0 as i64,
+                                template_id = template.id,
+                                "failed to start template order session"
+                            );
+                            return edit_screen(
+                                &bot,
+                                target,
+                                "<b>Internal error.</b>\n\nFailed to start a new order. Please try again.",
+                                main_menu_keyboard(),
+                            )
+                            .await;
+                        }
+                    };
+                    set_session(query.from.id, draft, &sessions);
                     info!(
                         user_id = query.from.id.0 as i64,
                         build_mode = "template",
@@ -482,16 +552,105 @@ async fn handle_callback(
             .await
         }
         Some("cancel") => {
-            remove_session(query.from.id, &sessions);
+            cancel_user_order(&pool, query.from.id, &sessions).await;
             edit_screen(
                 &bot,
                 target,
-                "🛑 <b>Order cancelled</b>\n\nYou can start a new meme website order anytime.",
+                "🛑 <b>Order cancelled</b>\n\nYour pending payment window, if any, is closed. You can start a new meme website order anytime.",
                 main_menu_keyboard(),
             )
             .await
         }
         _ => edit_main_menu(&bot, target, &config).await,
+    }
+}
+
+async fn start_new_order_session(
+    pool: &SqlitePool,
+    telegram_user_id: UserId,
+    username: Option<&str>,
+    first_name: Option<&str>,
+    last_name: Option<&str>,
+    mut draft: OrderDraft,
+) -> anyhow::Result<OrderDraft> {
+    let db_user_id = db::upsert_user(
+        pool,
+        telegram_user_id.0 as i64,
+        username,
+        first_name,
+        last_name,
+        true,
+    )
+    .await?;
+    let cancelled = db::cancel_active_pending_orders_for_user(pool, db_user_id).await?;
+    if cancelled > 0 {
+        info!(
+            user_id = telegram_user_id.0 as i64,
+            cancelled_orders = cancelled,
+            "cancelled existing pending orders before starting new order"
+        );
+    }
+
+    let build_mode = match draft.build_mode {
+        BuildModeDraft::Template => crate::models::BuildMode::Template,
+        BuildModeDraft::AiFree => crate::models::BuildMode::AiFree,
+    };
+    let order_id = db::create_site_order(
+        pool,
+        db_user_id,
+        build_mode,
+        draft.template_id.as_deref(),
+        draft.site_price_usdt,
+        None,
+    )
+    .await?;
+    info!(
+        user_id = telegram_user_id.0 as i64,
+        order_id = %order_id,
+        site_price_usdt = %draft.site_price_usdt,
+        "draft order persisted before asset collection"
+    );
+    draft.db_user_id = Some(db_user_id);
+    draft.order_id = Some(order_id);
+    Ok(draft)
+}
+
+async fn expire_stale_orders_for_user(pool: &SqlitePool, user_id: UserId) {
+    match db::expire_stale_pending_orders_for_user(pool, user_id.0 as i64).await {
+        Ok(expired) if expired > 0 => {
+            info!(
+                user_id = user_id.0 as i64,
+                expired_orders = expired,
+                "expired stale pending orders for user"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => warn!(
+            ?error,
+            user_id = user_id.0 as i64,
+            "failed to expire stale pending orders"
+        ),
+    }
+}
+
+async fn cancel_user_order(pool: &SqlitePool, user_id: UserId, sessions: &Sessions) {
+    let order_id = get_session(user_id, sessions).and_then(|draft| draft.order_id);
+    remove_session(user_id, sessions);
+    match db::cancel_order_for_user(pool, user_id.0 as i64, order_id).await {
+        Ok(cancelled) => {
+            info!(
+                user_id = user_id.0 as i64,
+                order_id = %order_id.map(|id| id.to_string()).unwrap_or_else(|| "<latest>".to_string()),
+                cancelled_orders = cancelled,
+                "cancelled pending order"
+            );
+        }
+        Err(error) => warn!(
+            ?error,
+            user_id = user_id.0 as i64,
+            order_id = %order_id.map(|id| id.to_string()).unwrap_or_else(|| "<latest>".to_string()),
+            "failed to cancel pending order"
+        ),
     }
 }
 
@@ -541,6 +700,24 @@ async fn handle_order_step(
         }
         return show_main_menu(&bot, msg.chat.id, &config).await;
     };
+    if draft.is_expired() {
+        warn!(
+            user_id = user_id.0 as i64,
+            order_id = %draft.order_id.map(|id| id.to_string()).unwrap_or_else(|| "<none>".to_string()),
+            last_step = draft.step.as_str(),
+            "order session expired while collecting input"
+        );
+        cancel_user_order(pool, user_id, &sessions).await;
+        return bot
+            .send_message(
+                msg.chat.id,
+                "<b>Order expired.</b>\n\nThis draft was inactive too long, so the pending order was closed. Start a new order with /create.",
+            )
+            .parse_mode(ParseMode::Html)
+            .reply_markup(main_menu_keyboard())
+            .await
+            .map(|_| ());
+    }
 
     match draft.step {
         DraftStep::WaitingLogo => {
@@ -832,6 +1009,31 @@ async fn handle_order_step(
                                 domain = %quote.domain,
                                 "domain quote persisted"
                             );
+                            if let Some(order_id) = draft.order_id
+                                && let Err(error) = db::prepare_order_for_payment(
+                                    pool,
+                                    order_id,
+                                    total,
+                                    Some(quote_id),
+                                )
+                                .await
+                            {
+                                warn!(
+                                    ?error,
+                                    user_id = user_id.0 as i64,
+                                    order_id = %order_id,
+                                    quote_id = %quote_id,
+                                    "failed to attach domain quote to pending order"
+                                );
+                                return bot
+                                    .send_message(
+                                        msg.chat.id,
+                                        "<b>Internal error.</b>\n\nFailed to attach domain quote to order. Please try again.",
+                                    )
+                                    .parse_mode(ParseMode::Html)
+                                    .await
+                                    .map(|_| ());
+                            }
                             draft.domain_quote_id = Some(quote_id)
                         }
                         Err(e) => {
@@ -1591,6 +1793,16 @@ async fn edit_payment_chain_and_ask_tx(
         )
         .await;
     };
+    if draft.is_expired() {
+        cancel_user_order(pool, user_id, sessions).await;
+        return edit_screen(
+            bot,
+            target,
+            "<b>Order expired.</b>\n\nThis draft was inactive too long, so the pending order was closed. Start a new order with /create.",
+            main_menu_keyboard(),
+        )
+        .await;
+    }
 
     let Some(total) = draft.total_usdt else {
         return edit_screen(
@@ -1681,6 +1893,23 @@ async fn edit_payment_chain_and_ask_tx(
         )
         .await;
     };
+    if let Err(error) =
+        db::prepare_order_for_payment(pool, order_id, total, draft.domain_quote_id).await
+    {
+        warn!(
+            ?error,
+            user_id = user_id.0 as i64,
+            order_id = %order_id,
+            "failed to update order total and domain quote before payment"
+        );
+        return edit_screen(
+            bot,
+            target,
+            "<b>Internal error.</b>\n\nFailed to prepare order for payment. Please start a new order.",
+            main_menu_keyboard(),
+        )
+        .await;
+    }
     let website_id = match db::upsert_website_for_order(pool, db_user_id, order_id, &input).await {
         Ok(id) => {
             info!(
@@ -1773,6 +2002,16 @@ async fn handle_alternative_domain_selection(
         )
         .await;
     };
+    if draft.is_expired() {
+        cancel_user_order(pool, user_id, sessions).await;
+        return edit_screen(
+            bot,
+            target,
+            "<b>Order expired.</b>\n\nThis draft was inactive too long, so the pending order was closed. Start a new order with /create.",
+            main_menu_keyboard(),
+        )
+        .await;
+    }
 
     let Some(alternatives) = &draft.alternative_domains else {
         return edit_screen(
@@ -1830,6 +2069,25 @@ async fn handle_alternative_domain_selection(
         };
 
     let total = site_price_usdt + quote.price_usd;
+    if let Some(order_id) = draft.order_id
+        && let Err(error) =
+            db::prepare_order_for_payment(pool, order_id, total, Some(domain_quote_id)).await
+    {
+        warn!(
+            ?error,
+            user_id = user_id.0 as i64,
+            order_id = %order_id,
+            quote_id = %domain_quote_id,
+            "failed to attach alternative domain quote to pending order"
+        );
+        return edit_screen(
+            bot,
+            target,
+            "<b>Internal error.</b>\n\nFailed to attach domain quote to order. Please try again.",
+            main_menu_keyboard(),
+        )
+        .await;
+    }
     draft.website_url = Some(domain.to_string());
     draft.db_user_id = Some(db_user_id);
     draft.domain_price_usdt = Some(quote.price_usd);
@@ -1851,7 +2109,8 @@ async fn handle_alternative_domain_selection(
     .await
 }
 
-fn set_session(user_id: UserId, draft: OrderDraft, sessions: &Sessions) {
+fn set_session(user_id: UserId, mut draft: OrderDraft, sessions: &Sessions) {
+    draft.touch();
     sessions
         .lock()
         .expect("sessions lock")
