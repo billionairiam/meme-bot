@@ -156,6 +156,10 @@ The API key is a shared secret that both the API server and the bot must know. N
 **Generate a key** (on any machine with openssl):
 
 ```bash
+# Option A — use the convenience script:
+./scripts/generate-api-key.sh
+
+# Option B — manually:
 openssl rand -base64 48
 ```
 
