@@ -352,10 +352,7 @@ async fn handle_message(
             "/cancel" => {
                 cancel_user_order(&pool, user_id, &sessions).await;
                 return bot
-                    .send_message(
-                        msg.chat.id,
-                        "<b>Order cancelled.</b>\n\nYour pending payment window, if any, is closed.",
-                    )
+                    .send_message(msg.chat.id, "<b>Order cancelled.</b>")
                     .parse_mode(ParseMode::Html)
                     .reply_markup(main_menu_keyboard())
                     .await
@@ -425,7 +422,7 @@ async fn handle_callback(
                     return edit_screen(
                         &bot,
                         target,
-                        "<b>Internal error.</b>\n\nFailed to start a new order. Please try again.",
+                        "<b>Start failed.</b>\nPlease try again.",
                         main_menu_keyboard(),
                     )
                     .await;
@@ -508,7 +505,7 @@ async fn handle_callback(
                             return edit_screen(
                                 &bot,
                                 target,
-                                "<b>Internal error.</b>\n\nFailed to start a new order. Please try again.",
+                                "<b>Start failed.</b>\nPlease try again.",
                                 main_menu_keyboard(),
                             )
                             .await;
@@ -528,7 +525,7 @@ async fn handle_callback(
                     edit_screen(
                         &bot,
                         target,
-                        "<b>Template not found.</b>\n\nPlease choose again.",
+                        "<b>Template not found.</b>\nChoose again.",
                         template_keyboard(),
                     )
                     .await
@@ -538,7 +535,13 @@ async fn handle_callback(
         Some(data) if data.starts_with("alt_domain:") => {
             let domain = data.trim_start_matches("alt_domain:");
             handle_alternative_domain_selection(
-                &bot, target, query.from.id, domain, &config, &sessions, &pool,
+                &bot,
+                target,
+                query.from.id,
+                domain,
+                &config,
+                &sessions,
+                &pool,
             )
             .await
         }
@@ -546,7 +549,7 @@ async fn handle_callback(
             edit_screen(
                 &bot,
                 target,
-                "✏️ <b>Enter your domain</b>\n\nSend the domain you want, for example:\n<code>pepe.xyz</code>",
+                "✏️ <b>Domain</b>\nExample: <code>pepe.xyz</code>",
                 cancel_keyboard(),
             )
             .await
@@ -556,7 +559,7 @@ async fn handle_callback(
             edit_screen(
                 &bot,
                 target,
-                "🛑 <b>Order cancelled</b>\n\nYour pending payment window, if any, is closed. You can start a new meme website order anytime.",
+                "🛑 <b>Order cancelled</b>",
                 main_menu_keyboard(),
             )
             .await
@@ -690,7 +693,7 @@ async fn handle_order_step(
                     return bot
                         .send_message(
                             msg.chat.id,
-                            "⚠️ <b>Payment check failed.</b>\n\nI could not recover your pending order. Contact admin.",
+                            "⚠️ <b>Payment check failed.</b>\nContact admin.",
                         )
                         .parse_mode(ParseMode::Html)
                         .await
@@ -711,7 +714,7 @@ async fn handle_order_step(
         return bot
             .send_message(
                 msg.chat.id,
-                "<b>Order expired.</b>\n\nThis draft was inactive too long, so the pending order was closed. Start a new order with /create.",
+                "<b>Order expired.</b>\nStart again with /create.",
             )
             .parse_mode(ParseMode::Html)
             .reply_markup(main_menu_keyboard())
@@ -723,10 +726,7 @@ async fn handle_order_step(
         DraftStep::WaitingLogo => {
             let Some(photo) = msg.photo().and_then(|photos| photos.last()) else {
                 return bot
-                    .send_message(
-                        msg.chat.id,
-                        "🖼 <b>Step 1/7</b>\n\nUpload your token logo image.",
-                    )
+                    .send_message(msg.chat.id, "🖼 <b>1/7 Logo</b>\nUpload token logo.")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
@@ -742,7 +742,7 @@ async fn handle_order_step(
             set_session(user_id, draft, &sessions);
             bot.send_message(
                 msg.chat.id,
-                "✅ <b>Logo received.</b>\n\n🔤 <b>Step 2/7</b>\nSend ticker, for example: <code>PEPE</code>",
+                "✅ Logo saved.\n🔤 <b>2/7 Ticker</b>\nExample: <code>PEPE</code>",
             )
             .parse_mode(ParseMode::Html)
             .await
@@ -751,7 +751,7 @@ async fn handle_order_step(
         DraftStep::WaitingTicker => {
             let Some(text) = msg.text().map(str::trim) else {
                 return bot
-                    .send_message(msg.chat.id, "🔤 <b>Step 2/7</b>\n\nSend ticker as text.")
+                    .send_message(msg.chat.id, "🔤 <b>2/7 Ticker</b>\nSend ticker.")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
@@ -764,7 +764,7 @@ async fn handle_order_step(
                 return bot
                     .send_message(
                         msg.chat.id,
-                        "<b>Invalid ticker.</b>\n\nUse 2-12 letters/numbers, for example: <code>PEPE</code>",
+                        "<b>Invalid ticker.</b>\nUse 2-12 letters/numbers.",
                     )
                     .parse_mode(ParseMode::Html)
                     .await
@@ -781,7 +781,7 @@ async fn handle_order_step(
             set_session(user_id, draft, &sessions);
             bot.send_message(
                 msg.chat.id,
-                "✅ <b>Ticker saved.</b>\n\n🏷 <b>Step 3/7</b>\nSend token name, for example: <code>Pepe Coin</code>",
+                "✅ Ticker saved.\n🏷 <b>3/7 Name</b>\nExample: <code>Pepe Coin</code>",
             )
             .parse_mode(ParseMode::Html)
             .await
@@ -790,17 +790,14 @@ async fn handle_order_step(
         DraftStep::WaitingTokenName => {
             let Some(text) = msg.text().map(str::trim) else {
                 return bot
-                    .send_message(msg.chat.id, "🏷 <b>Step 3/7</b>\n\nSend token name as text.")
+                    .send_message(msg.chat.id, "🏷 <b>3/7 Name</b>\nSend token name.")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
             };
             if text.len() < 2 || text.len() > 48 {
                 return bot
-                    .send_message(
-                        msg.chat.id,
-                        "<b>Invalid token name.</b>\n\nUse 2-48 characters.",
-                    )
+                    .send_message(msg.chat.id, "<b>Invalid name.</b>\nUse 2-48 characters.")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
@@ -816,7 +813,7 @@ async fn handle_order_step(
             set_session(user_id, draft, &sessions);
             bot.send_message(
                 msg.chat.id,
-                "✅ <b>Token name saved.</b>\n\n🔗 <b>Step 4/7</b>\nSend contract address.",
+                "✅ Name saved.\n🔗 <b>4/7 Contract</b>\nSend contract address.",
             )
             .parse_mode(ParseMode::Html)
             .await
@@ -827,7 +824,7 @@ async fn handle_order_step(
                 return bot
                     .send_message(
                         msg.chat.id,
-                        "🔗 <b>Step 4/7</b>\n\nSend contract address as text.",
+                        "🔗 <b>4/7 Contract</b>\nSend contract address.",
                     )
                     .parse_mode(ParseMode::Html)
                     .await
@@ -837,7 +834,7 @@ async fn handle_order_step(
                 return bot
                     .send_message(
                         msg.chat.id,
-                        "<b>Invalid contract address.</b>\n\nSend an EVM, TRON, or SOL address.",
+                        "<b>Invalid contract.</b>\nSend EVM, TRON, or SOL address.",
                     )
                     .parse_mode(ParseMode::Html)
                     .await
@@ -852,15 +849,18 @@ async fn handle_order_step(
                 "contract address accepted; advancing order wizard"
             );
             set_session(user_id, draft, &sessions);
-            bot.send_message(msg.chat.id, "✅ <b>Contract address saved.</b>\n\n✕ <b>Step 5/7</b>\nSend X link, for example:\n<code>https://x.com/yourproject</code>")
-                .parse_mode(ParseMode::Html)
-                .await
-                .map(|_| ())
+            bot.send_message(
+                msg.chat.id,
+                "✅ Contract saved.\n✕ <b>5/7 X</b>\n<code>https://x.com/yourproject</code>",
+            )
+            .parse_mode(ParseMode::Html)
+            .await
+            .map(|_| ())
         }
         DraftStep::WaitingXLink => {
             let Some(text) = msg.text().map(str::trim) else {
                 return bot
-                    .send_message(msg.chat.id, "✕ <b>Step 5/7</b>\n\nSend X link as text.")
+                    .send_message(msg.chat.id, "✕ <b>5/7 X</b>\nSend X link.")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
@@ -869,7 +869,7 @@ async fn handle_order_step(
                 return bot
                     .send_message(
                         msg.chat.id,
-                        "<b>Invalid X link.</b>\n\nUse:\n<code>https://x.com/username</code>",
+                        "<b>Invalid X link.</b>\nUse <code>https://x.com/username</code>",
                     )
                     .parse_mode(ParseMode::Html)
                     .await
@@ -884,18 +884,18 @@ async fn handle_order_step(
                 "x link accepted; advancing order wizard"
             );
             set_session(user_id, draft, &sessions);
-            bot.send_message(msg.chat.id, "✅ <b>X link saved.</b>\n\n💬 <b>Step 6/7</b>\nSend Telegram link, for example:\n<code>https://t.me/yourgroup</code>")
-                .parse_mode(ParseMode::Html)
-                .await
-                .map(|_| ())
+            bot.send_message(
+                msg.chat.id,
+                "✅ X saved.\n💬 <b>6/7 Telegram</b>\n<code>https://t.me/yourgroup</code>",
+            )
+            .parse_mode(ParseMode::Html)
+            .await
+            .map(|_| ())
         }
         DraftStep::WaitingTelegramLink => {
             let Some(text) = msg.text().map(str::trim) else {
                 return bot
-                    .send_message(
-                        msg.chat.id,
-                        "💬 <b>Step 6/7</b>\n\nSend Telegram link as text.",
-                    )
+                    .send_message(msg.chat.id, "💬 <b>6/7 Telegram</b>\nSend Telegram link.")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
@@ -904,7 +904,7 @@ async fn handle_order_step(
                 return bot
                     .send_message(
                         msg.chat.id,
-                        "<b>Invalid Telegram link.</b>\n\nUse:\n<code>https://t.me/yourgroup</code>",
+                        "<b>Invalid Telegram link.</b>\nUse <code>https://t.me/yourgroup</code>",
                     )
                     .parse_mode(ParseMode::Html)
                     .await
@@ -919,18 +919,18 @@ async fn handle_order_step(
                 "telegram link accepted; advancing order wizard"
             );
             set_session(user_id, draft, &sessions);
-            bot.send_message(msg.chat.id, "✅ <b>Telegram link saved.</b>\n\n🌐 <b>Step 7/7</b>\nSend desired website URL/domain, for example:\n<code>pepe.xyz</code>\n\nI will check availability and price.")
-                .parse_mode(ParseMode::Html)
-                .await
-                .map(|_| ())
+            bot.send_message(
+                msg.chat.id,
+                "✅ Telegram saved.\n🌐 <b>7/7 Domain</b>\nExample: <code>pepe.xyz</code>",
+            )
+            .parse_mode(ParseMode::Html)
+            .await
+            .map(|_| ())
         }
         DraftStep::WaitingWebsiteUrl => {
             let Some(text) = msg.text().map(str::trim) else {
                 return bot
-                    .send_message(
-                        msg.chat.id,
-                        "🌐 <b>Step 7/7</b>\n\nSend website URL/domain as text.",
-                    )
+                    .send_message(msg.chat.id, "🌐 <b>7/7 Domain</b>\nSend domain.")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
@@ -944,7 +944,10 @@ async fn handle_order_step(
             );
             if validate_domain(&domain).is_err() {
                 return bot
-                    .send_message(msg.chat.id, "<b>Invalid or unsupported domain.</b>\n\nSupported TLDs:\n<code>.com</code> <code>.net</code> <code>.org</code> <code>.xyz</code> <code>.fun</code> <code>.site</code> <code>.online</code> <code>.io</code> <code>.co</code> <code>.me</code> <code>.cc</code> <code>.app</code> <code>.dev</code> <code>.world</code> <code>.space</code> <code>.club</code> <code>.store</code> <code>.shop</code> <code>.vip</code>")
+                    .send_message(
+                        msg.chat.id,
+                        "<b>Invalid domain.</b>\nTry .com, .xyz, .fun, or .site.",
+                    )
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
@@ -970,33 +973,26 @@ async fn handle_order_step(
                         price_usd = %quote.price_usd,
                         "domain quote available"
                     );
-                    let db_user_id = match db::upsert_user(
-                        pool,
-                        user_id.0 as i64,
-                        None,
-                        None,
-                        None,
-                        true,
-                    )
-                    .await
-                    {
-                        Ok(id) => id,
-                        Err(e) => {
-                            warn!(
-                                ?e,
-                                user_id = user_id.0 as i64,
-                                "failed to upsert user for domain quote"
-                            );
-                            return bot
+                    let db_user_id =
+                        match db::upsert_user(pool, user_id.0 as i64, None, None, None, true).await
+                        {
+                            Ok(id) => id,
+                            Err(e) => {
+                                warn!(
+                                    ?e,
+                                    user_id = user_id.0 as i64,
+                                    "failed to upsert user for domain quote"
+                                );
+                                return bot
                                     .send_message(
                                         msg.chat.id,
-                                        "<b>Internal error.</b>\n\nFailed to record domain quote. Please try again.",
+                                        "<b>Quote failed.</b>\nPlease try again.",
                                     )
                                     .parse_mode(ParseMode::Html)
                                     .await
                                     .map(|_| ());
-                        }
-                    };
+                            }
+                        };
                     draft.website_url = Some(domain);
                     draft.db_user_id = Some(db_user_id);
                     draft.domain_price_usdt = Some(quote.price_usd);
@@ -1028,7 +1024,7 @@ async fn handle_order_step(
                                 return bot
                                     .send_message(
                                         msg.chat.id,
-                                        "<b>Internal error.</b>\n\nFailed to attach domain quote to order. Please try again.",
+                                        "<b>Quote save failed.</b>\nPlease try again.",
                                     )
                                     .parse_mode(ParseMode::Html)
                                     .await
@@ -1041,7 +1037,7 @@ async fn handle_order_step(
                             return bot
                                 .send_message(
                                     msg.chat.id,
-                                    "<b>Internal error.</b>\n\nFailed to record domain quote. Please try again.",
+                                    "<b>Quote failed.</b>\nPlease try again.",
                                 )
                                 .parse_mode(ParseMode::Html)
                                 .await
@@ -1062,7 +1058,7 @@ async fn handle_order_step(
                     bot.send_message(
                         msg.chat.id,
                         format!(
-                            "✅ <b>Domain available.</b>\n\nDomain price: <b>{}</b> USDT\nWebsite price: <b>{}</b> USDT\n\nTotal: <b>{}</b> USDT\n\nChoose payment chain. After payment, send the TX hash and I will verify it on-chain.",
+                            "✅ <b>Domain available</b>\nDomain: <b>{}</b> USDT\nWebsite: <b>{}</b> USDT\nTotal: <b>{}</b> USDT\n\nChoose payment chain.",
                             quote.price_usd, draft.site_price_usdt, total
                         ),
                     )
@@ -1089,9 +1085,7 @@ async fn handle_order_step(
                     if alternatives.is_empty() {
                         bot.send_message(
                             msg.chat.id,
-                            format!(
-                                "<b>Domain unavailable.</b>\n\nNo alternative TLDs available for <b>{base_name}</b>. Please send another domain name.",
-                            ),
+                            "<b>Domain unavailable.</b>\nSend another domain.",
                         )
                         .parse_mode(ParseMode::Html)
                         .await
@@ -1101,11 +1095,7 @@ async fn handle_order_step(
                         set_session(user_id, draft.clone(), &sessions);
                         bot.send_message(
                             msg.chat.id,
-                            format!(
-                                "🔍 <b>{} is taken.</b>\n\nAvailable alternatives for <b>{}</b>:",
-                                html_escape(&domain),
-                                html_escape(base_name)
-                            ),
+                            format!("🔍 <b>{} is taken.</b>\nChoose one:", html_escape(&domain),),
                         )
                         .parse_mode(ParseMode::Html)
                         .reply_markup(alternative_domains_keyboard(&alternatives))
@@ -1116,10 +1106,7 @@ async fn handle_order_step(
             }
         }
         DraftStep::ReadyToPay => bot
-            .send_message(
-                msg.chat.id,
-                "💳 <b>Payment</b>\n\nChoose a payment chain first.",
-            )
+            .send_message(msg.chat.id, "💳 <b>Payment</b>\nChoose a chain.")
             .parse_mode(ParseMode::Html)
             .reply_markup(payment_chain_keyboard())
             .await
@@ -1127,17 +1114,14 @@ async fn handle_order_step(
         DraftStep::WaitingTx => {
             let Some(text) = msg.text().map(str::trim) else {
                 return bot
-                    .send_message(msg.chat.id, "💳 <b>Payment</b>\n\nPaste TX hash as text.")
+                    .send_message(msg.chat.id, "💳 <b>Payment</b>\nPaste TX hash.")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
             };
             if !looks_like_tx_hash(text) {
                 return bot
-                    .send_message(
-                        msg.chat.id,
-                        "<b>Invalid TX format.</b>\n\nPaste the transaction hash.",
-                    )
+                    .send_message(msg.chat.id, "<b>Invalid TX.</b>\nPaste transaction hash.")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
@@ -1145,10 +1129,7 @@ async fn handle_order_step(
 
             let Some(order_id) = draft.order_id else {
                 return bot
-                    .send_message(
-                        msg.chat.id,
-                        "⚠️ <b>No order found.</b>\n\nPlease restart with /create.",
-                    )
+                    .send_message(msg.chat.id, "⚠️ <b>No order found.</b>\nUse /create.")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
@@ -1161,7 +1142,7 @@ async fn handle_order_step(
                     return bot
                         .send_message(
                             msg.chat.id,
-                            "⚠️ <b>Payment check failed.</b>\n\nOrder not found. Contact admin.",
+                            "⚠️ <b>Payment check failed.</b>\nContact admin.",
                         )
                         .parse_mode(ParseMode::Html)
                         .await
@@ -1182,10 +1163,7 @@ async fn handle_order_step(
             .await
         }
         DraftStep::PaymentConfirmed => bot
-            .send_message(
-                msg.chat.id,
-                "<b>Payment already confirmed.</b>\n\nYour website is queued for generation.",
-            )
+            .send_message(msg.chat.id, "<b>Payment confirmed.</b>\nWebsite is queued.")
             .parse_mode(ParseMode::Html)
             .reply_markup(status_keyboard())
             .await
@@ -1233,10 +1211,7 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
             "payment tx ignored because order is already paid"
         );
         return bot
-            .send_message(
-                chat_id,
-                "<b>Payment already confirmed.</b>\n\nYour website is queued for generation.",
-            )
+            .send_message(chat_id, "<b>Payment confirmed.</b>\nWebsite is queued.")
             .parse_mode(ParseMode::Html)
             .reply_markup(status_keyboard())
             .await
@@ -1252,10 +1227,7 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
                 "reused tx rejected"
             );
             return bot
-                .send_message(
-                    chat_id,
-                    "<b>TX already used.</b>\n\nSend a transaction hash that has not been used for another order.",
-                )
+                .send_message(chat_id, "<b>TX already used.</b>\nSend a new TX.")
                 .parse_mode(ParseMode::Html)
                 .await
                 .map(|_| ());
@@ -1274,10 +1246,7 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
     let expected_to_address = payment_address_for_chain(config, chain).trim().to_string();
     if expected_to_address.is_empty() {
         return bot
-            .send_message(
-                chat_id,
-                "<b>Payment address is not configured.</b>\n\nSet the matching USDT receive address in <code>.env</code>, then restart the bot.",
-            )
+            .send_message(chat_id, "<b>Payment address missing.</b>\nContact admin.")
             .parse_mode(ParseMode::Html)
             .await
             .map(|_| ());
@@ -1354,7 +1323,7 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
                 .send_message(
                     chat_id,
                     format!(
-                        "❌ <b>Payment not confirmed.</b>\n\n{}\n\nIf you just paid, wait for confirmations and send the TX again.",
+                        "❌ <b>Payment not confirmed.</b>\n{}",
                         html_escape(&payment_error_for_user(&error))
                     ),
                 )
@@ -1369,10 +1338,7 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
     {
         warn!(?error, order_id = %order_id, "failed to confirm payment transaction");
         return bot
-            .send_message(
-                chat_id,
-                "⚠️ <b>Payment already used or could not be recorded.</b>\n\nContact admin.",
-            )
+            .send_message(chat_id, "⚠️ <b>Payment record failed.</b>\nContact admin.")
             .parse_mode(ParseMode::Html)
             .await
             .map(|_| ());
@@ -1384,7 +1350,7 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
         "payment recorded and order marked paid"
     );
     status_parts.push(format!(
-        "Payment verified: {} USDT, confirmations: {}.",
+        "Paid: {} USDT. Confirmations: {}.",
         outcome.observed_amount_usdt,
         outcome
             .confirmations
@@ -1447,10 +1413,7 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
                 if let Err(error) = db::mark_order_manual_review(pool, order_id).await {
                     warn!(?error, order_id = %order_id, "failed to mark manual review");
                 }
-                status_parts.push(
-                    "Your order requires manual review before generation. Contact admin."
-                        .to_string(),
-                );
+                status_parts.push("Manual review required. Contact admin.".to_string());
             } else if let Err(error) =
                 enqueue_generation_job_with_retries(pool, order_id, website_id).await
             {
@@ -1464,16 +1427,13 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
                     website_id = %website_id,
                     "generation job queued"
                 );
-                status_parts.push("Website queued for generation.".to_string());
+                status_parts.push("Website queued.".to_string());
             }
         }
         _ => {
             warn!(order_id = %order_id, "paid order is missing persisted website input");
             let _ = db::mark_order_manual_review(pool, order_id).await;
-            status_parts.push(
-                "⚠️ Payment was recorded, but website input is incomplete. Contact admin."
-                    .to_string(),
-            );
+            status_parts.push("⚠️ Website input missing. Contact admin.".to_string());
         }
     }
 
@@ -1484,10 +1444,7 @@ async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseRe
 
     bot.send_message(
         chat_id,
-        format!(
-            "✅ <b>TX received.</b>\n\n<b>Payment confirmed.</b>\n\n{}",
-            status_parts.join("\n")
-        ),
+        format!("✅ <b>Payment confirmed.</b>\n{}", status_parts.join("\n")),
     )
     .parse_mode(ParseMode::Html)
     .reply_markup(status_keyboard())
@@ -1529,7 +1486,7 @@ async fn ensure_group_member_for_user(
         _ => {
             bot.send_message(
                 chat_id,
-                "<b>Access required</b>\n\nPlease join the support group before using this bot:\nhttps://t.me/MeMe_Web_Support",
+                "<b>Access required</b>\nJoin: https://t.me/MeMe_Web_Support",
             )
             .parse_mode(ParseMode::Html)
             .await?;
@@ -1589,35 +1546,35 @@ fn is_message_not_modified(error: &teloxide::RequestError) -> bool {
 
 fn main_menu_text(config: &TelegramUiConfig) -> String {
     format!(
-        "🚀 <b>Auto Meme Web Bot</b>\n\n<b>Create meme websites in minutes</b>\nTemplate mode, AI mode, domain check, payment, generation, and launch.\n\n<b>Access group</b>\nhttps://t.me/MeMe_Web_Support\n\n<b>Template catalog</b>\n{}",
+        "🚀 <b>Auto Meme Web Bot</b>\nCreate meme websites.\n\nTemplates: {}",
         html_escape(&config.template_catalog_url)
     )
 }
 
 fn create_menu_text() -> &'static str {
-    "🧩 <b>Create Website</b>\n\nChoose how the website should be built.\n\n<b>Template Mode</b>\nFast launch with fixed visual templates.\n\n<b>AI Free Creation</b>\nCustom style generated by agent."
+    "🧩 <b>Create Website</b>\nChoose a mode."
 }
 
 fn template_mode_text() -> &'static str {
-    "📦 <b>Template Mode</b>\n\nSelect one template below.\n\nPrices are shown in USDT. After confirmation, I will ask for logo, token info, links, and domain."
+    "📦 <b>Template Mode</b>\nChoose a template."
 }
 
 fn template_confirmation_text(template: TemplateOption) -> String {
     format!(
-        "📦 <b>Template Selected</b>\n\n<b>{}</b>\nPrice: <b>{}</b> USDT\n\nConfirm this template to continue to Step 1: logo upload.",
+        "📦 <b>{}</b>\nPrice: <b>{}</b> USDT\nConfirm to continue.",
         html_escape(template.name),
         template.price_usdt
     )
 }
 
 fn ask_logo_text() -> &'static str {
-    "🖼 <b>Step 1/7 · Logo</b>\n\nUpload your token logo image.\n\nAfter receiving the logo, I will ask for ticker."
+    "🖼 <b>1/7 Logo</b>\nUpload token logo."
 }
 
 async fn status_text(user_id: UserId, sessions: &Sessions, pool: &SqlitePool) -> String {
     if let Some(draft) = get_session(user_id, sessions) {
         return format!(
-            "📊 <b>Current Order</b>\n\nStatus: <code>{:?}</code>\nMode: <b>{}</b>\nWebsite price: <b>{}</b> USDT",
+            "📊 <b>Current Order</b>\nStatus: <code>{:?}</code>\nMode: <b>{}</b>\nPrice: <b>{}</b> USDT",
             draft.step,
             build_mode_label(&draft.build_mode),
             draft.site_price_usdt
@@ -1625,21 +1582,20 @@ async fn status_text(user_id: UserId, sessions: &Sessions, pool: &SqlitePool) ->
     }
     match db::get_user_order(pool, user_id.0 as i64).await {
         Ok(Some(order)) => format!(
-            "📊 <b>Order Status</b>\n\nPayment: {}\nSite: {}\nAmount: {} USDT\nChain: {}\nDomain: {}",
+            "📊 <b>Order Status</b>\nPayment: {}\nSite: {}\nAmount: {} USDT\nChain: {}\nDomain: {}",
             order.payment_status,
             order.site_status,
             order.amount_usdt,
             order.payment_chain.as_deref().unwrap_or("—"),
             order.requested_domain.as_deref().unwrap_or("—"),
         ),
-        Ok(None) => "📊 <b>Order Status</b>\n\nNo active order. Start with /create.".to_string(),
-        Err(_) => "📊 <b>Order Status</b>\n\nUnable to check order status. Please try again later."
-            .to_string(),
+        Ok(None) => "📊 <b>Order Status</b>\nNo active order. Use /create.".to_string(),
+        Err(_) => "📊 <b>Order Status</b>\nCheck failed. Try later.".to_string(),
     }
 }
 
 fn payment_chain_text() -> &'static str {
-    "💳 <b>Payment</b>\n\nChoose the USDT chain you will use.\n\nAfter you choose a chain, I will show the address and ask you to paste the TX hash."
+    "💳 <b>Payment</b>\nChoose USDT chain."
 }
 
 async fn show_main_menu(
@@ -1679,7 +1635,7 @@ async fn show_template_confirmation(
         return send_screen(
             bot,
             chat_id,
-            "<b>Template not found.</b>\n\nPlease choose again.",
+            "<b>Template not found.</b>\nChoose again.",
             template_keyboard(),
         )
         .await;
@@ -1703,7 +1659,7 @@ async fn edit_template_confirmation(
         return edit_screen(
             bot,
             target,
-            "<b>Template not found.</b>\n\nPlease choose again.",
+            "<b>Template not found.</b>\nChoose again.",
             template_keyboard(),
         )
         .await;
@@ -1767,7 +1723,7 @@ async fn edit_contact_admin(
         bot,
         target,
         format!(
-            "👤 <b>Contact admin</b>\n\nFor manual handling, quota issues, or premium domains:\n\n{}",
+            "👤 <b>Contact admin</b>\n{}",
             html_escape(&config.admin_contact)
         ),
         main_menu_keyboard(),
@@ -1788,7 +1744,7 @@ async fn edit_payment_chain_and_ask_tx(
         return edit_screen(
             bot,
             target,
-            "<b>No active order.</b>\n\nStart with /create.",
+            "<b>No active order.</b>\nUse /create.",
             main_menu_keyboard(),
         )
         .await;
@@ -1798,7 +1754,7 @@ async fn edit_payment_chain_and_ask_tx(
         return edit_screen(
             bot,
             target,
-            "<b>Order expired.</b>\n\nThis draft was inactive too long, so the pending order was closed. Start a new order with /create.",
+            "<b>Order expired.</b>\nUse /create.",
             main_menu_keyboard(),
         )
         .await;
@@ -1808,7 +1764,7 @@ async fn edit_payment_chain_and_ask_tx(
         return edit_screen(
             bot,
             target,
-            "<b>Payment not ready.</b>\n\nComplete logo, token links, and website URL before payment.",
+            "<b>Payment not ready.</b>\nComplete all steps first.",
             cancel_keyboard(),
         )
         .await;
@@ -1818,7 +1774,7 @@ async fn edit_payment_chain_and_ask_tx(
         return edit_screen(
             bot,
             target,
-            "<b>Payment address is not configured.</b>\n\nSet the matching USDT receive address in <code>.env</code>, then restart the bot.",
+            "<b>Payment address missing.</b>\nContact admin.",
             main_menu_keyboard(),
         )
         .await;
@@ -1834,7 +1790,7 @@ async fn edit_payment_chain_and_ask_tx(
                 return edit_screen(
                     bot,
                     target,
-                    "<b>Internal error.</b>\n\nFailed to create user record. Please try again.",
+                    "<b>Order failed.</b>\nPlease try again.",
                     main_menu_keyboard(),
                 )
                 .await;
@@ -1866,7 +1822,7 @@ async fn edit_payment_chain_and_ask_tx(
                 return edit_screen(
                     bot,
                     target,
-                    "<b>Internal error.</b>\n\nFailed to create order. Please try again.",
+                    "<b>Order failed.</b>\nPlease try again.",
                     main_menu_keyboard(),
                 )
                 .await;
@@ -1888,7 +1844,7 @@ async fn edit_payment_chain_and_ask_tx(
         return edit_screen(
             bot,
             target,
-            "<b>Payment not ready.</b>\n\nComplete logo, token links, and website URL before payment.",
+            "<b>Payment not ready.</b>\nComplete all steps first.",
             cancel_keyboard(),
         )
         .await;
@@ -1905,7 +1861,7 @@ async fn edit_payment_chain_and_ask_tx(
         return edit_screen(
             bot,
             target,
-            "<b>Internal error.</b>\n\nFailed to prepare order for payment. Please start a new order.",
+            "<b>Payment setup failed.</b>\nUse /create.",
             main_menu_keyboard(),
         )
         .await;
@@ -1926,7 +1882,7 @@ async fn edit_payment_chain_and_ask_tx(
             return edit_screen(
                 bot,
                 target,
-                "<b>Internal error.</b>\n\nFailed to persist website input. Please try again.",
+                "<b>Order save failed.</b>\nPlease try again.",
                 main_menu_keyboard(),
             )
             .await;
@@ -1955,7 +1911,7 @@ async fn edit_payment_chain_and_ask_tx(
             return edit_screen(
                 bot,
                 target,
-                "<b>Internal error.</b>\n\nFailed to start payment window. Please try again.",
+                "<b>Payment start failed.</b>\nPlease try again.",
                 main_menu_keyboard(),
             )
             .await;
@@ -1997,7 +1953,7 @@ async fn handle_alternative_domain_selection(
         return edit_screen(
             bot,
             target,
-            "<b>No active order.</b>\n\nStart with /create.",
+            "<b>No active order.</b>\nUse /create.",
             main_menu_keyboard(),
         )
         .await;
@@ -2007,7 +1963,7 @@ async fn handle_alternative_domain_selection(
         return edit_screen(
             bot,
             target,
-            "<b>Order expired.</b>\n\nThis draft was inactive too long, so the pending order was closed. Start a new order with /create.",
+            "<b>Order expired.</b>\nUse /create.",
             main_menu_keyboard(),
         )
         .await;
@@ -2017,7 +1973,7 @@ async fn handle_alternative_domain_selection(
         return edit_screen(
             bot,
             target,
-            "<b>Session expired.</b>\n\nPlease restart with /create.",
+            "<b>Session expired.</b>\nUse /create.",
             main_menu_keyboard(),
         )
         .await;
@@ -2027,7 +1983,7 @@ async fn handle_alternative_domain_selection(
         return edit_screen(
             bot,
             target,
-            "<b>Domain selection expired.</b>\n\nPlease restart with /create.",
+            "<b>Domain expired.</b>\nUse /create.",
             main_menu_keyboard(),
         )
         .await;
@@ -2046,7 +2002,7 @@ async fn handle_alternative_domain_selection(
             return edit_screen(
                 bot,
                 target,
-                "<b>Internal error.</b>\n\nFailed to record selection. Please try again.",
+                "<b>Selection failed.</b>\nPlease try again.",
                 main_menu_keyboard(),
             )
             .await;
@@ -2061,7 +2017,7 @@ async fn handle_alternative_domain_selection(
                 return edit_screen(
                     bot,
                     target,
-                    "<b>Internal error.</b>\n\nFailed to record selection. Please try again.",
+                    "<b>Selection failed.</b>\nPlease try again.",
                     main_menu_keyboard(),
                 )
                 .await;
@@ -2083,7 +2039,7 @@ async fn handle_alternative_domain_selection(
         return edit_screen(
             bot,
             target,
-            "<b>Internal error.</b>\n\nFailed to attach domain quote to order. Please try again.",
+            "<b>Quote save failed.</b>\nPlease try again.",
             main_menu_keyboard(),
         )
         .await;
@@ -2101,7 +2057,7 @@ async fn handle_alternative_domain_selection(
         bot,
         target,
         format!(
-            "✅ <b>Domain selected.</b>\n\n🌐 {domain}\nDomain price: <b>{}</b> USDT\nWebsite price: <b>{}</b> USDT\n\nTotal: <b>{}</b> USDT\n\nChoose payment chain. After payment, send the TX hash and I will verify it on-chain.",
+            "✅ <b>Domain selected</b>\n{domain}\nDomain: <b>{}</b> USDT\nWebsite: <b>{}</b> USDT\nTotal: <b>{}</b> USDT\n\nChoose payment chain.",
             quote.price_usd, site_price_usdt, total
         ),
         payment_chain_keyboard(),
@@ -2163,7 +2119,7 @@ async fn maybe_purchase_domain_after_tx(
         );
         return (
             false,
-            "\n\n<b>Domain purchase:</b> skipped. Set <code>NAMECHEAP_AUTO_PURCHASE_AFTER_TX=true</code> to enable automatic Namecheap purchase after TX.".to_string(),
+            "<b>Domain:</b> purchase disabled. Contact admin.".to_string(),
         );
     }
 
@@ -2172,10 +2128,7 @@ async fn maybe_purchase_domain_after_tx(
             quote_id = %quote_id.map(|id| id.to_string()).unwrap_or_else(|| "<none>".to_string()),
             "domain purchase skipped because no domain is attached"
         );
-        return (
-            false,
-            "\n\n<b>Domain purchase:</b> skipped because no domain is attached.".to_string(),
-        );
+        return (false, "<b>Domain:</b> missing. Contact admin.".to_string());
     };
     let Some(quote_id) = quote_id else {
         warn!(
@@ -2184,8 +2137,7 @@ async fn maybe_purchase_domain_after_tx(
         );
         return (
             false,
-            "\n\n<b>Domain purchase:</b> skipped because no persisted quote is attached."
-                .to_string(),
+            "<b>Domain:</b> quote missing. Contact admin.".to_string(),
         );
     };
     info!(
@@ -2215,11 +2167,7 @@ async fn maybe_purchase_domain_after_tx(
                 "persisted domain quote could not be loaded before purchase",
             )
             .await;
-            return (
-                false,
-                "\n\n<b>Domain purchase needs manual review.</b>\nPersisted quote could not be loaded."
-                    .to_string(),
-            );
+            return (false, "<b>Domain:</b> manual review required.".to_string());
         }
     };
     if !quote_record.domain.eq_ignore_ascii_case(domain) {
@@ -2237,7 +2185,7 @@ async fn maybe_purchase_domain_after_tx(
         .await;
         return (
             false,
-            "\n\n<b>Domain purchase needs manual review.</b>\nQuote/domain mismatch.".to_string(),
+            "<b>Domain:</b> quote mismatch. Contact admin.".to_string(),
         );
     }
 
@@ -2260,7 +2208,7 @@ async fn maybe_purchase_domain_after_tx(
                 return (
                     false,
                     format!(
-                        "\n\n<b>Domain purchase needs manual review.</b>\nCurrent Namecheap price <code>{}</code> exceeds paid quote <code>{}</code>.",
+                        "<b>Domain:</b> price changed (<code>{}</code> > <code>{}</code>). Contact admin.",
                         current_quote.price_usd, quote_record.quoted_amount_usdt
                     ),
                 );
@@ -2275,8 +2223,7 @@ async fn maybe_purchase_domain_after_tx(
             .await;
             return (
                 false,
-                "\n\n<b>Domain purchase needs manual review.</b>\nDomain became unavailable or premium before purchase."
-                    .to_string(),
+                "<b>Domain:</b> unavailable. Contact admin.".to_string(),
             );
         }
         Err(error) => {
@@ -2289,7 +2236,7 @@ async fn maybe_purchase_domain_after_tx(
             return (
                 false,
                 format!(
-                    "\n\n<b>Domain purchase needs manual review.</b>\nCould not refresh Namecheap price: {}",
+                    "<b>Domain:</b> price check failed. {}",
                     html_escape(&domain_error_for_user(&error))
                 ),
             );
@@ -2327,7 +2274,7 @@ async fn maybe_purchase_domain_after_tx(
                 return (
                     false,
                     format!(
-                        "\n\n<b>Domain purchased but needs manual review.</b>\nNamecheap charged <code>{}</code>, which exceeds the paid domain quote <code>{}</code>.",
+                        "<b>Domain bought.</b> Charge <code>{}</code> exceeds quote <code>{}</code>. Contact admin.",
                         result.charged_amount_usd, quote_record.quoted_amount_usdt
                     ),
                 );
@@ -2365,7 +2312,7 @@ async fn maybe_purchase_domain_after_tx(
             };
             let dns_message = match dns_result {
                 Ok(zone) => format!(
-                    "\n<b>DNS configured.</b> Cloudflare zone <code>{}</code>; nameservers sent to Namecheap.",
+                    "<b>DNS configured.</b> Zone <code>{}</code>.",
                     html_escape(&zone.zone_id)
                 ),
                 Err(message) => message,
@@ -2373,7 +2320,7 @@ async fn maybe_purchase_domain_after_tx(
             (
                 dns_ready,
                 format!(
-                    "\n\n<b>Domain purchased.</b>\nOrder ID: <code>{}</code>\nTransaction ID: <code>{}</code>{}",
+                    "<b>Domain purchased.</b>\nOrder: <code>{}</code>\nTX: <code>{}</code>\n{}",
                     html_escape(&result.namecheap_order_id),
                     html_escape(&result.namecheap_transaction_id),
                     dns_message
@@ -2403,7 +2350,7 @@ async fn maybe_purchase_domain_after_tx(
             (
                 false,
                 format!(
-                    "\n\n<b>Domain purchase failed.</b>\n{}",
+                    "<b>Domain failed.</b>\n{}",
                     html_escape(&domain_error_for_user(&error))
                 ),
             )
@@ -2828,7 +2775,7 @@ pub fn payment_instruction(
     payment_window: &db::PaymentWindow,
 ) -> String {
     format!(
-        "💳 <b>Payment details</b>\n\nOrder: <code>{order_id}</code>\nAmount: <b>{amount_usdt}</b> USDT\nChain: <b>{}</b>\nAddress:\n<code>{}</code>\n\nThe payment window starts now and expires at <code>{}</code> UTC. Send your TX hash in the next message. I will verify amount, recipient, token, confirmations, timestamp, and duplicate use.",
+        "💳 <b>Pay</b>\nOrder: <code>{order_id}</code>\nAmount: <b>{amount_usdt}</b> USDT\nChain: <b>{}</b>\nAddress:\n<code>{}</code>\n\nExpires: <code>{}</code> UTC\nSend TX hash after payment.",
         chain.as_str(),
         html_escape(address),
         payment_window.expires_at.format("%Y-%m-%d %H:%M:%S")
@@ -2934,32 +2881,24 @@ fn payment_address_for_chain(config: &TelegramUiConfig, chain: PaymentChain) -> 
 
 fn payment_error_for_user(error: &PaymentVerificationError) -> String {
     match error {
-        PaymentVerificationError::NotFound => "Transaction was not found.".to_string(),
-        PaymentVerificationError::WrongChain => "Transaction is on the wrong chain.".to_string(),
-        PaymentVerificationError::WrongToken => {
-            "Transaction is not a supported USDT transfer.".to_string()
-        }
-        PaymentVerificationError::WrongRecipient => {
-            "Transaction was not sent to the configured payment address.".to_string()
-        }
-        PaymentVerificationError::InsufficientAmount => {
-            "Transaction amount is below the required total.".to_string()
-        }
+        PaymentVerificationError::NotFound => "TX not found.".to_string(),
+        PaymentVerificationError::WrongChain => "Wrong chain.".to_string(),
+        PaymentVerificationError::WrongToken => "Not a supported USDT transfer.".to_string(),
+        PaymentVerificationError::WrongRecipient => "Wrong recipient.".to_string(),
+        PaymentVerificationError::InsufficientAmount => "Amount too low.".to_string(),
         PaymentVerificationError::InsufficientConfirmations => {
-            "Transaction does not have enough confirmations yet.".to_string()
+            "Not enough confirmations.".to_string()
         }
-        PaymentVerificationError::AlreadyUsed => "Transaction has already been used.".to_string(),
-        PaymentVerificationError::ExpiredOrder => {
-            "Payment window expired. Start a new order for a fresh quote.".to_string()
-        }
+        PaymentVerificationError::AlreadyUsed => "TX already used.".to_string(),
+        PaymentVerificationError::ExpiredOrder => "Payment window expired.".to_string(),
         PaymentVerificationError::OldTransaction => {
-            "Transaction is older than this payment request. Choose a payment chain and pay after the bot shows the address.".to_string()
+            "TX is older than this payment request.".to_string()
         }
         PaymentVerificationError::TransactionAfterSubmission => {
-            "Transaction timestamp is later than when you submitted the TX hash. Wait until the transaction is confirmed, then submit the TX hash again.".to_string()
+            "TX is not confirmed yet. Try again later.".to_string()
         }
         PaymentVerificationError::Provider(value) => {
-            format!("Payment provider error after repeated checks: {value}. Contact admin.")
+            format!("Payment provider error: {value}. Contact admin.")
         }
     }
 }
