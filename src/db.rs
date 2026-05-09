@@ -1087,6 +1087,8 @@ pub async fn get_user_order(
         JOIN users u ON o.user_id = u.id
         LEFT JOIN websites w ON w.order_id = o.id
         WHERE u.telegram_user_id = ?
+          AND o.payment_status IN ('pending', 'paid')
+          AND o.site_status <> 'failed'
         ORDER BY o.created_at DESC
         LIMIT 1
         "#,
@@ -1379,6 +1381,7 @@ mod tests {
         assert_eq!(order.get::<String, _>("payment_status"), "expired");
         assert_eq!(order.get::<String, _>("site_status"), "failed");
         assert_eq!(quote.get::<String, _>("status"), "expired");
+        assert!(get_user_order(&pool, 101).await.unwrap().is_none());
     }
 
     #[tokio::test]
