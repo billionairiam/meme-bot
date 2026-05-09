@@ -268,8 +268,8 @@ pub async fn cancel_active_pending_orders_for_user(
     let result = sqlx::query(
         r#"
         UPDATE orders
-        SET payment_status = 'cancelled',
-            site_status = 'cancelled',
+        SET payment_status = 'expired',
+            site_status = 'failed',
             payment_expires_at = COALESCE(payment_expires_at, datetime('now')),
             updated_at = datetime('now')
         WHERE user_id = ?
@@ -323,8 +323,8 @@ pub async fn cancel_order_for_user(
         sqlx::query(
             r#"
             UPDATE orders
-            SET payment_status = 'cancelled',
-                site_status = 'cancelled',
+            SET payment_status = 'expired',
+                site_status = 'failed',
                 payment_expires_at = COALESCE(payment_expires_at, datetime('now')),
                 updated_at = datetime('now')
             WHERE id = ?
@@ -1376,8 +1376,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cancelled, 1);
-        assert_eq!(order.get::<String, _>("payment_status"), "cancelled");
-        assert_eq!(order.get::<String, _>("site_status"), "cancelled");
+        assert_eq!(order.get::<String, _>("payment_status"), "expired");
+        assert_eq!(order.get::<String, _>("site_status"), "failed");
         assert_eq!(quote.get::<String, _>("status"), "expired");
     }
 
