@@ -78,10 +78,12 @@ impl GenerationRouter {
         primary: GenerationProviderName,
         gemini: Box<dyn SiteGenerationProvider>,
         codex: Box<dyn SiteGenerationProvider>,
+        claude: Box<dyn SiteGenerationProvider>,
     ) -> Self {
         let providers = match primary {
-            GenerationProviderName::Gemini => vec![gemini, codex],
-            GenerationProviderName::Codex => vec![codex, gemini],
+            GenerationProviderName::Gemini => vec![gemini, codex, claude],
+            GenerationProviderName::Codex => vec![codex, gemini, claude],
+            GenerationProviderName::Claude => vec![claude, gemini, codex],
         };
         Self { providers }
     }
@@ -125,6 +127,15 @@ impl CliGenerationProvider {
     pub fn codex(command: String, args_template: String, timeout_seconds: u64) -> Self {
         Self {
             name: "codex",
+            command,
+            args_template,
+            timeout: Duration::from_secs(timeout_seconds),
+        }
+    }
+
+    pub fn claude(command: String, args_template: String, timeout_seconds: u64) -> Self {
+        Self {
+            name: "claude",
             command,
             args_template,
             timeout: Duration::from_secs(timeout_seconds),
@@ -325,14 +336,21 @@ fn render_agent_args(
     output_dir: &Path,
     done_file: &Path,
 ) -> Result<Vec<String>, GenerationError> {
+    const PROMPT_PLACEHOLDER: &str = "\x1f__PROMPT__\x1f";
     let rendered = args_template
-        .replace("{prompt}", prompt)
+        .replace("{prompt}", PROMPT_PLACEHOLDER)
         .replace("{prompt_file}", &prompt_file.display().to_string())
         .replace("{output_dir}", &output_dir.display().to_string())
         .replace("{done_file}", &done_file.display().to_string());
 
-    shell_words::split(&rendered)
-        .map_err(|error| GenerationError::Failed(format!("invalid agent args: {error}")))
+    let mut args: Vec<String> = shell_words::split(&rendered)
+        .map_err(|error| GenerationError::Failed(format!("invalid agent args: {error}")))?;
+    for arg in &mut args {
+        if arg == PROMPT_PLACEHOLDER {
+            *arg = prompt.to_string();
+        }
+    }
+    Ok(args)
 }
 
 fn prepare_output_dir(output_dir: &Path) -> Result<(), GenerationError> {
@@ -680,6 +698,7 @@ mod tests {
             GenerationProviderName::Gemini,
             Box::new(FailingProvider),
             Box::new(StaticTemplateProvider),
+            Box::new(FailingProvider),
         );
 
         let result = router.generate(&request).await.unwrap();
@@ -694,6 +713,7 @@ mod tests {
             GenerationProviderName::Gemini,
             Box::new(InvalidOutputProvider),
             Box::new(StaticTemplateProvider),
+            Box::new(FailingProvider),
         );
 
         let result = router.generate(&request).await.unwrap();

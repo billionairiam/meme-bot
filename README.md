@@ -480,18 +480,22 @@ The `GITHUB_TOKEN` is needed on the bot side to push generated site files to a G
 
 ## Agent Generation
 
-The generation worker runs Gemini/Codex as an external CLI in non-interactive mode:
+The generation worker runs Gemini, Codex, or Claude Code as an external CLI in non-interactive mode:
 
 ```bash
 GEMINI_AGENT_COMMAND=gemini
 GEMINI_AGENT_ARGS="--yolo --prompt-file {prompt_file}"
 CODEX_AGENT_COMMAND=codex
 CODEX_AGENT_ARGS="exec --dangerously-bypass-approvals-and-sandbox --cd {output_dir} --file {prompt_file}"
+CLAUDE_AGENT_COMMAND=claude
+CLAUDE_AGENT_ARGS="-p {prompt} --output-format stream-json --verbose --allowedTools Read Edit Write Bash --permission-mode plan --dangerously-bypass-sandbox"
 AGENT_TIMEOUT_SECONDS=900
 GENERATION_PRIMARY_PROVIDER=gemini
 GENERATION_MAX_CONCURRENCY=2
 GENERATED_SITES_DIR=/www/websites
 ```
+
+`GENERATION_PRIMARY_PROVIDER` sets the first provider to try on each job. Supported values: `gemini` (default), `codex`, `claude`. The router falls back through the other two providers on recoverable errors (quota exhausted, rate limited, provider unavailable).
 
 For a paid order using `aaabbb.com`, the worker creates `/www/websites/aaabbb.com`, asks the selected agent to write the static site there, creates/pushes the GitHub repository named `aaabbb.com`, then asks `api-server` to deploy that repo through Cloudflare Pages and bind `aaabbb.com`.
 

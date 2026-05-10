@@ -44,6 +44,8 @@ pub struct Config {
     pub gemini_agent_args: String,
     pub codex_agent_command: String,
     pub codex_agent_args: String,
+    pub claude_agent_command: String,
+    pub claude_agent_args: String,
     pub generated_sites_dir: String,
     pub local_templates_dir: String,
     pub github_owner: String,
@@ -86,6 +88,7 @@ pub struct NamecheapContactConfig {
 pub enum GenerationProviderName {
     Gemini,
     Codex,
+    Claude,
 }
 
 impl GenerationProviderName {
@@ -93,6 +96,7 @@ impl GenerationProviderName {
         match self {
             Self::Gemini => "gemini",
             Self::Codex => "codex",
+            Self::Claude => "claude",
         }
     }
 }
@@ -166,6 +170,11 @@ impl Config {
                 "exec --dangerously-bypass-approvals-and-sandbox --cd {output_dir} --file {prompt_file}"
                     .to_string()
             }),
+            claude_agent_command: env::var("CLAUDE_AGENT_COMMAND")
+                .unwrap_or_else(|_| "claude".to_string()),
+            claude_agent_args: env::var("CLAUDE_AGENT_ARGS").unwrap_or_else(|_| {
+                "-p --output-format stream-json --verbose --allowedTools Read Edit Write Bash(gh:*) --permission-mode plan --allow-dangerously-bypass-sandbox --no-sandbox {prompt}".to_string()
+            }),
             generated_sites_dir: env::var("GENERATED_SITES_DIR")
                 .unwrap_or_else(|_| "./generated-sites".to_string()),
             local_templates_dir: env::var("LOCAL_TEMPLATES_DIR")
@@ -229,6 +238,7 @@ fn parse_provider(value: &str) -> Result<GenerationProviderName> {
     match value.to_ascii_lowercase().as_str() {
         "gemini" => Ok(GenerationProviderName::Gemini),
         "codex" => Ok(GenerationProviderName::Codex),
+        "claude" => Ok(GenerationProviderName::Claude),
         other => anyhow::bail!("unsupported generation provider: {other}"),
     }
 }

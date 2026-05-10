@@ -37,6 +37,11 @@ impl App {
                 self.config.codex_agent_args.clone(),
                 self.config.agent_timeout_seconds,
             )),
+            Box::new(CliGenerationProvider::claude(
+                self.config.claude_agent_command.clone(),
+                self.config.claude_agent_args.clone(),
+                self.config.agent_timeout_seconds,
+            )),
         ));
 
         let deployer: Option<Arc<dyn SiteDeployer>> = match (
