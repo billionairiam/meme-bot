@@ -363,6 +363,12 @@ async fn handle_message(
             }
             "/status" => return show_status(&bot, msg.chat.id, user_id, &sessions, &pool).await,
             "/history" => return show_history(&bot, msg.chat.id, user_id, &pool).await,
+            "/continue" => {
+                return handle_continue_command(
+                    &bot, msg.chat.id, user_id, &sessions, &pool, &config,
+                )
+                .await;
+            }
             "/cancel" => {
                 cancel_user_order(&pool, user_id, &sessions).await;
                 return bot
@@ -438,18 +444,22 @@ async fn handle_callback(
             {
                 Ok(draft) => draft,
                 Err(error) => {
-                    warn!(
-                        ?error,
-                        user_id = query.from.id.0 as i64,
-                        "failed to start ai order session"
-                    );
-                    return edit_screen(
-                        &bot,
-                        target,
-                        "<b>Start failed.</b>\nPlease try again.",
-                        main_menu_keyboard(),
-                    )
-                    .await;
+                    let msg = if format!("{error:#}").contains("pending order") {
+                        warn!(
+                            ?error,
+                            user_id = query.from.id.0 as i64,
+                            "blocked ai order: pending order exists"
+                        );
+                        "⚠️ <b>Unfinished order.</b>\nUse /continue or /cancel first."
+                    } else {
+                        warn!(
+                            ?error,
+                            user_id = query.from.id.0 as i64,
+                            "failed to start ai order session"
+                        );
+                        "<b>Start failed.</b>\nPlease try again."
+                    };
+                    return edit_screen(&bot, target, msg, main_menu_keyboard()).await;
                 }
             };
             set_session(query.from.id, draft, &sessions);
@@ -521,19 +531,24 @@ async fn handle_callback(
                     {
                         Ok(draft) => draft,
                         Err(error) => {
-                            warn!(
-                                ?error,
-                                user_id = query.from.id.0 as i64,
-                                template_id = template.id,
-                                "failed to start template order session"
-                            );
-                            return edit_screen(
-                                &bot,
-                                target,
-                                "<b>Start failed.</b>\nPlease try again.",
-                                main_menu_keyboard(),
-                            )
-                            .await;
+                            let msg = if format!("{error:#}").contains("pending order") {
+                                warn!(
+                                    ?error,
+                                    user_id = query.from.id.0 as i64,
+                                    template_id = template.id,
+                                    "blocked template order: pending order exists"
+                                );
+                                "⚠️ <b>Unfinished order.</b>\nUse /continue or /cancel first."
+                            } else {
+                                warn!(
+                                    ?error,
+                                    user_id = query.from.id.0 as i64,
+                                    template_id = template.id,
+                                    "failed to start template order session"
+                                );
+                                "<b>Start failed.</b>\nPlease try again."
+                            };
+                            return edit_screen(&bot, target, msg, main_menu_keyboard()).await;
                         }
                     };
                     set_session(query.from.id, draft, &sessions);
@@ -610,13 +625,9 @@ async fn start_new_order_session(
         true,
     )
     .await?;
-    let cancelled = db::cancel_active_pending_orders_for_user(pool, db_user_id).await?;
-    if cancelled > 0 {
-        info!(
-            user_id = telegram_user_id.0 as i64,
-            cancelled_orders = cancelled,
-            "cancelled existing pending orders before starting new order"
-        );
+
+    if db::has_pending_order(pool, telegram_user_id.0 as i64).await? {
+        anyhow::bail!("has pending order");
     }
 
     let build_mode = match draft.build_mode {
@@ -1661,6 +1672,171 @@ async fn history_text(user_id: UserId, pool: &SqlitePool) -> String {
 
 fn payment_chain_text() -> &'static str {
     "💳 <b>Payment</b>\nChoose USDT chain."
+}
+
+async fn handle_continue_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    user_id: UserId,
+    sessions: &Sessions,
+    pool: &SqlitePool,
+    _config: &TelegramUiConfig,
+) -> ResponseResult<()> {
+    if let Some(draft) = get_session(user_id, sessions) {
+        if draft.is_expired() {
+            cancel_user_order(pool, user_id, sessions).await;
+            return bot
+                .send_message(chat_id, "<b>Order expired.</b>\nUse /create.")
+                .parse_mode(ParseMode::Html)
+                .reply_markup(main_menu_keyboard())
+                .await
+                .map(|_| ());
+        }
+        return continue_step_screen(bot, chat_id, &draft).await;
+    }
+
+    match db::get_pending_order_for_user(pool, user_id.0 as i64).await {
+        Ok(Some(order)) => {
+            let build_mode = match order.build_mode {
+                Some(crate::models::BuildMode::Template) => BuildModeDraft::Template,
+                _ => BuildModeDraft::AiFree,
+            };
+            let draft = OrderDraft {
+                build_mode,
+                step: DraftStep::ReadyToPay,
+                site_price_usdt: order.amount_usdt,
+                template_id: order.template_id.clone(),
+                logo_file_id: None,
+                ticker: None,
+                token_name: None,
+                contract_address: None,
+                x_link: None,
+                telegram_link: None,
+                website_url: None,
+                domain_quote_id: None,
+                domain_price_usdt: None,
+                alternative_domains: None,
+                total_usdt: Some(order.amount_usdt),
+                payment_chain: None,
+                order_id: Some(order.id),
+                db_user_id: Some(order.user_id),
+                updated_at: chrono::Utc::now(),
+            };
+            set_session(user_id, draft.clone(), sessions);
+            continue_step_screen(bot, chat_id, &draft).await
+        }
+        Ok(None) => bot
+            .send_message(chat_id, "<b>No active order.</b>\nUse /create.")
+            .parse_mode(ParseMode::Html)
+            .reply_markup(main_menu_keyboard())
+            .await
+            .map(|_| ()),
+        Err(error) => {
+            warn!(?error, user_id = user_id.0 as i64, "failed to load pending order");
+            bot.send_message(chat_id, "<b>Check failed.</b>\nTry later.")
+                .parse_mode(ParseMode::Html)
+                .reply_markup(main_menu_keyboard())
+                .await
+                .map(|_| ())
+        }
+    }
+}
+
+async fn continue_step_screen(
+    bot: &Bot,
+    chat_id: ChatId,
+    draft: &OrderDraft,
+) -> ResponseResult<()> {
+    match draft.step {
+        DraftStep::WaitingLogo => {
+            bot.send_message(chat_id, ask_logo_text())
+                .parse_mode(ParseMode::Html)
+                .reply_markup(cancel_keyboard())
+                .await
+                .map(|_| ())
+        }
+        DraftStep::WaitingTicker => {
+            bot.send_message(chat_id, "🔤 <b>2/7 Ticker</b>\nSend token ticker. Eg: PEPE")
+                .parse_mode(ParseMode::Html)
+                .reply_markup(cancel_keyboard())
+                .await
+                .map(|_| ())
+        }
+        DraftStep::WaitingTokenName => {
+            bot.send_message(
+                chat_id,
+                "🏷 <b>3/7 Token Name</b>\nSend token name. Eg: Pepe Coin",
+            )
+            .parse_mode(ParseMode::Html)
+            .reply_markup(cancel_keyboard())
+            .await
+            .map(|_| ())
+        }
+        DraftStep::WaitingContractAddress => {
+            bot.send_message(
+                chat_id,
+                "📝 <b>4/7 Contract Address</b>\nPaste contract address.",
+            )
+            .parse_mode(ParseMode::Html)
+            .reply_markup(cancel_keyboard())
+            .await
+            .map(|_| ())
+        }
+        DraftStep::WaitingXLink => {
+            bot.send_message(
+                chat_id,
+                "🐦 <b>5/7 X (Twitter) Link</b>\nPaste X link or send '-' to skip.",
+            )
+            .parse_mode(ParseMode::Html)
+            .reply_markup(cancel_keyboard())
+            .await
+            .map(|_| ())
+        }
+        DraftStep::WaitingTelegramLink => {
+            bot.send_message(
+                chat_id,
+                "📱 <b>6/7 Telegram Link</b>\nPaste TG link or send '-' to skip.",
+            )
+            .parse_mode(ParseMode::Html)
+            .reply_markup(cancel_keyboard())
+            .await
+            .map(|_| ())
+        }
+        DraftStep::WaitingWebsiteUrl => {
+            bot.send_message(
+                chat_id,
+                "🌐 <b>7/7 Domain</b>\nSend domain name.\nEg: mytoken.xyz",
+            )
+            .parse_mode(ParseMode::Html)
+            .reply_markup(cancel_keyboard())
+            .await
+            .map(|_| ())
+        }
+        DraftStep::ReadyToPay => {
+            bot.send_message(chat_id, payment_chain_text())
+                .parse_mode(ParseMode::Html)
+                .reply_markup(payment_chain_keyboard())
+                .await
+                .map(|_| ())
+        }
+        DraftStep::WaitingTx => {
+            bot.send_message(chat_id, "💳 <b>Payment</b>\nPaste TX hash.")
+                .parse_mode(ParseMode::Html)
+                .reply_markup(cancel_keyboard())
+                .await
+                .map(|_| ())
+        }
+        DraftStep::PaymentConfirmed => {
+            bot.send_message(
+                chat_id,
+                "<b>Payment confirmed.</b>\nWebsite is queued.",
+            )
+            .parse_mode(ParseMode::Html)
+            .reply_markup(status_keyboard())
+            .await
+            .map(|_| ())
+        }
+    }
 }
 
 async fn show_main_menu(
@@ -2841,7 +3017,7 @@ fn create_mode_keyboard(
             "template_mode",
         )],
         vec![InlineKeyboardButton::callback(
-            format!("🤖 AI Free Creation | {} USDT", ai_creation_price_usdt),
+            format!("🤖 Free Creation | {} USDT", ai_creation_price_usdt),
             "ai_mode",
         )],
         vec![InlineKeyboardButton::callback("⬅ Back", "main")],
@@ -2909,7 +3085,7 @@ fn cancel_keyboard() -> InlineKeyboardMarkup {
 fn build_mode_label(build_mode: &BuildModeDraft) -> &'static str {
     match build_mode {
         BuildModeDraft::Template => "Template Mode",
-        BuildModeDraft::AiFree => "AI Free Creation",
+        BuildModeDraft::AiFree => "Free Creation",
     }
 }
 

@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::deployment::DeploymentResult;
 use crate::domain::{CloudflareZoneResult, DomainPurchaseResult, DomainQuote};
-use crate::models::{BuildMode, OrderType, PaymentChain, WebsiteInput};
+use crate::models::{BuildMode, Order, OrderType, PaymentChain, WebsiteInput};
 use crate::payment::{PaymentVerificationError, PaymentVerificationOutcome};
 
 pub const PAYMENT_WINDOW_MINUTES: i64 = 30;
@@ -236,53 +236,69 @@ pub async fn prepare_order_for_payment(
     Ok(())
 }
 
-pub async fn cancel_active_pending_orders_for_user(
+pub async fn has_pending_order(pool: &SqlitePool, telegram_user_id: i64) -> anyhow::Result<bool> {
+    let row = sqlx::query(
+        r#"
+        SELECT 1
+        FROM orders o
+        JOIN users u ON o.user_id = u.id
+        WHERE u.telegram_user_id = ?
+          AND o.payment_status = 'pending'
+          AND o.site_status IN ('draft', 'collecting_assets')
+        LIMIT 1
+        "#,
+    )
+    .bind(telegram_user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
+}
+
+pub async fn get_pending_order_for_user(
     pool: &SqlitePool,
-    user_id: Uuid,
-) -> anyhow::Result<u64> {
-    let mut tx = pool.begin().await?;
-
-    let quote_rows = sqlx::query(
+    telegram_user_id: i64,
+) -> anyhow::Result<Option<Order>> {
+    let row = sqlx::query(
         r#"
-        SELECT domain_quote_id
-        FROM orders
-        WHERE user_id = ?
-          AND payment_status = 'pending'
-          AND site_status IN ('draft', 'collecting_assets')
-          AND domain_quote_id IS NOT NULL
+        SELECT o.id, o.user_id, o.order_type, o.build_mode, o.template_id,
+               o.amount_usdt, o.payment_chain, o.payment_status, o.site_status,
+               o.payment_started_at, o.payment_expires_at, o.paid_at
+        FROM orders o
+        JOIN users u ON o.user_id = u.id
+        WHERE u.telegram_user_id = ?
+          AND o.payment_status = 'pending'
+          AND o.site_status IN ('draft', 'collecting_assets')
+        ORDER BY o.created_at DESC
+        LIMIT 1
         "#,
     )
-    .bind(uuid_value(user_id))
-    .fetch_all(&mut *tx)
-    .await?;
-    for row in quote_rows {
-        let quote_id = uuid_from_row(&row, "domain_quote_id")?;
-        sqlx::query(
-            "UPDATE domain_quotes SET status = 'expired', updated_at = datetime('now') WHERE id = ? AND status = 'quoted'",
-        )
-        .bind(uuid_value(quote_id))
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    let result = sqlx::query(
-        r#"
-        UPDATE orders
-        SET payment_status = 'expired',
-            site_status = 'failed',
-            payment_expires_at = COALESCE(payment_expires_at, datetime('now')),
-            updated_at = datetime('now')
-        WHERE user_id = ?
-          AND payment_status = 'pending'
-          AND site_status IN ('draft', 'collecting_assets')
-        "#,
-    )
-    .bind(uuid_value(user_id))
-    .execute(&mut *tx)
+    .bind(telegram_user_id)
+    .fetch_optional(pool)
     .await?;
 
-    tx.commit().await?;
-    Ok(result.rows_affected())
+    Ok(row.map(|r| Order {
+        id: uuid_from_row(&r, "id").unwrap_or_default(),
+        user_id: uuid_from_row(&r, "user_id").unwrap_or_default(),
+        order_type: OrderType::SiteFee,
+        build_mode: r
+            .get::<Option<&str>, _>("build_mode")
+            .and_then(|v| match v {
+                "template" => Some(BuildMode::Template),
+                "ai_free" => Some(BuildMode::AiFree),
+                _ => None,
+            }),
+        template_id: r.get("template_id"),
+        amount_usdt: Decimal::from_str_exact(r.get::<&str, _>("amount_usdt"))
+            .unwrap_or_default(),
+        payment_chain: r
+            .get::<Option<&str>, _>("payment_chain")
+            .and_then(|v| PaymentChain::from_db(v)),
+        payment_status: r.get("payment_status"),
+        site_status: r.get("site_status"),
+        payment_started_at: r.get("payment_started_at"),
+        payment_expires_at: r.get("payment_expires_at"),
+        paid_at: r.get("paid_at"),
+    }))
 }
 
 pub async fn cancel_order_for_user(
