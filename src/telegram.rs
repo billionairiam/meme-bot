@@ -44,25 +44,24 @@ const EXTERNAL_STEP_MAX_ATTEMPTS: usize = 3;
 const DRAFT_SESSION_TIMEOUT_MINUTES: i64 = db::ASSET_COLLECTION_TIMEOUT_MINUTES;
 
 const TEMPLATE_OPTIONS: [TemplateOption; 12] = [
-    TemplateOption::new("template_01", "example1.web", 30),
-    TemplateOption::new("template_02", "example2.web", 30),
-    TemplateOption::new("template_03", "example3.web", 30),
-    TemplateOption::new("template_04", "example4.web", 40),
-    TemplateOption::new("template_05", "example5.web", 40),
-    TemplateOption::new("template_06", "example6.web", 40),
-    TemplateOption::new("template_07", "example7.web", 50),
-    TemplateOption::new("template_08", "example8.web", 50),
-    TemplateOption::new("template_09", "example9.web", 50),
-    TemplateOption::new("template_10", "example10.web", 60),
-    TemplateOption::new("template_11", "example11.web", 60),
-    TemplateOption::new("template_12", "example12.web", 60),
+    TemplateOption::new("template_01", "example1.web"),
+    TemplateOption::new("template_02", "example2.web"),
+    TemplateOption::new("template_03", "example3.web"),
+    TemplateOption::new("template_04", "example4.web"),
+    TemplateOption::new("template_05", "example5.web"),
+    TemplateOption::new("template_06", "example6.web"),
+    TemplateOption::new("template_07", "example7.web"),
+    TemplateOption::new("template_08", "example8.web"),
+    TemplateOption::new("template_09", "example9.web"),
+    TemplateOption::new("template_10", "example10.web"),
+    TemplateOption::new("template_11", "example11.web"),
+    TemplateOption::new("template_12", "example12.web"),
 ];
 
 #[derive(Clone, Copy, Debug)]
 struct TemplateOption {
     id: &'static str,
     name: &'static str,
-    price_usdt: i64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -72,12 +71,8 @@ struct UiMessage {
 }
 
 impl TemplateOption {
-    const fn new(id: &'static str, name: &'static str, price_usdt: i64) -> Self {
-        Self {
-            id,
-            name,
-            price_usdt,
-        }
+    const fn new(id: &'static str, name: &'static str) -> Self {
+        Self { id, name }
     }
 }
 
@@ -100,6 +95,8 @@ pub struct TelegramUiConfig {
     pub github_owner: String,
     pub template_catalog_url: String,
     pub admin_contact: String,
+    pub template_prices_usdt: Vec<Decimal>,
+    pub ai_creation_price_usdt: Decimal,
     pub usdt_erc20_address: String,
     pub usdt_tron_address: String,
     pub usdt_sol_address: String,
@@ -142,6 +139,8 @@ impl TelegramUiConfig {
             github_owner: config.github_owner.clone(),
             template_catalog_url: config.template_catalog_url.clone(),
             admin_contact: config.admin_contact.clone(),
+            template_prices_usdt: config.template_prices_usdt.clone(),
+            ai_creation_price_usdt: config.ai_creation_price_usdt,
             usdt_erc20_address: config.usdt_erc20_address.clone(),
             usdt_tron_address: config.usdt_tron_address.clone(),
             usdt_sol_address: config.usdt_sol_address.clone(),
@@ -221,14 +220,14 @@ impl DraftStep {
 }
 
 impl OrderDraft {
-    fn new_ai() -> Self {
-        Self::new(BuildModeDraft::AiFree, Decimal::new(50, 0), None)
+    fn new_ai(price_usdt: Decimal) -> Self {
+        Self::new(BuildModeDraft::AiFree, price_usdt, None)
     }
 
-    fn new_template(template: TemplateOption) -> Self {
+    fn new_template(template: TemplateOption, price_usdt: Decimal) -> Self {
         Self::new(
             BuildModeDraft::Template,
-            Decimal::new(template.price_usdt, 0),
+            price_usdt,
             Some(template.id.to_string()),
         )
     }
@@ -342,12 +341,26 @@ async fn handle_message(
 
     if let Some(text) = msg.text() {
         if let Some(template_id) = parse_template_deep_link(text) {
-            return show_template_confirmation(&bot, msg.chat.id, template_id).await;
+            return show_template_confirmation(
+                &bot,
+                msg.chat.id,
+                template_id,
+                &config.template_prices_usdt,
+            )
+            .await;
         }
 
         match text.trim() {
             "/start" | "/help" => return show_main_menu(&bot, msg.chat.id, &config).await,
-            "/create" => return show_create_menu(&bot, msg.chat.id).await,
+            "/create" => {
+                return show_create_menu(
+                    &bot,
+                    msg.chat.id,
+                    &config.template_prices_usdt,
+                    config.ai_creation_price_usdt,
+                )
+                .await;
+            }
             "/status" => return show_status(&bot, msg.chat.id, user_id, &sessions, &pool).await,
             "/history" => return show_history(&bot, msg.chat.id, user_id, &pool).await,
             "/cancel" => {
@@ -399,8 +412,18 @@ async fn handle_callback(
 
     match query.data.as_deref() {
         Some("main") => edit_main_menu(&bot, target, &config).await,
-        Some("create") => edit_create_menu(&bot, target).await,
-        Some("template_mode") => edit_template_mode(&bot, target).await,
+        Some("create") => {
+            edit_create_menu(
+                &bot,
+                target,
+                &config.template_prices_usdt,
+                config.ai_creation_price_usdt,
+            )
+            .await
+        }
+        Some("template_mode") => {
+            edit_template_mode(&bot, target, &config.template_prices_usdt).await
+        }
         Some("ai_mode") => {
             clear_screen_keyboard(&bot, target).await?;
             let draft = match start_new_order_session(
@@ -409,7 +432,7 @@ async fn handle_callback(
                 query.from.username.as_deref(),
                 Some(query.from.first_name.as_str()),
                 query.from.last_name.as_deref(),
-                OrderDraft::new_ai(),
+                OrderDraft::new_ai(config.ai_creation_price_usdt),
             )
             .await
             {
@@ -480,7 +503,7 @@ async fn handle_callback(
         }
         Some(data) if data.starts_with("select_tpl:") => {
             let template_id = data.trim_start_matches("select_tpl:");
-            edit_template_confirmation(&bot, target, template_id).await
+            edit_template_confirmation(&bot, target, template_id, &config.template_prices_usdt).await
         }
         Some(data) if data.starts_with("confirm_tpl:") => {
             match find_template(data.trim_start_matches("confirm_tpl:")) {
@@ -492,7 +515,7 @@ async fn handle_callback(
                         query.from.username.as_deref(),
                         Some(query.from.first_name.as_str()),
                         query.from.last_name.as_deref(),
-                        OrderDraft::new_template(template),
+                        OrderDraft::new_template(template, template_price(template.id, &config.template_prices_usdt)),
                     )
                     .await
                     {
@@ -528,7 +551,7 @@ async fn handle_callback(
                         &bot,
                         target,
                         "<b>Template not found.</b>\nChoose again.",
-                        template_keyboard(),
+                        template_keyboard(&config.template_prices_usdt),
                     )
                     .await
                 }
@@ -1561,11 +1584,11 @@ fn template_mode_text() -> &'static str {
     "📦 <b>Template Mode</b>\nChoose a template."
 }
 
-fn template_confirmation_text(template: TemplateOption) -> String {
+fn template_confirmation_text(template: TemplateOption, price_usdt: Decimal) -> String {
     format!(
         "📦 <b>{}</b>\nPrice: <b>{}</b> USDT\nConfirm to continue.",
         html_escape(template.name),
-        template.price_usdt
+        price_usdt
     )
 }
 
@@ -1656,37 +1679,71 @@ async fn edit_main_menu(
     edit_screen(bot, target, main_menu_text(config), main_menu_keyboard()).await
 }
 
-async fn show_create_menu(bot: &Bot, chat_id: ChatId) -> ResponseResult<()> {
-    send_screen(bot, chat_id, create_menu_text(), create_mode_keyboard()).await
+async fn show_create_menu(
+    bot: &Bot,
+    chat_id: ChatId,
+    template_prices_usdt: &[Decimal],
+    ai_creation_price_usdt: Decimal,
+) -> ResponseResult<()> {
+    send_screen(
+        bot,
+        chat_id,
+        create_menu_text(),
+        create_mode_keyboard(template_prices_usdt, ai_creation_price_usdt),
+    )
+    .await
 }
 
-async fn edit_create_menu(bot: &Bot, target: UiMessage) -> ResponseResult<()> {
-    edit_screen(bot, target, create_menu_text(), create_mode_keyboard()).await
+async fn edit_create_menu(
+    bot: &Bot,
+    target: UiMessage,
+    template_prices_usdt: &[Decimal],
+    ai_creation_price_usdt: Decimal,
+) -> ResponseResult<()> {
+    edit_screen(
+        bot,
+        target,
+        create_menu_text(),
+        create_mode_keyboard(template_prices_usdt, ai_creation_price_usdt),
+    )
+    .await
 }
 
-async fn edit_template_mode(bot: &Bot, target: UiMessage) -> ResponseResult<()> {
-    edit_screen(bot, target, template_mode_text(), template_keyboard()).await
+async fn edit_template_mode(
+    bot: &Bot,
+    target: UiMessage,
+    template_prices_usdt: &[Decimal],
+) -> ResponseResult<()> {
+    edit_screen(
+        bot,
+        target,
+        template_mode_text(),
+        template_keyboard(template_prices_usdt),
+    )
+    .await
 }
 
 async fn show_template_confirmation(
     bot: &Bot,
     chat_id: ChatId,
     template_id: &str,
+    template_prices_usdt: &[Decimal],
 ) -> ResponseResult<()> {
     let Some(template) = find_template(template_id) else {
         return send_screen(
             bot,
             chat_id,
             "<b>Template not found.</b>\nChoose again.",
-            template_keyboard(),
+            template_keyboard(template_prices_usdt),
         )
         .await;
     };
+    let price = template_price(template_id, template_prices_usdt);
 
     send_screen(
         bot,
         chat_id,
-        template_confirmation_text(template),
+        template_confirmation_text(template, price),
         template_confirmation_keyboard(template_id),
     )
     .await
@@ -1696,21 +1753,23 @@ async fn edit_template_confirmation(
     bot: &Bot,
     target: UiMessage,
     template_id: &str,
+    template_prices_usdt: &[Decimal],
 ) -> ResponseResult<()> {
     let Some(template) = find_template(template_id) else {
         return edit_screen(
             bot,
             target,
             "<b>Template not found.</b>\nChoose again.",
-            template_keyboard(),
+            template_keyboard(template_prices_usdt),
         )
         .await;
     };
+    let price = template_price(template_id, template_prices_usdt);
 
     edit_screen(
         bot,
         target,
-        template_confirmation_text(template),
+        template_confirmation_text(template, price),
         template_confirmation_keyboard(template_id),
     )
     .await
@@ -2762,28 +2821,42 @@ fn main_menu_keyboard() -> InlineKeyboardMarkup {
     ])
 }
 
-fn create_mode_keyboard() -> InlineKeyboardMarkup {
+fn create_mode_keyboard(
+    template_prices_usdt: &[Decimal],
+    ai_creation_price_usdt: Decimal,
+) -> InlineKeyboardMarkup {
+    let (min, max) = template_prices_usdt
+        .iter()
+        .fold((Decimal::MAX, Decimal::ZERO), |(min, max), &p| {
+            (min.min(p), max.max(p))
+        });
+    let template_label = if min == max {
+        format!("📦 Template Mode | {} USDT", min)
+    } else {
+        format!("📦 Template Mode | {}-{} USDT", min, max)
+    };
     InlineKeyboardMarkup::new(vec![
         vec![InlineKeyboardButton::callback(
-            "📦 Template Mode | 30-60 USDT",
+            template_label,
             "template_mode",
         )],
         vec![InlineKeyboardButton::callback(
-            "🤖 AI Free Creation | 50 USDT",
+            format!("🤖 AI Free Creation | {} USDT", ai_creation_price_usdt),
             "ai_mode",
         )],
         vec![InlineKeyboardButton::callback("⬅ Back", "main")],
     ])
 }
 
-fn template_keyboard() -> InlineKeyboardMarkup {
+fn template_keyboard(template_prices_usdt: &[Decimal]) -> InlineKeyboardMarkup {
     let mut rows = Vec::new();
     for chunk in TEMPLATE_OPTIONS.chunks(2) {
         let mut row = Vec::new();
         for template in chunk {
             let number = template_number(template.id);
+            let price = template_price(template.id, template_prices_usdt);
             row.push(InlineKeyboardButton::callback(
-                format!("{number:02}. {} · {}U", template.name, template.price_usdt),
+                format!("{number:02}. {} · {}U", template.name, price),
                 format!("select_tpl:{}", template.id),
             ));
         }
@@ -2935,6 +3008,14 @@ fn template_number(template_id: &str) -> usize {
         .position(|template| template.id == template_id)
         .map(|index| index + 1)
         .unwrap_or(0)
+}
+
+fn template_price(template_id: &str, prices: &[Decimal]) -> Decimal {
+    let index = TEMPLATE_OPTIONS
+        .iter()
+        .position(|template| template.id == template_id)
+        .unwrap_or(0);
+    prices.get(index).copied().unwrap_or(Decimal::ZERO)
 }
 
 fn html_escape(value: &str) -> String {

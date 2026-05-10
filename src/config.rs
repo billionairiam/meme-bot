@@ -1,6 +1,7 @@
 use std::env;
 
 use anyhow::{Context, Result};
+use rust_decimal::Decimal;
 
 pub fn load_env_file(env_var_name: &str, default_path: &str) -> Result<Option<String>> {
     let path = env::var(env_var_name)
@@ -21,6 +22,8 @@ pub struct Config {
     pub telegram_required_group_id: String,
     pub template_catalog_url: String,
     pub admin_contact: String,
+    pub template_prices_usdt: Vec<Decimal>,
+    pub ai_creation_price_usdt: Decimal,
     pub usdt_erc20_address: String,
     pub usdt_tron_address: String,
     pub usdt_sol_address: String,
@@ -106,6 +109,13 @@ impl Config {
             template_catalog_url: env::var("TEMPLATE_CATALOG_URL")
                 .unwrap_or_else(|_| "https://example.com/templates".to_string()),
             admin_contact: env::var("ADMIN_CONTACT").unwrap_or_else(|_| "@admin".to_string()),
+            template_prices_usdt: parse_template_prices(
+                &env::var("TEMPLATE_PRICES_USDT").unwrap_or_default(),
+            )?,
+            ai_creation_price_usdt: env::var("AI_CREATION_PRICE_USDT")
+                .unwrap_or_else(|_| "50".to_string())
+                .parse()
+                .context("parse AI_CREATION_PRICE_USDT")?,
             usdt_erc20_address: env::var("USDT_ERC20_ADDRESS").unwrap_or_default(),
             usdt_tron_address: env::var("USDT_TRON_ADDRESS").unwrap_or_default(),
             usdt_sol_address: env::var("USDT_SOL_ADDRESS").unwrap_or_default(),
@@ -221,4 +231,37 @@ fn parse_provider(value: &str) -> Result<GenerationProviderName> {
         "codex" => Ok(GenerationProviderName::Codex),
         other => anyhow::bail!("unsupported generation provider: {other}"),
     }
+}
+
+const DEFAULT_TEMPLATE_PRICES: &[i64] = &[30, 30, 30, 40, 40, 40, 50, 50, 50, 60, 60, 60];
+
+fn parse_template_prices(value: &str) -> Result<Vec<Decimal>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_TEMPLATE_PRICES
+            .iter()
+            .map(|p| Decimal::from(*p))
+            .collect());
+    }
+    trimmed
+        .split(',')
+        .enumerate()
+        .map(|(i, part)| {
+            let part = part.trim();
+            if part.is_empty() {
+                anyhow::bail!(
+                    "TEMPLATE_PRICES_USDT position {} is empty, expected a number",
+                    i + 1
+                );
+            }
+            part.parse::<i64>()
+                .with_context(|| {
+                    format!(
+                        "parse TEMPLATE_PRICES_USDT position {}: \"{part}\"",
+                        i + 1
+                    )
+                })
+                .map(Decimal::from)
+        })
+        .collect()
 }

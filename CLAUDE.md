@@ -19,6 +19,8 @@ cargo run --bin api-server         # start API server
 cargo test                         # run all tests
 cargo test <test_name>             # run a single test (e.g. cargo test renders_wrangler_args)
 cargo test -- --nocapture          # run tests with println/output visible
+cargo clippy                       # lint
+cargo fmt --check                  # check formatting
 ```
 
 `meme-bot` loads `.env.meme-bot` by default; `api-server` loads `.env.api-server` by default. Override with `MEME_BOT_ENV_FILE` or `API_SERVER_ENV_FILE`.
@@ -40,6 +42,11 @@ cargo build-musl-release           # alias defined in .cargo/config.toml
 #   target/x86_64-unknown-linux-musl/release/meme-bot
 #   target/x86_64-unknown-linux-musl/release/api-server
 ```
+
+### Project scripts
+
+- `scripts/generate-api-key.sh` — generates a random API key via openssl for `API_SERVICE_API_KEY`.
+- `scripts/set_telegram_commands.sh` — registers the bot's slash-command menu with Telegram via `setMyCommands`.
 
 ### Telegram bot
 
@@ -95,4 +102,4 @@ Telegram user → /create → 7-step wizard → select payment chain
 - **SQLite pool is single-connection** (`max_connections(1)`). The mutex in `lock_next_job` provides an additional guard, but the single connection ensures SQLite never sees concurrent writes.
 - **API server proxy mode**: When `API_SERVICE_BASE_URL` is set, the bot uses `HttpClient*` trait impls that call the API server over HTTPS. When unset, it falls back to direct Namecheap/Cloudflare API calls — useful for single-server deployments.
 - **`NAMECHEAP_AUTO_PURCHASE_AFTER_TX` defaults to `false`** in code (`.env.meme-bot.example` suggests `true`). When `false`, paid orders pause for manual review before domain purchase and generation.
-- **SQLite schema** in `migrations/0001_init.sql`: `users`, `orders`, `websites`, `templates`, `payment_attempts`, `payment_transactions`, `generation_jobs`, `generation_attempts`, `domain_quotes`, `domain_registrations`, `deployment_attempts`.
+- **SQLite schema** lives in `migrations/` (4 files). The initial schema (`0001_init.sql`) creates all core tables: `users`, `orders`, `websites`, `templates`, `payment_attempts`, `payment_transactions`, `generation_jobs`, `generation_attempts`, `domain_quotes`, `domain_registrations`, `deployment_attempts`. Subsequent migrations add columns (e.g. `payment_started_at`, `domain_purchase` hardening, `order_cancellation`). Both binaries run SQLx migrations automatically on startup via `sqlx::migrate!()`.
