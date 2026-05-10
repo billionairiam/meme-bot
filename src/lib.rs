@@ -4,6 +4,7 @@ pub mod db;
 pub mod deployment;
 pub mod domain;
 pub mod generation;
+pub mod logging;
 pub mod models;
 pub mod payment;
 pub mod queue;

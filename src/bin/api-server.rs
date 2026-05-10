@@ -15,6 +15,7 @@ use meme_bot::{
         DomainPurchaseRequest, DomainPurchaseResult, DomainQuote, DomainQuoteRequest,
         DomainRegistrar, NamecheapDnsProvisioner, NamecheapRegistrar,
     },
+    logging::init_logging,
 };
 use serde::Deserialize;
 use tokio::time::sleep;
@@ -38,11 +39,7 @@ struct AppState {
 async fn main() {
     let env_file =
         load_env_file("API_SERVER_ENV_FILE", ".env.api-server").expect("load api-server env file");
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    let _log_guard = init_logging("api-server");
     if let Some(path) = env_file {
         info!(env_file = %path, "loaded api-server env file");
     } else {
