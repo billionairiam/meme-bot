@@ -64,7 +64,7 @@ Both compile from the same crate (`src/lib.rs`). The `meme-bot` binary runs the 
 4. Queue worker picks up job (mutex-guarded query) → runs AI agent → pushes generated site to GitHub → creates/binds Cloudflare Pages
 5. User checks `/status` → reads order status from SQLite
 
-All state is persisted in SQLite. If the server restarts, orders already written to DB survive. In-progress wizard steps (before payment chain selection) are lost, but no payment has occurred at that point.
+Users are limited to one unpaid order at a time. `/create` is blocked when a pending order exists; use `/continue` to resume it (the session is reconstructed from the DB if the in-memory state was lost on restart), or `/cancel` to give up. `/status` checks queue position; `/history` lists paid orders.
 
 ## Quick Start
 
