@@ -21,6 +21,8 @@ pub struct Config {
     pub telegram_bot_token: String,
     pub telegram_required_group_id: String,
     pub template_catalog_url: String,
+    pub template_preview_domain: String,
+    pub template_preview_base_url: String,
     pub admin_contact: String,
     pub template_prices_usdt: Vec<Decimal>,
     pub ai_creation_price_usdt: Decimal,
@@ -112,6 +114,10 @@ impl Config {
                 .unwrap_or_else(|_| "@MeMe_Web_Support".to_string()),
             template_catalog_url: env::var("TEMPLATE_CATALOG_URL")
                 .unwrap_or_else(|_| "https://example.com/templates".to_string()),
+            template_preview_domain: env::var("TEMPLATE_PREVIEW_DOMAIN")
+                .unwrap_or_else(|_| "web".to_string()),
+            template_preview_base_url: env::var("TEMPLATE_PREVIEW_BASE_URL")
+                .unwrap_or_else(|_| "https://memewebs.xyz".to_string()),
             admin_contact: env::var("ADMIN_CONTACT").unwrap_or_else(|_| "@admin".to_string()),
             template_prices_usdt: parse_template_prices(
                 &env::var("TEMPLATE_PRICES_USDT").unwrap_or_default(),

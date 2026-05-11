@@ -43,25 +43,11 @@ type Sessions = Arc<Mutex<HashMap<UserId, OrderDraft>>>;
 const EXTERNAL_STEP_MAX_ATTEMPTS: usize = 3;
 const DRAFT_SESSION_TIMEOUT_MINUTES: i64 = db::ASSET_COLLECTION_TIMEOUT_MINUTES;
 
-const TEMPLATE_OPTIONS: [TemplateOption; 12] = [
-    TemplateOption::new("template_01", "example1.web"),
-    TemplateOption::new("template_02", "example2.web"),
-    TemplateOption::new("template_03", "example3.web"),
-    TemplateOption::new("template_04", "example4.web"),
-    TemplateOption::new("template_05", "example5.web"),
-    TemplateOption::new("template_06", "example6.web"),
-    TemplateOption::new("template_07", "example7.web"),
-    TemplateOption::new("template_08", "example8.web"),
-    TemplateOption::new("template_09", "example9.web"),
-    TemplateOption::new("template_10", "example10.web"),
-    TemplateOption::new("template_11", "example11.web"),
-    TemplateOption::new("template_12", "example12.web"),
-];
-
-#[derive(Clone, Copy, Debug)]
-struct TemplateOption {
-    id: &'static str,
-    name: &'static str,
+#[derive(Clone, Debug)]
+pub struct TemplateOption {
+    id: String,
+    name: String,
+    preview_url: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -71,9 +57,19 @@ struct UiMessage {
 }
 
 impl TemplateOption {
-    const fn new(id: &'static str, name: &'static str) -> Self {
-        Self { id, name }
+    fn new(template_number: usize, preview_domain: &str, preview_base_url: &str) -> Self {
+        Self {
+            id: format!("template_{template_number:02}"),
+            name: format!("{template_number:02}.{preview_domain}"),
+            preview_url: format!("{preview_base_url}/{template_number:02}"),
+        }
     }
+}
+
+fn build_template_options(preview_domain: &str, preview_base_url: &str) -> Vec<TemplateOption> {
+    (1..=12)
+        .map(|n| TemplateOption::new(n, preview_domain, preview_base_url))
+        .collect()
 }
 
 #[derive(Clone)]
@@ -94,6 +90,8 @@ pub struct TelegramUiConfig {
     pub api_service_api_key: Option<String>,
     pub github_owner: String,
     pub template_catalog_url: String,
+    pub template_preview_domain: String,
+    pub template_options: Vec<TemplateOption>,
     pub admin_contact: String,
     pub template_prices_usdt: Vec<Decimal>,
     pub ai_creation_price_usdt: Decimal,
@@ -138,6 +136,8 @@ impl TelegramUiConfig {
             api_service_api_key: config.api_service_api_key.clone(),
             github_owner: config.github_owner.clone(),
             template_catalog_url: config.template_catalog_url.clone(),
+            template_preview_domain: config.template_preview_domain.clone(),
+            template_options: build_template_options(&config.template_preview_domain, &config.template_preview_base_url),
             admin_contact: config.admin_contact.clone(),
             template_prices_usdt: config.template_prices_usdt.clone(),
             ai_creation_price_usdt: config.ai_creation_price_usdt,
@@ -345,7 +345,7 @@ async fn handle_message(
                 &bot,
                 msg.chat.id,
                 template_id,
-                &config.template_prices_usdt,
+                &config,
             )
             .await;
         }
@@ -428,7 +428,7 @@ async fn handle_callback(
             .await
         }
         Some("template_mode") => {
-            edit_template_mode(&bot, target, &config.template_prices_usdt).await
+            edit_template_mode(&bot, target, &config).await
         }
         Some("ai_mode") => {
             clear_screen_keyboard(&bot, target).await?;
@@ -513,10 +513,10 @@ async fn handle_callback(
         }
         Some(data) if data.starts_with("select_tpl:") => {
             let template_id = data.trim_start_matches("select_tpl:");
-            edit_template_confirmation(&bot, target, template_id, &config.template_prices_usdt).await
+            edit_template_confirmation(&bot, target, template_id, &config).await
         }
         Some(data) if data.starts_with("confirm_tpl:") => {
-            match find_template(data.trim_start_matches("confirm_tpl:")) {
+            match find_template(&config.template_options, data.trim_start_matches("confirm_tpl:")) {
                 Some(template) => {
                     clear_screen_keyboard(&bot, target).await?;
                     let draft = match start_new_order_session(
@@ -525,7 +525,7 @@ async fn handle_callback(
                         query.from.username.as_deref(),
                         Some(query.from.first_name.as_str()),
                         query.from.last_name.as_deref(),
-                        OrderDraft::new_template(template, template_price(template.id, &config.template_prices_usdt)),
+                        OrderDraft::new_template(template.clone(), template_price(&config.template_options, &template.id, &config.template_prices_usdt)),
                     )
                     .await
                     {
@@ -566,7 +566,7 @@ async fn handle_callback(
                         &bot,
                         target,
                         "<b>Template not found.</b>\nChoose again.",
-                        template_keyboard(&config.template_prices_usdt),
+                        template_keyboard(&config.template_options, &config.template_prices_usdt),
                     )
                     .await
                 }
@@ -1595,11 +1595,12 @@ fn template_mode_text() -> &'static str {
     "📦 <b>Template Mode</b>\nChoose a template."
 }
 
-fn template_confirmation_text(template: TemplateOption, price_usdt: Decimal) -> String {
+fn template_confirmation_text(template: &TemplateOption, price_usdt: Decimal) -> String {
     format!(
-        "📦 <b>{}</b>\nPrice: <b>{}</b> USDT\nConfirm to continue.",
-        html_escape(template.name),
-        price_usdt
+        "📦 <b>{}</b>\nPrice: <b>{}</b> USDT\n🔗 <a href=\"{}\">Preview template</a>",
+        html_escape(&template.name),
+        price_usdt,
+        &template.preview_url,
     )
 }
 
@@ -1888,13 +1889,13 @@ async fn edit_create_menu(
 async fn edit_template_mode(
     bot: &Bot,
     target: UiMessage,
-    template_prices_usdt: &[Decimal],
+    config: &TelegramUiConfig,
 ) -> ResponseResult<()> {
     edit_screen(
         bot,
         target,
         template_mode_text(),
-        template_keyboard(template_prices_usdt),
+        template_keyboard(&config.template_options, &config.template_prices_usdt),
     )
     .await
 }
@@ -1903,24 +1904,24 @@ async fn show_template_confirmation(
     bot: &Bot,
     chat_id: ChatId,
     template_id: &str,
-    template_prices_usdt: &[Decimal],
+    config: &TelegramUiConfig,
 ) -> ResponseResult<()> {
-    let Some(template) = find_template(template_id) else {
+    let Some(template) = find_template(&config.template_options, template_id) else {
         return send_screen(
             bot,
             chat_id,
             "<b>Template not found.</b>\nChoose again.",
-            template_keyboard(template_prices_usdt),
+            template_keyboard(&config.template_options, &config.template_prices_usdt),
         )
         .await;
     };
-    let price = template_price(template_id, template_prices_usdt);
+    let price = template_price(&config.template_options, template_id, &config.template_prices_usdt);
 
     send_screen(
         bot,
         chat_id,
-        template_confirmation_text(template, price),
-        template_confirmation_keyboard(template_id),
+        template_confirmation_text(&template, price),
+        template_confirmation_keyboard(template_id, &template.preview_url),
     )
     .await
 }
@@ -1929,24 +1930,24 @@ async fn edit_template_confirmation(
     bot: &Bot,
     target: UiMessage,
     template_id: &str,
-    template_prices_usdt: &[Decimal],
+    config: &TelegramUiConfig,
 ) -> ResponseResult<()> {
-    let Some(template) = find_template(template_id) else {
+    let Some(template) = find_template(&config.template_options, template_id) else {
         return edit_screen(
             bot,
             target,
             "<b>Template not found.</b>\nChoose again.",
-            template_keyboard(template_prices_usdt),
+            template_keyboard(&config.template_options, &config.template_prices_usdt),
         )
         .await;
     };
-    let price = template_price(template_id, template_prices_usdt);
+    let price = template_price(&config.template_options, template_id, &config.template_prices_usdt);
 
     edit_screen(
         bot,
         target,
-        template_confirmation_text(template, price),
-        template_confirmation_keyboard(template_id),
+        template_confirmation_text(&template, price),
+        template_confirmation_keyboard(template_id, &template.preview_url),
     )
     .await
 }
@@ -3024,13 +3025,13 @@ fn create_mode_keyboard(
     ])
 }
 
-fn template_keyboard(template_prices_usdt: &[Decimal]) -> InlineKeyboardMarkup {
+fn template_keyboard(options: &[TemplateOption], prices: &[Decimal]) -> InlineKeyboardMarkup {
     let mut rows = Vec::new();
-    for chunk in TEMPLATE_OPTIONS.chunks(2) {
+    for chunk in options.chunks(2) {
         let mut row = Vec::new();
         for template in chunk {
-            let number = template_number(template.id);
-            let price = template_price(template.id, template_prices_usdt);
+            let number = template_number(options, &template.id);
+            let price = template_price(options, &template.id, prices);
             row.push(InlineKeyboardButton::callback(
                 format!("{number:02}. {} · {}U", template.name, price),
                 format!("select_tpl:{}", template.id),
@@ -3042,11 +3043,15 @@ fn template_keyboard(template_prices_usdt: &[Decimal]) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(rows)
 }
 
-fn template_confirmation_keyboard(template_id: &str) -> InlineKeyboardMarkup {
+fn template_confirmation_keyboard(template_id: &str, preview_url: &str) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![InlineKeyboardButton::callback(
             "✅ Confirm Template",
             format!("confirm_tpl:{template_id}"),
+        )],
+        vec![InlineKeyboardButton::url(
+            "🔗 Preview Template",
+            url::Url::parse(preview_url).expect("valid preview url"),
         )],
         vec![InlineKeyboardButton::callback(
             "📦 Choose Another",
@@ -3171,23 +3176,23 @@ fn configured_proxy() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn find_template(template_id: &str) -> Option<TemplateOption> {
-    TEMPLATE_OPTIONS
+fn find_template(options: &[TemplateOption], template_id: &str) -> Option<TemplateOption> {
+    options
         .iter()
-        .copied()
         .find(|template| template.id == template_id)
+        .cloned()
 }
 
-fn template_number(template_id: &str) -> usize {
-    TEMPLATE_OPTIONS
+fn template_number(options: &[TemplateOption], template_id: &str) -> usize {
+    options
         .iter()
         .position(|template| template.id == template_id)
         .map(|index| index + 1)
         .unwrap_or(0)
 }
 
-fn template_price(template_id: &str, prices: &[Decimal]) -> Decimal {
-    let index = TEMPLATE_OPTIONS
+fn template_price(options: &[TemplateOption], template_id: &str, prices: &[Decimal]) -> Decimal {
+    let index = options
         .iter()
         .position(|template| template.id == template_id)
         .unwrap_or(0);
