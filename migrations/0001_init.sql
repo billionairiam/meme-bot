@@ -18,7 +18,7 @@ CREATE TABLE templates (
     name TEXT NOT NULL,
     local_path TEXT NOT NULL,
     preview_url TEXT,
-    price_tier TEXT NOT NULL CHECK (price_tier IN ('30', '40', '50', '60')),
+    price_tier TEXT NOT NULL CHECK (CAST(price_tier AS REAL) > 0),
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))

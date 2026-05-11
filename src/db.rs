@@ -488,7 +488,7 @@ pub async fn mark_order_paid(
         "#,
     )
     .bind(chain.as_str())
-    .bind(tx_hash)
+    .bind(canonical_tx_hash(chain, tx_hash))
     .bind(uuid_value(order_id))
     .execute(pool)
     .await?;
@@ -587,7 +587,7 @@ pub async fn record_payment_attempt(
     .bind(uuid_value(order_id))
     .bind(uuid_value(user_id))
     .bind(chain.as_str())
-    .bind(tx_hash)
+    .bind(canonical_tx_hash(chain, tx_hash))
     .bind(status)
     .bind(failure_reason)
     .bind(observed_amount)
