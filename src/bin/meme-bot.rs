@@ -5,7 +5,8 @@ use meme_bot::app::App;
 use meme_bot::config::{Config, load_env_file};
 use meme_bot::logging::init_logging;
 use meme_bot::telegram::run_bot;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use std::str::FromStr;
 use teloxide::{prelude::*, types::ParseMode};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -26,9 +27,12 @@ async fn main() -> anyhow::Result<()> {
         .database_url
         .as_deref()
         .context("DATABASE_URL is required")?;
+    let connect_opts = SqliteConnectOptions::from_str(database_url)?
+        .pragma("foreign_keys", "ON")
+        .create_if_missing(true);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
-        .connect(database_url)
+        .connect_with(connect_opts)
         .await
         .context("connect sqlite")?;
 

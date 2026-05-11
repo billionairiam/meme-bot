@@ -29,13 +29,14 @@ CREATE TABLE orders (
     user_id TEXT NOT NULL REFERENCES users(id),
     order_type TEXT NOT NULL CHECK (order_type IN ('site_fee', 'domain_fee')),
     build_mode TEXT CHECK (build_mode IN ('template', 'ai_free')),
-    template_id TEXT,
+    template_id TEXT REFERENCES templates(template_id),
     amount_usdt TEXT NOT NULL CHECK (CAST(amount_usdt AS REAL) > 0),
     payment_chain TEXT CHECK (payment_chain IN ('erc20', 'tron', 'sol')),
     payment_status TEXT NOT NULL DEFAULT 'pending' CHECK (payment_status IN ('pending', 'paid', 'expired', 'failed')),
     site_status TEXT NOT NULL DEFAULT 'draft' CHECK (site_status IN ('draft', 'collecting_assets', 'queued', 'generating', 'deploying', 'live', 'needs_manual_review', 'failed')),
     tx_hash TEXT,
     payment_expires_at TEXT,
+    payment_started_at TEXT,
     paid_at TEXT,
     domain_quote_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -111,7 +112,7 @@ CREATE TABLE generation_jobs (
 
 CREATE TABLE generation_attempts (
     id TEXT PRIMARY KEY,
-    site_order_id TEXT NOT NULL REFERENCES orders(id),
+    order_id TEXT NOT NULL REFERENCES orders(id),
     provider_name TEXT NOT NULL,
     attempt_no INTEGER NOT NULL,
     result TEXT NOT NULL CHECK (result IN ('succeeded', 'failed')),
@@ -146,6 +147,7 @@ CREATE TABLE domain_registrations (
     cloudflare_zone_id TEXT,
     nameserver_status TEXT NOT NULL DEFAULT 'pending' CHECK (nameserver_status IN ('pending', 'updated', 'failed')),
     registration_status TEXT NOT NULL DEFAULT 'pending' CHECK (registration_status IN ('pending', 'registered', 'failed', 'needs_manual_review')),
+    charged_amount_usd TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -162,5 +164,8 @@ CREATE TABLE deployment_attempts (
 
 CREATE INDEX orders_user_id_idx ON orders(user_id);
 CREATE INDEX orders_payment_status_idx ON orders(payment_status);
+CREATE UNIQUE INDEX orders_domain_quote_id_unique_idx
+    ON orders(domain_quote_id)
+    WHERE domain_quote_id IS NOT NULL;
 CREATE INDEX generation_jobs_status_queued_at_idx ON generation_jobs(status, queued_at);
 CREATE INDEX payment_attempts_order_id_idx ON payment_attempts(order_id);

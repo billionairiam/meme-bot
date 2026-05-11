@@ -54,7 +54,7 @@ pub async fn normalize_sqlite_uuid_storage(pool: &SqlitePool) -> anyhow::Result<
         ("generation_jobs", "order_id"),
         ("generation_jobs", "website_id"),
         ("generation_attempts", "id"),
-        ("generation_attempts", "site_order_id"),
+        ("generation_attempts", "order_id"),
         ("domain_registrations", "id"),
         ("domain_registrations", "domain_quote_id"),
         ("domain_quotes", "id"),
@@ -1462,6 +1462,11 @@ mod tests {
         let user_id = upsert_user(&pool, 202, Some("ma"), None, None, true)
             .await
             .unwrap();
+        sqlx::query("INSERT INTO templates (id, template_id, name, local_path, price_tier) VALUES (?, 'template_01', 'Test', './test', '30')")
+            .bind(uuid_value(Uuid::new_v4()))
+            .execute(&pool)
+            .await
+            .unwrap();
         let order_id = create_site_order(
             &pool,
             user_id,
@@ -1512,6 +1517,11 @@ mod tests {
             .await
             .unwrap();
 
+        sqlx::query("INSERT INTO templates (id, template_id, name, local_path, price_tier) VALUES (?, 'template_01', 'Test', './test', '30')")
+            .bind(uuid_value(Uuid::new_v4()))
+            .execute(&pool)
+            .await
+            .unwrap();
         let unpaid_order_id = create_site_order(
             &pool,
             user_id,
