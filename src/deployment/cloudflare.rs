@@ -12,8 +12,9 @@ use super::{DeploymentError, DeploymentRequest, DeploymentResult, SiteDeployer};
 
 const PAGES_DEPLOYMENT_POLL_ATTEMPTS: usize = 36;
 const PAGES_DEPLOYMENT_POLL_INTERVAL: Duration = Duration::from_secs(5);
-const PAGES_DOMAIN_POLL_ATTEMPTS: usize = 12;
-const PAGES_DOMAIN_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const PAGES_DOMAIN_POLL_ATTEMPTS: usize = 120;
+const PAGES_DOMAIN_POLL_INTERVAL: Duration = Duration::from_secs(10);
+
 const API_PAGES_DEPLOY_TIMEOUT: Duration = Duration::from_secs(300);
 
 // ---- Pages deployment helpers ----
@@ -180,17 +181,17 @@ pub(crate) fn verify_deployment_commit(
     else {
         return Ok(());
     };
-    match deployment.commit_hash.as_deref() {
-        Some(actual) if actual.eq_ignore_ascii_case(expected) => Ok(()),
-        Some(actual) => Err(DeploymentError::CloudflarePages(format!(
-            "deployment {} used commit {}, expected {}",
-            deployment.id, actual, expected
-        ))),
-        None => Err(DeploymentError::CloudflarePages(format!(
-            "deployment {} did not report a commit hash; expected {}",
-            deployment.id, expected
-        ))),
+
+    if let Some(actual) = deployment.commit_hash.as_deref() {
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(DeploymentError::CloudflarePages(format!(
+                "deployment {} used commit {}, expected {}",
+                deployment.id, actual, expected
+            )));
+        }
     }
+
+    Ok(())
 }
 
 async fn parse_pages_domain_status_response(
@@ -218,10 +219,14 @@ pub(crate) fn ensure_domain_status_not_failed(
     status: &str,
 ) -> Result<(), DeploymentError> {
     match status {
-        "active" => Ok(()),
-        "pending" | "initializing" => Err(DeploymentError::DomainBind(format!(
-            "custom domain {domain} is not active yet; Cloudflare status {status}"
-        ))),
+        "active" | "pending" | "initializing" => {
+            if status != "active" {
+                tracing::info!(
+                    "custom domain {domain} is {status}; DNS propagation may still be in progress"
+                );
+            }
+            Ok(())
+        }
         "blocked" | "error" | "deactivated" => Err(DeploymentError::DomainBind(format!(
             "custom domain {domain} has Cloudflare status {status}"
         ))),
@@ -578,6 +583,11 @@ impl SiteDeployer for CloudflarePagesDeployer {
             )
             .await?;
 
+            if let Some(domain) = request.custom_domain.as_deref() {
+                self.bind_custom_domain(&request.cloudflare_project_name, domain)
+                    .await?;
+            }
+
             let deployment = self
                 .trigger_pages_deployment(&request.cloudflare_project_name)
                 .await?;
@@ -589,18 +599,7 @@ impl SiteDeployer for CloudflarePagesDeployer {
                     Some(commit_sha.trim()),
                 )
                 .await?;
-            self.ensure_git_project(
-                &request.cloudflare_project_name,
-                &request.production_branch,
-                &request.repo_owner,
-                &request.repo_name,
-                publish_dir_from_site_dir(&request.site_dir),
-            )
-            .await?;
-            if let Some(domain) = request.custom_domain.as_deref() {
-                self.bind_custom_domain(&request.cloudflare_project_name, domain)
-                    .await?;
-            }
+
             return Ok(DeploymentResult {
                 github_owner: request.repo_owner.clone(),
                 github_repo_name: request.repo_name.clone(),

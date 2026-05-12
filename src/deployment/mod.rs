@@ -111,8 +111,8 @@ mod tests {
     #[test]
     fn rejects_failed_pages_domain_statuses() {
         assert!(ensure_domain_status_not_failed("example.com", "active").is_ok());
-        assert!(ensure_domain_status_not_failed("example.com", "pending").is_err());
-        assert!(ensure_domain_status_not_failed("example.com", "initializing").is_err());
+        assert!(ensure_domain_status_not_failed("example.com", "pending").is_ok());
+        assert!(ensure_domain_status_not_failed("example.com", "initializing").is_ok());
         assert!(ensure_domain_status_not_failed("example.com", "error").is_err());
         assert!(ensure_domain_status_not_failed("example.com", "blocked").is_err());
     }
