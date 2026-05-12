@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::{config::GenerationProviderName, models::WebsiteInput};
 
-const AGENT_PROMPT_FILE_NAME: &str = "agent-promt.md";
+const AGENT_PROMPT_FILE_NAME: &str = "agent-prompt.md";
 
 #[derive(Clone, Debug)]
 pub struct SiteGenerationRequest {

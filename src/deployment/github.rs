@@ -1,46 +1,32 @@
-use std::{fs, path::Path, process::Stdio};
+use std::{path::Path, process::Stdio};
 
 use reqwest::{Client, StatusCode};
 use serde_json::json;
 use tokio::process::Command;
+use tokio::fs;
 
 use super::{DeploymentError, DeploymentRequest};
 
 // ---- Git helpers ----
 
-pub(crate) async fn run_git(dir: impl AsRef<Path>, args: &[&str]) -> Result<(), DeploymentError> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|error| DeploymentError::GitPush(error.to_string()))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(DeploymentError::GitPush(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ))
-    }
-}
-
-pub(crate) async fn run_git_with_env(
+pub(crate) async fn run_git(
     dir: impl AsRef<Path>,
     args: &[&str],
     envs: &[(&str, String)],
 ) -> Result<(), DeploymentError> {
     let mut command = Command::new("git");
+
     command
         .args(args)
         .current_dir(dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
     for (key, value) in envs {
         command.env(key, value);
     }
+
     let output = command
         .output()
         .await
@@ -49,33 +35,16 @@ pub(crate) async fn run_git_with_env(
     if output.status.success() {
         Ok(())
     } else {
-        Err(DeploymentError::GitPush(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ))
-    }
-}
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
 
-pub(crate) async fn run_git_allow_nothing_to_commit(
-    dir: impl AsRef<Path>,
-    args: &[&str],
-) -> Result<(), DeploymentError> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|error| DeploymentError::GitPush(error.to_string()))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("nothing to commit") {
-        Ok(())
-    } else {
-        Err(DeploymentError::GitPush(stderr.to_string()))
+        Err(DeploymentError::GitPush(format!(
+            "git {:?} failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            args,
+            output.status.code(),
+            stdout,
+            stderr,
+        )))
     }
 }
 
@@ -215,29 +184,29 @@ pub(crate) async fn push_site_to_github(
         request.repo_owner, request.repo_name
     );
 
-    run_git(&request.site_dir, &["init"]).await?;
+    run_git(&request.site_dir, &["init"], &[]).await?;
     run_git(
         &request.site_dir,
-        &["config", "user.email", "bot@mem-bot.local"],
-    )
+        &["config", "user.email", "bot@mem-bot.local"], &[])
     .await?;
-    run_git(&request.site_dir, &["config", "user.name", "Meme Bot"]).await?;
+    run_git(&request.site_dir, &["config", "user.name", "Meme Bot"], &[]).await?;
     run_git(
         &request.site_dir,
-        &["checkout", "-B", &request.production_branch],
+        &["checkout", "-B", &request.production_branch], &[]
     )
     .await?;
     ensure_site_gitignore(&request.site_dir).await?;
-    run_git(&request.site_dir, &["add", "."]).await?;
-    run_git_allow_nothing_to_commit(
+    run_git(&request.site_dir, &["add", "."], &[]).await?;
+    run_git(
         &request.site_dir,
         &["commit", "-m", "Deploy generated website"],
+        &[],
     )
     .await?;
-    let _ = run_git(&request.site_dir, &["remote", "remove", "origin"]).await;
+    let _ = run_git(&request.site_dir, &["remote", "remove", "origin"], &[]).await;
     let auth_header = format!("AUTHORIZATION: bearer {}", request.github_token);
     let refspec = format!("HEAD:{}", request.production_branch);
-    run_git_with_env(
+    run_git(
         &request.site_dir,
         &["push", &repo_url, &refspec],
         &[
@@ -252,9 +221,9 @@ pub(crate) async fn push_site_to_github(
     .await
 }
 
-async fn ensure_site_gitignore(site_dir: &str) -> Result<(), DeploymentError> {
-    let path = Path::new(site_dir).join(".gitignore");
-    let mut existing = match fs::read_to_string(&path) {
+async fn ensure_site_gitignore(site_dir: impl AsRef<Path>) -> Result<(), DeploymentError> {
+    let path = site_dir.as_ref().join(".gitignore");
+    let mut existing = match fs::read_to_string(&path).await {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => {
@@ -265,7 +234,7 @@ async fn ensure_site_gitignore(site_dir: &str) -> Result<(), DeploymentError> {
     };
 
     let mut changed = false;
-    for entry in ["agent_prompt.md", "agent-promt.md", ".agent_done.json"] {
+    for entry in ["agent-prompt.md", ".agent_done.json"] {
         if !existing.lines().any(|line| line.trim() == entry) {
             if !existing.is_empty() && !existing.ends_with('\n') {
                 existing.push('\n');
@@ -277,10 +246,9 @@ async fn ensure_site_gitignore(site_dir: &str) -> Result<(), DeploymentError> {
     }
 
     if changed {
-        fs::write(&path, existing).map_err(|error| {
+        fs::write(&path, existing).await.map_err(|error| {
             DeploymentError::GitPush(format!("write generated site .gitignore failed: {error}"))
         })?;
     }
     Ok(())
 }
-
