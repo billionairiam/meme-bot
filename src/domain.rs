@@ -91,13 +91,15 @@ pub trait DomainRegistrar: Send + Sync {
     ) -> Result<DomainPurchaseResult, DomainError>;
 }
 
-pub struct NamecheapRegistrar {
+// ---- Shared Namecheap API transport ----
+
+struct NamecheapApiClient {
     config: NamecheapConfig,
     client: Client,
 }
 
-impl NamecheapRegistrar {
-    pub fn new(config: NamecheapConfig) -> Self {
+impl NamecheapApiClient {
+    fn new(config: NamecheapConfig) -> Self {
         Self {
             config,
             client: Client::new(),
@@ -110,14 +112,6 @@ impl NamecheapRegistrar {
         } else {
             NAMECHEAP_PRODUCTION_URL
         }
-    }
-
-    fn tld_for(domain: &str) -> Result<String, DomainError> {
-        domain
-            .rsplit_once('.')
-            .map(|(_, tld)| tld.to_ascii_lowercase())
-            .filter(|tld| !tld.is_empty())
-            .ok_or(DomainError::UnsupportedTld)
     }
 
     fn validate_api_config(&self) -> Result<(), DomainError> {
@@ -138,34 +132,10 @@ impl NamecheapRegistrar {
         }
     }
 
-    fn validate_contact_config(&self) -> Result<(), DomainError> {
-        let contact = &self.config.contact;
-        let missing = [
-            ("NAMECHEAP_CONTACT_FIRST_NAME", &contact.first_name),
-            ("NAMECHEAP_CONTACT_LAST_NAME", &contact.last_name),
-            ("NAMECHEAP_CONTACT_ADDRESS1", &contact.address1),
-            ("NAMECHEAP_CONTACT_CITY", &contact.city),
-            ("NAMECHEAP_CONTACT_STATE", &contact.state_province),
-            ("NAMECHEAP_CONTACT_POSTAL_CODE", &contact.postal_code),
-            ("NAMECHEAP_CONTACT_COUNTRY", &contact.country),
-            ("NAMECHEAP_CONTACT_PHONE", &contact.phone),
-            ("NAMECHEAP_CONTACT_EMAIL", &contact.email),
-        ]
-        .iter()
-        .filter_map(|(name, value)| value.trim().is_empty().then_some(*name))
-        .collect::<Vec<_>>();
-
-        if missing.is_empty() {
-            Ok(())
-        } else {
-            Err(DomainError::MissingConfig(missing.join(", ")))
-        }
-    }
-
-    async fn call_namecheap(
+    async fn call(
         &self,
         command: &str,
-        extra_params: Vec<(String, String)>,
+        extra_params: &[(String, String)],
     ) -> Result<String, DomainError> {
         self.validate_api_config()?;
 
@@ -176,7 +146,7 @@ impl NamecheapRegistrar {
             ("ClientIp".to_string(), self.config.client_ip.clone()),
             ("Command".to_string(), command.to_string()),
         ];
-        params.extend(extra_params);
+        params.extend_from_slice(extra_params);
 
         let response = self
             .client
@@ -202,12 +172,59 @@ impl NamecheapRegistrar {
 
         Ok(body)
     }
+}
+
+// ---- NamecheapRegistrar ----
+
+pub struct NamecheapRegistrar {
+    api: NamecheapApiClient,
+}
+
+impl NamecheapRegistrar {
+    pub fn new(config: NamecheapConfig) -> Self {
+        Self {
+            api: NamecheapApiClient::new(config),
+        }
+    }
+
+    fn tld_for(domain: &str) -> Result<String, DomainError> {
+        domain
+            .rsplit_once('.')
+            .map(|(_, tld)| tld.to_ascii_lowercase())
+            .filter(|tld| !tld.is_empty())
+            .ok_or(DomainError::UnsupportedTld)
+    }
+
+    fn validate_contact_config(&self) -> Result<(), DomainError> {
+        let contact = &self.api.config.contact;
+        let missing = [
+            ("NAMECHEAP_CONTACT_FIRST_NAME", &contact.first_name),
+            ("NAMECHEAP_CONTACT_LAST_NAME", &contact.last_name),
+            ("NAMECHEAP_CONTACT_ADDRESS1", &contact.address1),
+            ("NAMECHEAP_CONTACT_CITY", &contact.city),
+            ("NAMECHEAP_CONTACT_STATE", &contact.state_province),
+            ("NAMECHEAP_CONTACT_POSTAL_CODE", &contact.postal_code),
+            ("NAMECHEAP_CONTACT_COUNTRY", &contact.country),
+            ("NAMECHEAP_CONTACT_PHONE", &contact.phone),
+            ("NAMECHEAP_CONTACT_EMAIL", &contact.email),
+        ]
+        .iter()
+        .filter_map(|(name, value)| value.trim().is_empty().then_some(*name))
+        .collect::<Vec<_>>();
+
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(DomainError::MissingConfig(missing.join(", ")))
+        }
+    }
 
     async fn check_domain(&self, domain: &str) -> Result<NamecheapCheckResult, DomainError> {
         let xml = self
-            .call_namecheap(
+            .api
+            .call(
                 "namecheap.domains.check",
-                vec![("DomainList".to_string(), domain.to_string())],
+                &[("DomainList".to_string(), domain.to_string())],
             )
             .await?;
         let attrs = first_tag_attrs(&xml, "DomainCheckResult")
@@ -223,9 +240,10 @@ impl NamecheapRegistrar {
 
     async fn account_owns_domain(&self, domain: &str) -> Result<bool, DomainError> {
         match self
-            .call_namecheap(
+            .api
+            .call(
                 "namecheap.domains.getInfo",
-                vec![("DomainName".to_string(), domain.to_string())],
+                &[("DomainName".to_string(), domain.to_string())],
             )
             .await
         {
@@ -253,9 +271,10 @@ impl NamecheapRegistrar {
 
     async fn registration_price(&self, tld: &str, years: i32) -> Result<Decimal, DomainError> {
         let xml = self
-            .call_namecheap(
+            .api
+            .call(
                 "namecheap.users.getPricing",
-                vec![
+                &[
                     ("ProductType".to_string(), "DOMAIN".to_string()),
                     ("ProductCategory".to_string(), "DOMAINS".to_string()),
                     ("ActionName".to_string(), "REGISTER".to_string()),
@@ -268,7 +287,7 @@ impl NamecheapRegistrar {
     }
 
     fn create_contact_params(&self) -> Vec<(String, String)> {
-        let contact = &self.config.contact;
+        let contact = &self.api.config.contact;
         let mut params = Vec::new();
         append_contact_params(&mut params, "Registrant", contact);
         append_contact_params(&mut params, "Admin", contact);
@@ -348,7 +367,8 @@ impl DomainRegistrar for NamecheapRegistrar {
         params.extend(self.create_contact_params());
 
         let xml = self
-            .call_namecheap("namecheap.domains.create", params)
+            .api
+            .call("namecheap.domains.create", &params)
             .await?;
         let attrs = first_tag_attrs(&xml, "DomainCreateResult")
             .ok_or_else(|| DomainError::Parse("missing DomainCreateResult".to_string()))?;
@@ -627,90 +647,19 @@ pub struct CloudflareZoneResult {
     pub nameservers: Vec<String>,
 }
 
-// ---- NamecheapDnsProvisioner (real API) ----
+// ---- NamecheapDnsProvisioner ----
 
 pub struct NamecheapDnsProvisioner {
-    config: NamecheapConfig,
-    client: Client,
+    api: NamecheapApiClient,
 }
 
 impl NamecheapDnsProvisioner {
     pub fn new(config: NamecheapConfig) -> Self {
         Self {
-            config,
-            client: Client::new(),
+            api: NamecheapApiClient::new(config),
         }
     }
 
-    fn endpoint(&self) -> &'static str {
-        if self.config.sandbox {
-            NAMECHEAP_SANDBOX_URL
-        } else {
-            NAMECHEAP_PRODUCTION_URL
-        }
-    }
-
-    fn validate_api_config(&self) -> Result<(), DomainError> {
-        let missing = [
-            ("NAMECHEAP_API_USER", &self.config.api_user),
-            ("NAMECHEAP_API_KEY", &self.config.api_key),
-            ("NAMECHEAP_USERNAME", &self.config.username),
-            ("NAMECHEAP_CLIENT_IP", &self.config.client_ip),
-        ]
-        .iter()
-        .filter_map(|(name, value)| value.trim().is_empty().then_some(*name))
-        .collect::<Vec<_>>();
-
-        if missing.is_empty() {
-            Ok(())
-        } else {
-            Err(DomainError::MissingConfig(missing.join(", ")))
-        }
-    }
-
-    async fn call_namecheap(
-        &self,
-        command: &str,
-        extra_params: Vec<(String, String)>,
-    ) -> Result<String, DomainError> {
-        self.validate_api_config()?;
-
-        let mut params = vec![
-            ("ApiUser".to_string(), self.config.api_user.clone()),
-            ("ApiKey".to_string(), self.config.api_key.clone()),
-            ("UserName".to_string(), self.config.username.clone()),
-            ("ClientIp".to_string(), self.config.client_ip.clone()),
-            ("Command".to_string(), command.to_string()),
-        ];
-        params.extend(extra_params);
-
-        let response = self
-            .client
-            .post(self.endpoint())
-            .form(&params)
-            .send()
-            .await
-            .map_err(|error| DomainError::Http(error.to_string()))?;
-
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|error| DomainError::Http(error.to_string()))?;
-
-        if !status.is_success() {
-            return Err(DomainError::Http(format!("{status}: {body}")));
-        }
-
-        if let Some(error) = first_tag_text(&body, "Error") {
-            return Err(DomainError::Namecheap(error));
-        }
-
-        Ok(body)
-    }
-}
-
-impl NamecheapDnsProvisioner {
     pub async fn set_namecheap_nameservers(
         &self,
         domain: &str,
@@ -719,9 +668,10 @@ impl NamecheapDnsProvisioner {
         let (sld, tld) = namecheap_domain_parts(domain)?;
         let ns_list = nameservers.join(",");
         let xml = self
-            .call_namecheap(
+            .api
+            .call(
                 "namecheap.domains.dns.setCustom",
-                vec![
+                &[
                     ("SLD".to_string(), sld),
                     ("TLD".to_string(), tld),
                     ("Nameservers".to_string(), ns_list),
@@ -844,8 +794,8 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(quote.available);
-        assert!(!quote.is_premium);
+        assert_eq!(quote.available, true);
+        assert_eq!(quote.is_premium, false);
         assert_eq!(quote.price_usd, Decimal::from_str("9.99").unwrap());
         assert_eq!(quote.tld, "xyz");
 
@@ -870,7 +820,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(!quote.available);
+        assert_eq!(quote.available, false);
         assert_eq!(quote.price_usd, Decimal::ZERO);
     }
 
@@ -883,8 +833,8 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(quote.available);
-        assert!(quote.is_premium);
+        assert_eq!(quote.available, true);
+        assert_eq!(quote.is_premium, true);
         assert_eq!(quote.price_usd, Decimal::from_str("2500.00").unwrap());
     }
 
@@ -936,8 +886,8 @@ mod tests {
     fn parses_domain_check_attrs() {
         let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainCheckResult Domain="pepe.xyz" Available="true" IsPremiumName="false" EapFee="0.0" /></CommandResponse></ApiResponse>"#;
         let attrs = first_tag_attrs(xml, "DomainCheckResult").unwrap();
-        assert!(attr_bool(&attrs, "Available").unwrap());
-        assert!(!attr_bool(&attrs, "IsPremiumName").unwrap());
+        assert_eq!(attr_bool(&attrs, "Available").unwrap(), true);
+        assert_eq!(attr_bool(&attrs, "IsPremiumName").unwrap(), false);
     }
 
     #[test]
@@ -1018,7 +968,7 @@ mod tests {
     fn parses_domain_create_result() {
         let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainCreateResult Domain="pepe.xyz" Registered="true" ChargedAmount="12.3400" OrderID="123" TransactionID="456" /></CommandResponse></ApiResponse>"#;
         let attrs = first_tag_attrs(xml, "DomainCreateResult").unwrap();
-        assert!(attr_bool(&attrs, "Registered").unwrap());
+        assert_eq!(attr_bool(&attrs, "Registered").unwrap(), true);
         assert_eq!(attrs.get("OrderID").unwrap(), "123");
         assert_eq!(attrs.get("TransactionID").unwrap(), "456");
         assert_eq!(
@@ -1031,15 +981,15 @@ mod tests {
     fn parses_not_registered_result() {
         let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainCreateResult Domain="pepe.xyz" Registered="false" /></CommandResponse></ApiResponse>"#;
         let attrs = first_tag_attrs(xml, "DomainCreateResult").unwrap();
-        assert!(!attr_bool(&attrs, "Registered").unwrap());
+        assert_eq!(attr_bool(&attrs, "Registered").unwrap(), false);
     }
 
     #[test]
     fn parses_premium_domain_check() {
         let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainCheckResult Domain="fancy.com" Available="true" IsPremiumName="true" PremiumRegistrationPrice="2500.00" EapFee="0.0" /></CommandResponse></ApiResponse>"#;
         let attrs = first_tag_attrs(xml, "DomainCheckResult").unwrap();
-        assert!(attr_bool(&attrs, "Available").unwrap());
-        assert!(attr_bool(&attrs, "IsPremiumName").unwrap());
+        assert_eq!(attr_bool(&attrs, "Available").unwrap(), true);
+        assert_eq!(attr_bool(&attrs, "IsPremiumName").unwrap(), true);
         assert_eq!(
             attr_decimal(&attrs, "PremiumRegistrationPrice").unwrap(),
             Decimal::from_str("2500.00").unwrap()
@@ -1067,11 +1017,11 @@ mod tests {
     fn attr_bool_accepts_truthy_values() {
         let mut attrs = HashMap::new();
         attrs.insert("Test".to_string(), "yes".to_string());
-        assert!(attr_bool(&attrs, "Test").unwrap());
+        assert_eq!(attr_bool(&attrs, "Test").unwrap(), true);
         attrs.insert("Test".to_string(), "1".to_string());
-        assert!(attr_bool(&attrs, "Test").unwrap());
+        assert_eq!(attr_bool(&attrs, "Test").unwrap(), true);
         attrs.insert("Test".to_string(), "TRUE".to_string());
-        assert!(attr_bool(&attrs, "Test").unwrap());
+        assert_eq!(attr_bool(&attrs, "Test").unwrap(), true);
     }
 
     #[test]
@@ -1117,14 +1067,14 @@ mod tests {
     fn parses_dns_set_custom_result() {
         let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainDNSSetCustomResult Domain="pepe.xyz" Updated="true" /></CommandResponse></ApiResponse>"#;
         let attrs = first_tag_attrs(xml, "DomainDNSSetCustomResult").unwrap();
-        assert!(attr_bool(&attrs, "Updated").unwrap());
+        assert_eq!(attr_bool(&attrs, "Updated").unwrap(), true);
     }
 
     #[test]
     fn rejects_dns_set_custom_not_updated() {
         let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainDNSSetCustomResult Domain="pepe.xyz" Updated="false" /></CommandResponse></ApiResponse>"#;
         let attrs = first_tag_attrs(xml, "DomainDNSSetCustomResult").unwrap();
-        assert!(!attr_bool(&attrs, "Updated").unwrap());
+        assert_eq!(attr_bool(&attrs, "Updated").unwrap(), false);
     }
 
     #[test]
