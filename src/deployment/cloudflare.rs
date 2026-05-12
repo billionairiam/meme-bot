@@ -6,6 +6,8 @@ use serde_json::json;
 use tokio::process::Command;
 use tokio::time::sleep;
 
+use crate::domain::CloudflareZoneResult;
+
 use super::github::{ensure_github_repo, git_output, push_site_to_github};
 use super::{DeploymentError, DeploymentRequest, DeploymentResult, SiteDeployer};
 
@@ -657,3 +659,78 @@ impl SiteDeployer for CloudflarePagesDeployer {
 }
 
 // HttpClientPagesDeployer lives in api_client module
+
+// ---- Cloudflare zone creation ----
+
+pub async fn create_cloudflare_zone(
+    account_id: &str,
+    api_token: &str,
+    domain: &str,
+) -> Result<CloudflareZoneResult, DeploymentError> {
+    if account_id.trim().is_empty() || api_token.trim().is_empty() {
+        return Err(DeploymentError::MissingConfig(
+            "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN".to_string(),
+        ));
+    }
+
+    let client = Client::new();
+    let response = client
+        .post("https://api.cloudflare.com/client/v4/zones")
+        .bearer_auth(api_token)
+        .json(&serde_json::json!({
+            "name": domain,
+            "account": { "id": account_id.trim() },
+            "jump_start": true,
+        }))
+        .send()
+        .await
+        .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
+
+    if !status.is_success() {
+        return Err(DeploymentError::CloudflarePages(format!("{status}: {body}")));
+    }
+
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| DeploymentError::CloudflarePages(format!("parse response: {e}")))?;
+
+    if json.get("success").and_then(|v| v.as_bool()) != Some(true) {
+        let errors = json
+            .get("errors")
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "unknown error".to_string());
+        return Err(DeploymentError::CloudflarePages(format!(
+            "zone creation failed: {errors}"
+        )));
+    }
+
+    let result = json
+        .get("result")
+        .ok_or_else(|| DeploymentError::CloudflarePages("missing result".to_string()))?;
+
+    let zone_id = result
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| DeploymentError::CloudflarePages("missing zone id".to_string()))?
+        .to_string();
+
+    let nameservers: Vec<String> = result
+        .get("name_servers")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|ns| ns.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(CloudflareZoneResult {
+        zone_id,
+        nameservers,
+    })
+}

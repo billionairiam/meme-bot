@@ -8,8 +8,8 @@ use crate::deployment::cloudflare::publish_dir_from_site_dir;
 use crate::deployment::github::{ensure_github_repo, git_output, push_site_to_github};
 use crate::deployment::{DeploymentError, DeploymentRequest, DeploymentResult, SiteDeployer};
 use crate::domain::{
-    ApiErrorResponse, CloudflareZoneResult, DnsProvisioner, DnsRecord, DomainError,
-    DomainPurchaseRequest, DomainPurchaseResult, DomainQuote, DomainQuoteRequest, DomainRegistrar,
+    ApiErrorResponse, CloudflareZoneResult, DnsRecord, DomainError, DomainPurchaseRequest,
+    DomainPurchaseResult, DomainQuote, DomainQuoteRequest, DomainRegistrar,
 };
 
 const PAGES_DEPLOY_TIMEOUT: Duration = Duration::from_secs(300);
@@ -119,9 +119,8 @@ impl HttpClientDnsProvisioner {
     }
 }
 
-#[async_trait]
-impl DnsProvisioner for HttpClientDnsProvisioner {
-    async fn create_zone(&self, domain: &str) -> Result<CloudflareZoneResult, DomainError> {
+impl HttpClientDnsProvisioner {
+    pub async fn create_zone(&self, domain: &str) -> Result<CloudflareZoneResult, DomainError> {
         let response = self
             .client
             .post(format!("{}/api/v1/dns/create-zone", self.base_url))
@@ -142,7 +141,7 @@ impl DnsProvisioner for HttpClientDnsProvisioner {
         }
     }
 
-    async fn set_namecheap_nameservers(
+    pub async fn set_namecheap_nameservers(
         &self,
         domain: &str,
         nameservers: &[String],
@@ -164,7 +163,7 @@ impl DnsProvisioner for HttpClientDnsProvisioner {
         }
     }
 
-    async fn set_dns_records(
+    pub async fn set_dns_records(
         &self,
         domain: &str,
         records: &[DnsRecord],

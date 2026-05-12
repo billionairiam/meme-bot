@@ -24,8 +24,8 @@ use crate::{
     config::{Config, GenerationProviderName, NamecheapConfig},
     db,
     domain::{
-        CloudflareDnsProvisioner, DnsProvisioner, DomainError, DomainPurchaseRequest,
-        DomainQuoteRequest, DomainRegistrar, NamecheapDnsProvisioner, NamecheapRegistrar,
+        DomainError, DomainPurchaseRequest, DomainQuoteRequest, DomainRegistrar,
+        NamecheapDnsProvisioner, NamecheapRegistrar,
     },
     api_client::{
         HttpClientDnsProvisioner, HttpClientDomainRegistrar,
@@ -2935,13 +2935,15 @@ async fn setup_cloudflare_dns_after_purchase(
         };
     }
 
-    let cloudflare = CloudflareDnsProvisioner::new(
-        config.cloudflare_account_id.clone(),
-        config.cloudflare_api_token.clone(),
-    );
     let namecheap = NamecheapDnsProvisioner::new(config.namecheap.clone());
     info!(%domain, "creating cloudflare zone directly");
-    match cloudflare.create_zone(domain).await {
+    match crate::deployment::cloudflare::create_cloudflare_zone(
+        &config.cloudflare_account_id,
+        &config.cloudflare_api_token,
+        domain,
+    )
+    .await
+    {
         Ok(zone) => match namecheap
             .set_namecheap_nameservers(domain, &zone.nameservers)
             .await
@@ -2960,10 +2962,13 @@ async fn setup_cloudflare_dns_after_purchase(
                 html_escape(&domain_error_for_user(&error))
             )),
         },
-        Err(error) => Err(format!(
-            "\n<b>Cloudflare zone creation failed.</b> {}",
-            html_escape(&domain_error_for_user(&error))
-        )),
+        Err(error) => {
+            let domain_err: DomainError = error.into();
+            Err(format!(
+                "\n<b>Cloudflare zone creation failed.</b> {}",
+                html_escape(&domain_error_for_user(&domain_err))
+            ))
+        }
     }
 }
 

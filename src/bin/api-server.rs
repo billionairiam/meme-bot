@@ -19,7 +19,7 @@ use meme_bot::{
         },
     },
     domain::{
-        ApiErrorResponse, CloudflareZoneResult, DnsProvisioner, DnsRecord, DomainError,
+        ApiErrorResponse, CloudflareZoneResult, DnsRecord, DomainError,
         DomainPurchaseRequest, DomainPurchaseResult, DomainQuote, DomainQuoteRequest,
         DomainRegistrar, NamecheapDnsProvisioner, NamecheapRegistrar,
     },
