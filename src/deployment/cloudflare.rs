@@ -20,11 +20,11 @@ const API_PAGES_DEPLOY_TIMEOUT: Duration = Duration::from_secs(300);
 // ---- Pages deployment helpers ----
 
 #[derive(Debug)]
-pub(crate) struct PagesDeploymentStatus {
-    pub(crate) id: String,
-    pub(crate) url: Option<String>,
-    pub(crate) stage_status: Option<String>,
-    pub(crate) commit_hash: Option<String>,
+pub struct PagesDeploymentStatus {
+    pub id: String,
+    pub url: Option<String>,
+    pub stage_status: Option<String>,
+    pub commit_hash: Option<String>,
 }
 
 async fn ensure_cloudflare_success<F>(
@@ -43,13 +43,13 @@ where
     }
 }
 
-pub(crate) fn response_success(body: &str) -> Option<bool> {
+pub fn response_success(body: &str) -> Option<bool> {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|value| value.get("success").and_then(|success| success.as_bool()))
 }
 
-pub(crate) fn verify_existing_pages_project(
+pub fn verify_existing_pages_project(
     body: &str,
     github_owner: &str,
     github_repo: &str,
@@ -107,7 +107,7 @@ pub(crate) fn verify_existing_pages_project(
     Ok(())
 }
 
-async fn parse_pages_deployment_response(
+pub async fn parse_pages_deployment_response(
     response: reqwest::Response,
 ) -> Result<PagesDeploymentStatus, DeploymentError> {
     let status = response.status();
@@ -151,7 +151,7 @@ async fn parse_pages_deployment_response(
     })
 }
 
-pub(crate) fn extract_deployment_commit_hash(result: &serde_json::Value) -> Option<String> {
+pub fn extract_deployment_commit_hash(result: &serde_json::Value) -> Option<String> {
     [
         &["deployment_trigger", "metadata", "commit_hash"][..],
         &["deployment_trigger", "metadata", "commit_sha"][..],
@@ -171,7 +171,7 @@ pub(crate) fn extract_deployment_commit_hash(result: &serde_json::Value) -> Opti
     })
 }
 
-pub(crate) fn verify_deployment_commit(
+pub fn verify_deployment_commit(
     deployment: &PagesDeploymentStatus,
     expected_commit_sha: Option<&str>,
 ) -> Result<(), DeploymentError> {
@@ -214,7 +214,7 @@ async fn parse_pages_domain_status_response(
         .ok_or_else(|| DeploymentError::DomainBind("domain response missing status".to_string()))
 }
 
-pub(crate) fn ensure_domain_status_not_failed(
+pub fn ensure_domain_status_not_failed(
     domain: &str,
     status: &str,
 ) -> Result<(), DeploymentError> {
@@ -236,12 +236,12 @@ pub(crate) fn ensure_domain_status_not_failed(
     }
 }
 
-pub(crate) fn publish_dir_from_site_dir(site_dir: &str) -> &'static str {
+pub fn publish_dir_from_site_dir(site_dir: &str) -> &'static str {
     let root_index = Path::new(site_dir).join("index.html");
     if root_index.exists() { "/" } else { "dist" }
 }
 
-pub(crate) fn render_wrangler_args(
+pub fn render_wrangler_args(
     args_template: &str,
     site_dir: &str,
     project_name: &str,

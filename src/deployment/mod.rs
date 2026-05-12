@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-mod cloudflare;
+use crate::domain::DomainError;
+
+pub mod cloudflare;
 mod github;
 
 pub use cloudflare::{CloudflarePagesDeployer, HttpClientPagesDeployer};
@@ -50,6 +52,15 @@ impl DeploymentError {
             Self::CloudflarePages(_) => "pages_create",
             Self::DomainBind(_) => "domain_bind",
             Self::MissingConfig(_) => "pages_deploy",
+        }
+    }
+}
+
+impl From<DeploymentError> for DomainError {
+    fn from(error: DeploymentError) -> Self {
+        match error {
+            DeploymentError::MissingConfig(msg) => DomainError::MissingConfig(msg),
+            other => DomainError::Cloudflare(other.to_string()),
         }
     }
 }

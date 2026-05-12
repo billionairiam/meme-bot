@@ -10,6 +10,14 @@ use axum::{
 };
 use meme_bot::{
     config::{NamecheapConfig, NamecheapContactConfig, load_env_file},
+    deployment::{
+        DeploymentError,
+        cloudflare::{
+            ensure_domain_status_not_failed,
+            parse_pages_deployment_response, response_success, verify_deployment_commit,
+            verify_existing_pages_project, PagesDeploymentStatus,
+        },
+    },
     domain::{
         ApiErrorResponse, CloudflareZoneResult, DnsProvisioner, DnsRecord, DomainError,
         DomainPurchaseRequest, DomainPurchaseResult, DomainQuote, DomainQuoteRequest,
@@ -23,8 +31,8 @@ use tracing::{error, info, warn};
 
 const PAGES_DEPLOYMENT_POLL_ATTEMPTS: usize = 36;
 const PAGES_DEPLOYMENT_POLL_INTERVAL: Duration = Duration::from_secs(5);
-const PAGES_DOMAIN_POLL_ATTEMPTS: usize = 12;
-const PAGES_DOMAIN_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const PAGES_DOMAIN_POLL_ATTEMPTS: usize = 120;
+const PAGES_DOMAIN_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 struct AppState {
     registrar: NamecheapRegistrar,
@@ -441,17 +449,10 @@ async fn pages_deploy(
     })))
 }
 
-struct ApiPagesDeploymentStatus {
-    id: String,
-    url: Option<String>,
-    stage_status: Option<String>,
-    commit_hash: Option<String>,
-}
-
 async fn trigger_pages_deployment(
     state: &AppState,
     project_name: &str,
-) -> Result<ApiPagesDeploymentStatus, ApiError> {
+) -> Result<PagesDeploymentStatus, ApiError> {
     let url = format!(
         "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects/{}/deployments",
         state.cf_account_id, project_name
@@ -464,7 +465,8 @@ async fn trigger_pages_deployment(
         .send()
         .await
         .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-    parse_pages_deployment_response(response).await
+    let deployment = parse_pages_deployment_response(response).await?;
+    Ok(deployment)
 }
 
 async fn wait_pages_deployment_success(
@@ -472,7 +474,7 @@ async fn wait_pages_deployment_success(
     project_name: &str,
     deployment_id: &str,
     expected_commit_sha: Option<&str>,
-) -> Result<ApiPagesDeploymentStatus, ApiError> {
+) -> Result<PagesDeploymentStatus, ApiError> {
     for _ in 0..PAGES_DEPLOYMENT_POLL_ATTEMPTS {
         let url = format!(
             "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects/{}/deployments/{}",
@@ -496,7 +498,7 @@ async fn wait_pages_deployment_success(
                     "deployment {} ended with status {}",
                     deployment.id,
                     deployment.stage_status.unwrap_or_default()
-                )))?;
+                )).into());
             }
             _ => sleep(PAGES_DEPLOYMENT_POLL_INTERVAL).await,
         }
@@ -504,95 +506,7 @@ async fn wait_pages_deployment_success(
 
     Err(DomainError::Cloudflare(format!(
         "deployment {deployment_id} did not complete before timeout"
-    )))?
-}
-
-async fn parse_pages_deployment_response(
-    response: reqwest::Response,
-) -> Result<ApiPagesDeploymentStatus, ApiError> {
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-    if !status.is_success()
-        || response_success(&body)
-            .map(|success| !success)
-            .unwrap_or(false)
-    {
-        return Err(DomainError::Cloudflare(format!("{status}: {body}")))?;
-    }
-    let value: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| DomainError::Cloudflare(format!("parse deployment response: {e}: {body}")))?;
-    let result = value
-        .get("result")
-        .ok_or_else(|| DomainError::Cloudflare("deployment response missing result".to_string()))?;
-    let id = result
-        .get("id")
-        .and_then(|item| item.as_str())
-        .filter(|item| !item.trim().is_empty())
-        .ok_or_else(|| DomainError::Cloudflare("deployment response missing id".to_string()))?
-        .to_string();
-    let url = result
-        .get("url")
-        .and_then(|item| item.as_str())
-        .filter(|item| !item.trim().is_empty())
-        .map(String::from);
-    let stage_status = result
-        .get("latest_stage")
-        .and_then(|stage| stage.get("status"))
-        .and_then(|item| item.as_str())
-        .map(String::from);
-    let commit_hash = extract_deployment_commit_hash(result);
-    Ok(ApiPagesDeploymentStatus {
-        id,
-        url,
-        stage_status,
-        commit_hash,
-    })
-}
-
-fn extract_deployment_commit_hash(result: &serde_json::Value) -> Option<String> {
-    [
-        &["deployment_trigger", "metadata", "commit_hash"][..],
-        &["deployment_trigger", "metadata", "commit_sha"][..],
-        &["source", "config", "commit_hash"][..],
-        &["source", "config", "commit_sha"][..],
-    ]
-    .iter()
-    .find_map(|path| {
-        let mut value = result;
-        for key in *path {
-            value = value.get(key)?;
-        }
-        value
-            .as_str()
-            .filter(|hash| !hash.trim().is_empty())
-            .map(|hash| hash.trim().to_string())
-    })
-}
-
-fn verify_deployment_commit(
-    deployment: &ApiPagesDeploymentStatus,
-    expected_commit_sha: Option<&str>,
-) -> Result<(), ApiError> {
-    let Some(expected) = expected_commit_sha
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(());
-    };
-    match deployment.commit_hash.as_deref() {
-        Some(actual) if actual.eq_ignore_ascii_case(expected) => Ok(()),
-        Some(actual) => Err(DomainError::Cloudflare(format!(
-            "deployment {} used commit {}, expected {}",
-            deployment.id, actual, expected
-        )))?,
-        None => Err(DomainError::Cloudflare(format!(
-            "deployment {} did not report a commit hash; expected {}",
-            deployment.id, expected
-        )))?,
-    }
+    )).into())
 }
 
 async fn bind_pages_custom_domain(
@@ -601,7 +515,8 @@ async fn bind_pages_custom_domain(
     domain: &str,
 ) -> Result<(), ApiError> {
     if let Some(status) = get_pages_domain_status(state, project_name, domain).await? {
-        return ensure_domain_status_not_failed(domain, &status);
+        ensure_domain_status_not_failed(domain, &status)?;
+        return Ok(());
     }
     let bind_url = format!(
         "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects/{}/domains",
@@ -635,7 +550,8 @@ async fn bind_pages_custom_domain(
 
     for _ in 0..PAGES_DOMAIN_POLL_ATTEMPTS {
         if let Some(status) = get_pages_domain_status(state, project_name, domain).await? {
-            return ensure_domain_status_not_failed(domain, &status);
+            ensure_domain_status_not_failed(domain, &status)?;
+        return Ok(());
         }
         sleep(PAGES_DOMAIN_POLL_INTERVAL).await;
     }
@@ -687,86 +603,18 @@ async fn get_pages_domain_status(
     Ok(Some(domain_status.to_string()))
 }
 
-fn ensure_domain_status_not_failed(domain: &str, status: &str) -> Result<(), ApiError> {
-    match status {
-        "active" => Ok(()),
-        "pending" | "initializing" => Err(DomainError::Cloudflare(format!(
-            "custom domain {domain} is not active yet; Cloudflare status {status}"
-        )))?,
-        "blocked" | "error" | "deactivated" => Err(DomainError::Cloudflare(format!(
-            "custom domain {domain} has Cloudflare status {status}"
-        )))?,
-        other => Err(DomainError::Cloudflare(format!(
-            "custom domain {domain} has unknown Cloudflare status {other}"
-        )))?,
-    }
-}
 
-fn response_success(body: &str) -> Option<bool> {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| value.get("success").and_then(|success| success.as_bool()))
-}
 
-fn verify_existing_pages_project(
-    body: &str,
-    github_owner: &str,
-    github_repo: &str,
-    branch: &str,
-    publish_dir: &str,
-) -> Result<(), ApiError> {
-    let value: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| DomainError::Cloudflare(format!("parse project: {e}")))?;
-    if value.get("success").and_then(|success| success.as_bool()) != Some(true) {
-        Err(DomainError::Cloudflare(format!(
-            "get project returned unsuccessful response: {body}"
-        )))?;
-    }
-    let result = value
-        .get("result")
-        .ok_or_else(|| DomainError::Cloudflare("project response missing result".to_string()))?;
-    let config = result
-        .get("source")
-        .and_then(|source| source.get("config"))
-        .ok_or_else(|| {
-            DomainError::Cloudflare(
-                "existing Pages project is not connected to a Git source".to_string(),
-            )
-        })?;
-    let owner = config.get("owner").and_then(|item| item.as_str());
-    let repo = config.get("repo_name").and_then(|item| item.as_str());
-    let production_branch = config
-        .get("production_branch")
-        .and_then(|item| item.as_str());
-    if owner != Some(github_owner) || repo != Some(github_repo) || production_branch != Some(branch)
-    {
-        Err(DomainError::Cloudflare(format!(
-            "existing Pages project points to {}/{}:{}, expected {}/{}:{}",
-            owner.unwrap_or("<missing>"),
-            repo.unwrap_or("<missing>"),
-            production_branch.unwrap_or("<missing>"),
-            github_owner,
-            github_repo,
-            branch
-        )))?;
-    }
-    if let Some(existing_dir) = result
-        .get("build_config")
-        .and_then(|config| config.get("destination_dir"))
-        .and_then(|item| item.as_str())
-        && !existing_dir.is_empty()
-        && existing_dir != publish_dir
-    {
-        Err(DomainError::Cloudflare(format!(
-            "existing Pages project publish directory is {existing_dir}, expected {publish_dir}"
-        )))?;
-    }
-    Ok(())
-}
 
 // ---- ApiError ----
 
 struct ApiError(DomainError);
+
+impl From<DeploymentError> for ApiError {
+    fn from(error: DeploymentError) -> Self {
+        ApiError(DomainError::from(error))
+    }
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
