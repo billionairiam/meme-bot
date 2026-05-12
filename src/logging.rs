@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tracing_subscriber::fmt::MakeWriter;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 const ROTATION_INTERVAL: Duration = Duration::from_secs(5 * 3600);
 
@@ -77,7 +77,10 @@ pub struct RotatingWriterHandle {
 
 impl Write for RotatingWriterHandle {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).write(buf)
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -87,7 +90,10 @@ impl Write for RotatingWriterHandle {
 
 impl Write for RotatingFileWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).write(buf)
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -112,19 +118,14 @@ impl<'a> MakeWriter<'a> for RotatingFileWriter {
 /// Returns a guard that must be kept alive for the program's lifetime.
 /// Dropping it flushes and shuts down the background file writer.
 pub fn init_logging(service_name: &str) -> tracing_appender::non_blocking::WorkerGuard {
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let file_writer = RotatingFileWriter::new(
-        PathBuf::from("logs"),
-        service_name,
-    )
-    .expect("create rotating file writer");
+    let file_writer = RotatingFileWriter::new(PathBuf::from("logs"), service_name)
+        .expect("create rotating file writer");
 
     let (non_blocking, guard) = tracing_appender::non_blocking::NonBlocking::new(file_writer);
 
-    let stderr_layer = tracing_subscriber::fmt::layer()
-        .with_filter(env_filter);
+    let stderr_layer = tracing_subscriber::fmt::layer().with_filter(env_filter);
 
     let file_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)

@@ -78,9 +78,7 @@ pub(crate) fn verify_existing_pages_project(
     let production_branch = config
         .get("production_branch")
         .and_then(|item| item.as_str());
-    if owner != Some(github_owner)
-        || repo != Some(github_repo)
-        || production_branch != Some(branch)
+    if owner != Some(github_owner) || repo != Some(github_repo) || production_branch != Some(branch)
     {
         return Err(DeploymentError::CloudflarePages(format!(
             "existing Pages project points to {}/{}:{}, expected {}/{}:{}",
@@ -215,7 +213,10 @@ async fn parse_pages_domain_status_response(
         .ok_or_else(|| DeploymentError::DomainBind("domain response missing status".to_string()))
 }
 
-pub(crate) fn ensure_domain_status_not_failed(domain: &str, status: &str) -> Result<(), DeploymentError> {
+pub(crate) fn ensure_domain_status_not_failed(
+    domain: &str,
+    status: &str,
+) -> Result<(), DeploymentError> {
     match status {
         "active" => Ok(()),
         "pending" | "initializing" => Err(DeploymentError::DomainBind(format!(
@@ -246,8 +247,9 @@ pub(crate) fn render_wrangler_args(
         .replace("{project_name}", project_name)
         .replace("{branch}", branch);
 
-    shell_words::split(&rendered)
-        .map_err(|error| DeploymentError::CloudflarePages(format!("invalid wrangler args: {error}")))
+    shell_words::split(&rendered).map_err(|error| {
+        DeploymentError::CloudflarePages(format!("invalid wrangler args: {error}"))
+    })
 }
 
 // ---- CloudflarePagesDeployer ----
@@ -379,7 +381,11 @@ impl CloudflarePagesDeployer {
         if get_response.status().is_success() {
             let body = get_response.text().await.unwrap_or_default();
             return verify_existing_pages_project(
-                &body, github_owner, github_repo, branch, publish_dir,
+                &body,
+                github_owner,
+                github_repo,
+                branch,
+                publish_dir,
             );
         }
         if get_response.status() != StatusCode::NOT_FOUND {
@@ -560,6 +566,9 @@ impl SiteDeployer for CloudflarePagesDeployer {
                 &request.github_token,
             )
             .await?;
+
+            push_site_to_github(request).await?;
+
             self.ensure_git_project(
                 &request.cloudflare_project_name,
                 &request.production_branch,
@@ -568,11 +577,11 @@ impl SiteDeployer for CloudflarePagesDeployer {
                 publish_dir_from_site_dir(&request.site_dir),
             )
             .await?;
-            push_site_to_github(request).await?;
-            let commit_sha = git_output(&request.site_dir, &["rev-parse", "HEAD"]).await?;
+
             let deployment = self
                 .trigger_pages_deployment(&request.cloudflare_project_name)
                 .await?;
+            let commit_sha = git_output(&request.site_dir, &["rev-parse", "HEAD"]).await?;
             let deployment = self
                 .wait_pages_deployment_success(
                     &request.cloudflare_project_name,
@@ -645,10 +654,7 @@ impl SiteDeployer for CloudflarePagesDeployer {
             github_repo_url: request.repo_owner.clone(),
             github_commit_sha: "direct-upload".to_string(),
             cloudflare_project_name: request.cloudflare_project_name.clone(),
-            cloudflare_pages_url: format!(
-                "https://{}.pages.dev",
-                request.cloudflare_project_name
-            ),
+            cloudflare_pages_url: format!("https://{}.pages.dev", request.cloudflare_project_name),
             custom_domain: request.custom_domain.clone(),
         })
     }

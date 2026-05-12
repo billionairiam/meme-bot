@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-mod github;
 mod cloudflare;
+mod github;
 
 pub use cloudflare::{CloudflarePagesDeployer, HttpClientPagesDeployer};
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -104,12 +104,8 @@ mod tests {
             }
         }"#;
 
-        assert!(
-            verify_existing_pages_project(body, "memebot", "example.com", "main", "/").is_ok()
-        );
-        assert!(
-            verify_existing_pages_project(body, "memebot", "wrong.com", "main", "/").is_err()
-        );
+        assert!(verify_existing_pages_project(body, "memebot", "example.com", "main", "/").is_ok());
+        assert!(verify_existing_pages_project(body, "memebot", "wrong.com", "main", "/").is_err());
     }
 
     #[test]

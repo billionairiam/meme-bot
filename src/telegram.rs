@@ -137,7 +137,10 @@ impl TelegramUiConfig {
             github_owner: config.github_owner.clone(),
             template_catalog_url: config.template_catalog_url.clone(),
             template_preview_domain: config.template_preview_domain.clone(),
-            template_options: build_template_options(&config.template_preview_domain, &config.template_preview_base_url),
+            template_options: build_template_options(
+                &config.template_preview_domain,
+                &config.template_preview_base_url,
+            ),
             admin_contact: config.admin_contact.clone(),
             template_prices_usdt: config.template_prices_usdt.clone(),
             ai_creation_price_usdt: config.ai_creation_price_usdt,
@@ -341,13 +344,7 @@ async fn handle_message(
 
     if let Some(text) = msg.text() {
         if let Some(template_id) = parse_template_deep_link(text) {
-            return show_template_confirmation(
-                &bot,
-                msg.chat.id,
-                template_id,
-                &config,
-            )
-            .await;
+            return show_template_confirmation(&bot, msg.chat.id, template_id, &config).await;
         }
 
         match text.trim() {
@@ -365,7 +362,12 @@ async fn handle_message(
             "/history" => return show_history(&bot, msg.chat.id, user_id, &pool).await,
             "/continue" => {
                 return handle_continue_command(
-                    &bot, msg.chat.id, user_id, &sessions, &pool, &config,
+                    &bot,
+                    msg.chat.id,
+                    user_id,
+                    &sessions,
+                    &pool,
+                    &config,
                 )
                 .await;
             }
@@ -427,9 +429,7 @@ async fn handle_callback(
             )
             .await
         }
-        Some("template_mode") => {
-            edit_template_mode(&bot, target, &config).await
-        }
+        Some("template_mode") => edit_template_mode(&bot, target, &config).await,
         Some("ai_mode") => {
             clear_screen_keyboard(&bot, target).await?;
             let draft = match start_new_order_session(
@@ -516,7 +516,10 @@ async fn handle_callback(
             edit_template_confirmation(&bot, target, template_id, &config).await
         }
         Some(data) if data.starts_with("confirm_tpl:") => {
-            match find_template(&config.template_options, data.trim_start_matches("confirm_tpl:")) {
+            match find_template(
+                &config.template_options,
+                data.trim_start_matches("confirm_tpl:"),
+            ) {
                 Some(template) => {
                     clear_screen_keyboard(&bot, target).await?;
                     let draft = match start_new_order_session(
@@ -525,7 +528,14 @@ async fn handle_callback(
                         query.from.username.as_deref(),
                         Some(query.from.first_name.as_str()),
                         query.from.last_name.as_deref(),
-                        OrderDraft::new_template(template.clone(), template_price(&config.template_options, &template.id, &config.template_prices_usdt)),
+                        OrderDraft::new_template(
+                            template.clone(),
+                            template_price(
+                                &config.template_options,
+                                &template.id,
+                                &config.template_prices_usdt,
+                            ),
+                        ),
                     )
                     .await
                     {
@@ -1733,7 +1743,11 @@ async fn handle_continue_command(
             .await
             .map(|_| ()),
         Err(error) => {
-            warn!(?error, user_id = user_id.0 as i64, "failed to load pending order");
+            warn!(
+                ?error,
+                user_id = user_id.0 as i64,
+                "failed to load pending order"
+            );
             bot.send_message(chat_id, "<b>Check failed.</b>\nTry later.")
                 .parse_mode(ParseMode::Html)
                 .reply_markup(main_menu_keyboard())
@@ -1749,94 +1763,81 @@ async fn continue_step_screen(
     draft: &OrderDraft,
 ) -> ResponseResult<()> {
     match draft.step {
-        DraftStep::WaitingLogo => {
-            bot.send_message(chat_id, ask_logo_text())
-                .parse_mode(ParseMode::Html)
-                .reply_markup(cancel_keyboard())
-                .await
-                .map(|_| ())
-        }
-        DraftStep::WaitingTicker => {
-            bot.send_message(chat_id, "🔤 <b>2/7 Ticker</b>\nSend token ticker. Eg: PEPE")
-                .parse_mode(ParseMode::Html)
-                .reply_markup(cancel_keyboard())
-                .await
-                .map(|_| ())
-        }
-        DraftStep::WaitingTokenName => {
-            bot.send_message(
+        DraftStep::WaitingLogo => bot
+            .send_message(chat_id, ask_logo_text())
+            .parse_mode(ParseMode::Html)
+            .reply_markup(cancel_keyboard())
+            .await
+            .map(|_| ()),
+        DraftStep::WaitingTicker => bot
+            .send_message(chat_id, "🔤 <b>2/7 Ticker</b>\nSend token ticker. Eg: PEPE")
+            .parse_mode(ParseMode::Html)
+            .reply_markup(cancel_keyboard())
+            .await
+            .map(|_| ()),
+        DraftStep::WaitingTokenName => bot
+            .send_message(
                 chat_id,
                 "🏷 <b>3/7 Token Name</b>\nSend token name. Eg: Pepe Coin",
             )
             .parse_mode(ParseMode::Html)
             .reply_markup(cancel_keyboard())
             .await
-            .map(|_| ())
-        }
-        DraftStep::WaitingContractAddress => {
-            bot.send_message(
+            .map(|_| ()),
+        DraftStep::WaitingContractAddress => bot
+            .send_message(
                 chat_id,
                 "📝 <b>4/7 Contract Address</b>\nPaste contract address.",
             )
             .parse_mode(ParseMode::Html)
             .reply_markup(cancel_keyboard())
             .await
-            .map(|_| ())
-        }
-        DraftStep::WaitingXLink => {
-            bot.send_message(
+            .map(|_| ()),
+        DraftStep::WaitingXLink => bot
+            .send_message(
                 chat_id,
                 "🐦 <b>5/7 X (Twitter) Link</b>\nPaste X link or send '-' to skip.",
             )
             .parse_mode(ParseMode::Html)
             .reply_markup(cancel_keyboard())
             .await
-            .map(|_| ())
-        }
-        DraftStep::WaitingTelegramLink => {
-            bot.send_message(
+            .map(|_| ()),
+        DraftStep::WaitingTelegramLink => bot
+            .send_message(
                 chat_id,
                 "📱 <b>6/7 Telegram Link</b>\nPaste TG link or send '-' to skip.",
             )
             .parse_mode(ParseMode::Html)
             .reply_markup(cancel_keyboard())
             .await
-            .map(|_| ())
-        }
-        DraftStep::WaitingWebsiteUrl => {
-            bot.send_message(
+            .map(|_| ()),
+        DraftStep::WaitingWebsiteUrl => bot
+            .send_message(
                 chat_id,
                 "🌐 <b>7/7 Domain</b>\nSend domain name.\nEg: mytoken.xyz",
             )
             .parse_mode(ParseMode::Html)
             .reply_markup(cancel_keyboard())
             .await
-            .map(|_| ())
-        }
-        DraftStep::ReadyToPay => {
-            bot.send_message(chat_id, payment_chain_text())
-                .parse_mode(ParseMode::Html)
-                .reply_markup(payment_chain_keyboard())
-                .await
-                .map(|_| ())
-        }
-        DraftStep::WaitingTx => {
-            bot.send_message(chat_id, "💳 <b>Payment</b>\nPaste TX hash.")
-                .parse_mode(ParseMode::Html)
-                .reply_markup(cancel_keyboard())
-                .await
-                .map(|_| ())
-        }
-        DraftStep::PaymentConfirmed => {
-            bot.send_message(
-                chat_id,
-                "<b>Payment confirmed.</b>\nWebsite is queued.",
-            )
+            .map(|_| ()),
+        DraftStep::ReadyToPay => bot
+            .send_message(chat_id, payment_chain_text())
+            .parse_mode(ParseMode::Html)
+            .reply_markup(payment_chain_keyboard())
+            .await
+            .map(|_| ()),
+        DraftStep::WaitingTx => bot
+            .send_message(chat_id, "💳 <b>Payment</b>\nPaste TX hash.")
+            .parse_mode(ParseMode::Html)
+            .reply_markup(cancel_keyboard())
+            .await
+            .map(|_| ()),
+        DraftStep::PaymentConfirmed => bot
+            .send_message(chat_id, "<b>Payment confirmed.</b>\nWebsite is queued.")
             .parse_mode(ParseMode::Html)
             .reply_markup(status_keyboard())
             .await
-            .map(|_| ())
-        }
+            .map(|_| ()),
     }
 }
 
@@ -1915,7 +1916,11 @@ async fn show_template_confirmation(
         )
         .await;
     };
-    let price = template_price(&config.template_options, template_id, &config.template_prices_usdt);
+    let price = template_price(
+        &config.template_options,
+        template_id,
+        &config.template_prices_usdt,
+    );
 
     send_screen(
         bot,
@@ -1941,7 +1946,11 @@ async fn edit_template_confirmation(
         )
         .await;
     };
-    let price = template_price(&config.template_options, template_id, &config.template_prices_usdt);
+    let price = template_price(
+        &config.template_options,
+        template_id,
+        &config.template_prices_usdt,
+    );
 
     edit_screen(
         bot,

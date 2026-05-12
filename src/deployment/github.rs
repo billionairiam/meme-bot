@@ -2,8 +2,8 @@ use std::{path::Path, process::Stdio};
 
 use reqwest::{Client, StatusCode};
 use serde_json::json;
-use tokio::process::Command;
 use tokio::fs;
+use tokio::process::Command;
 
 use super::{DeploymentError, DeploymentRequest};
 
@@ -116,10 +116,22 @@ pub(crate) async fn ensure_github_repo(
     repo: &str,
     token: &str,
 ) -> Result<(), DeploymentError> {
-    if owner.trim().is_empty() || repo.trim().is_empty() || token.trim().is_empty() {
+    let owner = owner.trim();
+    let repo = repo.trim();
+    let token = token.trim();
+
+    if owner.is_empty() || repo.is_empty() || token.is_empty() {
         return Err(DeploymentError::MissingConfig(
             "GITHUB_OWNER, generated repo name, and GITHUB_TOKEN".to_string(),
         ));
+    }
+
+    let login = github_authenticated_login(client, token).await?;
+
+    if !login.eq_ignore_ascii_case(owner) {
+        return Err(DeploymentError::GithubCreate(format!(
+            "GITHUB_OWNER must match the authenticated GitHub user. GITHUB_OWNER={owner}, token user={login}"
+        )));
     }
 
     let get_url = format!("https://api.github.com/repos/{owner}/{repo}");
@@ -127,51 +139,38 @@ pub(crate) async fn ensure_github_repo(
         .send()
         .await
         .map_err(|error| DeploymentError::GithubCreate(error.to_string()))?;
+
     if get_response.status().is_success() {
         return Ok(());
     }
+
     if get_response.status() != StatusCode::NOT_FOUND {
         let status = get_response.status();
         let body = get_response.text().await.unwrap_or_default();
-        return Err(DeploymentError::GithubCreate(format!("{status}: {body}")));
-    }
 
-    let body = json!({
-        "name": repo,
-        "private": false,
-        "auto_init": false,
-    });
-    let org_url = format!("https://api.github.com/orgs/{owner}/repos");
-    let org_response = github_request(client.post(org_url), token)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|error| DeploymentError::GithubCreate(error.to_string()))?;
-    if org_response.status().is_success() {
-        return Ok(());
-    }
-
-    let org_status = org_response.status();
-    let org_body = org_response.text().await.unwrap_or_default();
-    let login = github_authenticated_login(client, token).await?;
-    if !login.eq_ignore_ascii_case(owner) {
         return Err(DeploymentError::GithubCreate(format!(
-            "cannot create repo for owner {owner}; token user is {login} and org create failed: {org_status}: {org_body}"
+            "get repo failed: {status}: {body}"
         )));
     }
 
-    let user_response = github_request(client.post("https://api.github.com/user/repos"), token)
-        .json(&body)
+    let create_response = github_request(client.post("https://api.github.com/user/repos"), token)
+        .json(&json!({
+            "name": repo,
+            "private": true,
+            "auto_init": false,
+        }))
         .send()
         .await
         .map_err(|error| DeploymentError::GithubCreate(error.to_string()))?;
-    if user_response.status().is_success() {
+
+    if create_response.status().is_success() {
         Ok(())
     } else {
-        let user_status = user_response.status();
-        let user_body = user_response.text().await.unwrap_or_default();
+        let status = create_response.status();
+        let body = create_response.text().await.unwrap_or_default();
+
         Err(DeploymentError::GithubCreate(format!(
-            "org repo create failed: {org_status}: {org_body}; user repo create failed: {user_status}: {user_body}"
+            "create repo failed: {status}: {body}"
         )))
     }
 }
@@ -187,12 +186,15 @@ pub(crate) async fn push_site_to_github(
     run_git(&request.site_dir, &["init"], &[]).await?;
     run_git(
         &request.site_dir,
-        &["config", "user.email", "bot@mem-bot.local"], &[])
+        &["config", "user.email", "bot@mem-bot.local"],
+        &[],
+    )
     .await?;
     run_git(&request.site_dir, &["config", "user.name", "Meme Bot"], &[]).await?;
     run_git(
         &request.site_dir,
-        &["checkout", "-B", &request.production_branch], &[]
+        &["checkout", "-B", &request.production_branch],
+        &[],
     )
     .await?;
     ensure_site_gitignore(&request.site_dir).await?;

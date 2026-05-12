@@ -260,9 +260,7 @@ fn load_prompt_template(provider_name: &str) -> String {
     match std::fs::read_to_string(&path) {
         Ok(content) => content,
         Err(_) => {
-            tracing::warn!(
-                "prompt file {path} not found, using built-in default"
-            );
+            tracing::warn!("prompt file {path} not found, using built-in default");
             include_str!("../prompts/agent-gemini.md").to_string()
         }
     }

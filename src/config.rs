@@ -272,10 +272,7 @@ fn parse_template_prices(value: &str) -> Result<Vec<Decimal>> {
             }
             part.parse::<i64>()
                 .with_context(|| {
-                    format!(
-                        "parse TEMPLATE_PRICES_USDT position {}: \"{part}\"",
-                        i + 1
-                    )
+                    format!("parse TEMPLATE_PRICES_USDT position {}: \"{part}\"", i + 1)
                 })
                 .map(Decimal::from)
         })
