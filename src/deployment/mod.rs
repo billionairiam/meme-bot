@@ -62,32 +62,6 @@ pub trait SiteDeployer: Send + Sync {
     ) -> Result<DeploymentResult, DeploymentError>;
 }
 
-pub struct DryRunDeployer;
-
-#[async_trait]
-impl SiteDeployer for DryRunDeployer {
-    async fn deploy(
-        &self,
-        request: &DeploymentRequest,
-    ) -> Result<DeploymentResult, DeploymentError> {
-        Ok(DeploymentResult {
-            github_owner: request.repo_owner.clone(),
-            github_repo_name: request.repo_name.clone(),
-            github_repo_url: format!(
-                "https://github.com/{}/{}",
-                request.repo_owner, request.repo_name
-            ),
-            github_commit_sha: "dry-run".to_string(),
-            cloudflare_project_name: request.cloudflare_project_name.clone(),
-            cloudflare_pages_url: format!(
-                "https://{}.pages.dev",
-                request.cloudflare_project_name
-            ),
-            custom_domain: request.custom_domain.clone(),
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::cloudflare::*;

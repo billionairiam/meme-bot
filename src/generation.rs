@@ -246,7 +246,7 @@ fn agent_prompt(request: &SiteGenerationRequest, provider_name: &str) -> String 
         .replace("{tg_url}", &request.input.telegram_url)
         .replace("{dextools_url}", &dextools_url)
         .replace("{logo_note}", &logo_note)
-        .replace("{color_instruction}", &if has_logo {
+        .replace("{color_instruction}", if has_logo {
             "Extract the dominant and accent colors from the provided logo image. Use those colors for backgrounds, buttons, headings, borders, and the custom SVG link icons. This creates a cohesive brand identity."
         } else {
             "Pick colors that match the token theme — bold, high-contrast, crypto-native. Use gradients and glow effects. Avoid muted corporate palettes."

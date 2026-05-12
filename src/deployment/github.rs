@@ -4,7 +4,7 @@ use reqwest::{Client, StatusCode};
 use serde_json::json;
 use tokio::process::Command;
 
-use super::{DeploymentError, DeploymentRequest, DeploymentResult};
+use super::{DeploymentError, DeploymentRequest};
 
 // ---- Git helpers ----
 
@@ -284,45 +284,3 @@ async fn ensure_site_gitignore(site_dir: &str) -> Result<(), DeploymentError> {
     Ok(())
 }
 
-// ---- GitCliCloudflareDeployer ----
-
-use async_trait::async_trait;
-use super::SiteDeployer;
-
-#[allow(dead_code)]
-pub struct GitCliCloudflareDeployer;
-
-#[async_trait]
-impl SiteDeployer for GitCliCloudflareDeployer {
-    async fn deploy(
-        &self,
-        request: &DeploymentRequest,
-    ) -> Result<DeploymentResult, DeploymentError> {
-        let client = Client::new();
-        ensure_github_repo(
-            &client,
-            &request.repo_owner,
-            &request.repo_name,
-            &request.github_token,
-        )
-        .await?;
-        push_site_to_github(request).await?;
-        let commit_sha = git_output(&request.site_dir, &["rev-parse", "HEAD"]).await?;
-
-        Ok(DeploymentResult {
-            github_owner: request.repo_owner.clone(),
-            github_repo_name: request.repo_name.clone(),
-            github_repo_url: format!(
-                "https://github.com/{}/{}.git",
-                request.repo_owner, request.repo_name
-            ),
-            github_commit_sha: commit_sha.trim().to_string(),
-            cloudflare_project_name: request.cloudflare_project_name.clone(),
-            cloudflare_pages_url: format!(
-                "https://{}.pages.dev",
-                request.cloudflare_project_name
-            ),
-            custom_domain: request.custom_domain.clone(),
-        })
-    }
-}
