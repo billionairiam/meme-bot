@@ -1,0 +1,229 @@
+use std::path::Path;
+
+use teloxide::prelude::*;
+use teloxide::types::{Message, UserId};
+use tracing::info;
+
+use super::types::{OrderDraft, Sessions};
+
+pub(crate) fn set_session(user_id: UserId, mut draft: OrderDraft, sessions: &Sessions) {
+    draft.touch();
+    sessions
+        .lock()
+        .expect("sessions lock")
+        .insert(user_id, draft);
+}
+
+pub(crate) fn get_session(user_id: UserId, sessions: &Sessions) -> Option<OrderDraft> {
+    sessions
+        .lock()
+        .expect("sessions lock")
+        .get(&user_id)
+        .cloned()
+}
+
+pub(crate) async fn session_step_name(user_id: UserId, sessions: &Sessions) -> Option<&'static str> {
+    sessions
+        .lock()
+        .expect("sessions lock")
+        .get(&user_id)
+        .map(|draft| draft.step.as_str())
+}
+
+pub(crate) fn remove_session(user_id: UserId, sessions: &Sessions) {
+    sessions.lock().expect("sessions lock").remove(&user_id);
+}
+
+pub(crate) fn message_kind(msg: &Message) -> &'static str {
+    if msg.text().is_some() {
+        "text"
+    } else if msg.photo().is_some() {
+        "photo"
+    } else if msg.document().is_some() {
+        "document"
+    } else {
+        "other"
+    }
+}
+
+pub(crate) fn normalize_domain(text: &str) -> String {
+    text.trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("www.")
+        .trim_matches('/')
+        .to_ascii_lowercase()
+}
+
+pub(crate) fn looks_like_tx_hash(text: &str) -> bool {
+    let value = text.trim();
+    value.len() >= 16 && value.chars().all(|ch| ch.is_ascii_alphanumeric())
+}
+
+pub(crate) fn configured_proxy() -> Option<String> {
+    std::env::var("TELOXIDE_PROXY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+pub(crate) fn parse_template_deep_link(text: &str) -> Option<&str> {
+    text.trim()
+        .strip_prefix("/start tpl_")
+        .or_else(|| text.trim().strip_prefix("/start=tpl_"))
+}
+
+pub(crate) fn find_template(
+    options: &[super::types::TemplateOption],
+    template_id: &str,
+) -> Option<super::types::TemplateOption> {
+    options
+        .iter()
+        .find(|template| template.id == template_id)
+        .cloned()
+}
+
+pub(crate) fn template_number(
+    options: &[super::types::TemplateOption],
+    template_id: &str,
+) -> usize {
+    options
+        .iter()
+        .position(|template| template.id == template_id)
+        .map(|index| index + 1)
+        .unwrap_or(0)
+}
+
+pub(crate) fn template_price(
+    options: &[super::types::TemplateOption],
+    template_id: &str,
+    prices: &[rust_decimal::Decimal],
+) -> rust_decimal::Decimal {
+    let index = options
+        .iter()
+        .position(|template| template.id == template_id)
+        .unwrap_or(0);
+    prices.get(index).copied().unwrap_or(rust_decimal::Decimal::ZERO)
+}
+
+pub(crate) fn build_mode_label(build_mode: &super::types::BuildModeDraft) -> &'static str {
+    match build_mode {
+        super::types::BuildModeDraft::Template => "Template Mode",
+        super::types::BuildModeDraft::AiFree => "Free Creation",
+    }
+}
+
+pub(crate) fn payment_address_for_chain(
+    config: &super::types::TelegramUiConfig,
+    chain: crate::models::PaymentChain,
+) -> &str {
+    match chain {
+        crate::models::PaymentChain::Erc20 => &config.usdt_erc20_address,
+        crate::models::PaymentChain::Tron => &config.usdt_tron_address,
+        crate::models::PaymentChain::Sol => &config.usdt_sol_address,
+    }
+}
+
+pub(crate) fn payment_error_for_user(
+    error: &crate::payment::PaymentVerificationError,
+) -> String {
+    use crate::payment::PaymentVerificationError;
+    match error {
+        PaymentVerificationError::NotFound => "TX not found.".to_string(),
+        PaymentVerificationError::WrongChain => "Wrong chain.".to_string(),
+        PaymentVerificationError::WrongToken => "Not a supported USDT transfer.".to_string(),
+        PaymentVerificationError::WrongRecipient => "Wrong recipient.".to_string(),
+        PaymentVerificationError::InsufficientAmount => "Amount too low.".to_string(),
+        PaymentVerificationError::InsufficientConfirmations => {
+            "Not enough confirmations.".to_string()
+        }
+        PaymentVerificationError::AlreadyUsed => "TX already used.".to_string(),
+        PaymentVerificationError::ExpiredOrder => "Payment window expired.".to_string(),
+        PaymentVerificationError::OldTransaction => {
+            "TX is older than this payment request.".to_string()
+        }
+        PaymentVerificationError::TransactionAfterSubmission => {
+            "TX is not confirmed yet. Try again later.".to_string()
+        }
+        PaymentVerificationError::Provider(value) => {
+            format!("Payment provider error: {value}. Contact admin.")
+        }
+    }
+}
+
+pub(crate) fn domain_error_for_user(error: &crate::domain::DomainError) -> String {
+    use crate::domain::DomainError;
+    match error {
+        DomainError::MissingConfig(value) => {
+            format!("Namecheap configuration is missing: {value}")
+        }
+        DomainError::UnsupportedTld => {
+            "Unsupported TLD. Supported: .com, .net, .org, .xyz, .fun, .site, .online, .io, .co, .me, .cc, .app, .dev, .world, .space, .club, .store, .shop, .vip".to_string()
+        }
+        DomainError::Unavailable => "Domain is unavailable.".to_string(),
+        DomainError::AlreadyRegisteredToAccount => {
+            "Domain appears registered in the Namecheap account. Contact admin for reconciliation."
+                .to_string()
+        }
+        DomainError::PremiumRejected => "Premium/EAP domains require manual handling.".to_string(),
+        DomainError::Namecheap(value) => format!("Namecheap returned an error: {value}"),
+        DomainError::Http(value) => format!("Namecheap HTTP request failed: {value}"),
+        DomainError::Parse(value) => format!("Could not parse Namecheap response: {value}"),
+        DomainError::Cloudflare(value) => format!("Cloudflare DNS failed: {value}"),
+    }
+}
+
+pub(crate) fn website_input_from_draft(
+    draft: &OrderDraft,
+) -> Option<crate::models::WebsiteInput> {
+    Some(crate::models::WebsiteInput {
+        token_ticker: draft.ticker.clone()?,
+        token_name: draft.token_name.clone()?,
+        contract_address: draft.contract_address.clone()?,
+        x_url: draft.x_link.clone()?,
+        telegram_url: draft.telegram_link.clone()?,
+        logo_asset_path: draft.logo_file_id.clone()?,
+        requested_domain: draft.website_url.clone(),
+    })
+}
+
+pub(crate) async fn download_telegram_logo(
+    bot: &Bot,
+    file_id: &str,
+    order_id: &str,
+) -> anyhow::Result<String> {
+    let file = bot
+        .get_file(teloxide::types::FileId::from(file_id.to_string()))
+        .await?;
+    let ext = Path::new(&file.path)
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_else(|| ".png".to_string());
+    let dir = "./logos";
+    tokio::fs::create_dir_all(dir).await?;
+    let dest = format!("{dir}/{order_id}{ext}");
+    let url = format!(
+        "https://api.telegram.org/file/bot{}/{}",
+        bot.token(),
+        file.path
+    );
+    let response = reqwest::get(&url).await?;
+    let bytes = response.bytes().await?;
+    tokio::fs::write(&dest, &bytes).await?;
+    info!(file_id = %file_id, dest = %dest, "downloaded logo from Telegram");
+    Ok(dest)
+}
+
+pub(crate) fn is_message_not_modified(error: &teloxide::RequestError) -> bool {
+    error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("message is not modified")
+}
