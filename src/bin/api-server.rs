@@ -19,7 +19,7 @@ use meme_bot::{
         },
     },
     domain::{
-        ApiErrorResponse, CloudflareZoneResult, DnsRecord, DomainError,
+        ApiErrorResponse, CloudflareZoneResult, DomainError,
         DomainPurchaseRequest, DomainPurchaseResult, DomainQuote, DomainQuoteRequest,
         DomainRegistrar, NamecheapDnsProvisioner, NamecheapRegistrar,
     },
@@ -92,7 +92,6 @@ async fn main() {
         .route("/api/v1/domain/purchase", post(domain_purchase))
         .route("/api/v1/dns/create-zone", post(dns_create_zone))
         .route("/api/v1/dns/set-nameservers", post(dns_set_nameservers))
-        .route("/api/v1/dns/set-records", post(dns_set_records))
         .route("/api/v1/pages/deploy", post(pages_deploy))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -186,12 +185,6 @@ struct SetNameserversRequest {
     nameservers: Vec<String>,
 }
 
-#[derive(Deserialize)]
-struct SetRecordsRequest {
-    domain: String,
-    records: Vec<DnsRecord>,
-}
-
 async fn dns_create_zone(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateZoneRequest>,
@@ -274,19 +267,6 @@ async fn dns_set_nameservers(
     state
         .nc_dns
         .set_namecheap_nameservers(&request.domain, &request.nameservers)
-        .await
-        .map(|_| Json(serde_json::json!({})))
-        .map_err(ApiError)
-}
-
-async fn dns_set_records(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<SetRecordsRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    info!(domain = %request.domain, "set dns records");
-    state
-        .nc_dns
-        .set_dns_records(&request.domain, &request.records)
         .await
         .map(|_| Json(serde_json::json!({})))
         .map_err(ApiError)

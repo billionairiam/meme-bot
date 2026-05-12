@@ -11,7 +11,9 @@ use crate::config::{NamecheapConfig, NamecheapContactConfig};
 const NAMECHEAP_SANDBOX_URL: &str = "https://api.sandbox.namecheap.com/xml.response";
 const NAMECHEAP_PRODUCTION_URL: &str = "https://api.namecheap.com/xml.response";
 
-pub const SUPPORTED_TLDS: &[&str] = &[
+/// TLDs offered in the Telegram UI for alternative-domain suggestions.
+/// Not a validation whitelist — Namecheap decides what it supports.
+pub const SUGGESTED_TLDS: &[&str] = &[
     "com", "net", "org", "xyz", "fun", "site", "online", "io", "co", "me", "cc", "app", "dev",
     "world", "space", "club", "store", "shop", "vip",
 ];
@@ -92,7 +94,6 @@ pub trait DomainRegistrar: Send + Sync {
 pub struct NamecheapRegistrar {
     config: NamecheapConfig,
     client: Client,
-    allowed_tlds: Vec<String>,
 }
 
 impl NamecheapRegistrar {
@@ -100,27 +101,6 @@ impl NamecheapRegistrar {
         Self {
             config,
             client: Client::new(),
-            allowed_tlds: vec![
-                "com".to_string(),
-                "net".to_string(),
-                "org".to_string(),
-                "xyz".to_string(),
-                "fun".to_string(),
-                "site".to_string(),
-                "online".to_string(),
-                "io".to_string(),
-                "co".to_string(),
-                "me".to_string(),
-                "cc".to_string(),
-                "app".to_string(),
-                "dev".to_string(),
-                "world".to_string(),
-                "space".to_string(),
-                "club".to_string(),
-                "store".to_string(),
-                "shop".to_string(),
-                "vip".to_string(),
-            ],
         }
     }
 
@@ -132,19 +112,12 @@ impl NamecheapRegistrar {
         }
     }
 
-    fn tld_for(domain: &str) -> Option<String> {
+    fn tld_for(domain: &str) -> Result<String, DomainError> {
         domain
             .rsplit_once('.')
             .map(|(_, tld)| tld.to_ascii_lowercase())
-    }
-
-    fn validate_tld(&self, domain: &str) -> Result<String, DomainError> {
-        let tld = Self::tld_for(domain).ok_or(DomainError::UnsupportedTld)?;
-        if self.allowed_tlds.contains(&tld) {
-            Ok(tld)
-        } else {
-            Err(DomainError::UnsupportedTld)
-        }
+            .filter(|tld| !tld.is_empty())
+            .ok_or(DomainError::UnsupportedTld)
     }
 
     fn validate_api_config(&self) -> Result<(), DomainError> {
@@ -309,7 +282,7 @@ impl NamecheapRegistrar {
 impl DomainRegistrar for NamecheapRegistrar {
     async fn quote(&self, request: &DomainQuoteRequest) -> Result<DomainQuote, DomainError> {
         let domain = request.domain.to_ascii_lowercase();
-        let tld = self.validate_tld(&domain)?;
+        let tld = Self::tld_for(&domain)?;
         let check = self.check_domain(&domain).await?;
 
         if !check.available {
@@ -350,7 +323,7 @@ impl DomainRegistrar for NamecheapRegistrar {
         request: &DomainPurchaseRequest,
     ) -> Result<DomainPurchaseResult, DomainError> {
         let domain = request.domain.to_ascii_lowercase();
-        self.validate_tld(&domain)?;
+        Self::tld_for(&domain)?;
         self.validate_contact_config()?;
 
         let check = self.check_domain(&domain).await?;
@@ -654,44 +627,6 @@ pub struct CloudflareZoneResult {
     pub nameservers: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DnsRecord {
-    pub host_name: String,
-    pub record_type: DnsRecordType,
-    pub address: String,
-    pub ttl: Option<i32>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum DnsRecordType {
-    A,
-    Aaaa,
-    Cname,
-    Txt,
-    Mx,
-    MxE,
-    Url,
-    Url301,
-    Frame,
-}
-
-impl DnsRecordType {
-    fn as_namecheap_str(self) -> &'static str {
-        match self {
-            Self::A => "A",
-            Self::Aaaa => "AAAA",
-            Self::Cname => "CNAME",
-            Self::Txt => "TXT",
-            Self::Mx => "MX",
-            Self::MxE => "MXE",
-            Self::Url => "URL",
-            Self::Url301 => "URL301",
-            Self::Frame => "FRAME",
-        }
-    }
-}
-
 // ---- NamecheapDnsProvisioner (real API) ----
 
 pub struct NamecheapDnsProvisioner {
@@ -798,38 +733,6 @@ impl NamecheapDnsProvisioner {
         if !attr_bool(&attrs, "Updated").unwrap_or(false) {
             return Err(DomainError::Namecheap(format!(
                 "nameserver update was not applied: {xml}"
-            )));
-        }
-        Ok(())
-    }
-
-    pub async fn set_dns_records(
-        &self,
-        domain: &str,
-        records: &[DnsRecord],
-    ) -> Result<(), DomainError> {
-        let (sld, tld) = namecheap_domain_parts(domain)?;
-        let mut params = vec![("SLD".to_string(), sld), ("TLD".to_string(), tld)];
-        for (i, record) in records.iter().enumerate() {
-            let n = i + 1;
-            params.push((format!("HostName{n}"), record.host_name.clone()));
-            params.push((
-                format!("RecordType{n}"),
-                record.record_type.as_namecheap_str().to_string(),
-            ));
-            params.push((format!("Address{n}"), record.address.clone()));
-            if let Some(ttl) = record.ttl {
-                params.push((format!("TTL{n}"), ttl.to_string()));
-            }
-        }
-        let xml = self
-            .call_namecheap("namecheap.domains.dns.setHosts", params)
-            .await?;
-        let attrs = first_tag_attrs(&xml, "DomainDNSSetHostsResult")
-            .ok_or_else(|| DomainError::Parse("missing DomainDNSSetHostsResult".to_string()))?;
-        if !attr_bool(&attrs, "IsSuccess").unwrap_or(false) {
-            return Err(DomainError::Namecheap(format!(
-                "dns host records were not applied: {xml}"
             )));
         }
         Ok(())
@@ -1201,21 +1104,6 @@ mod tests {
         assert_eq!(xml_unescape("it&apos;s"), "it's");
     }
 
-    // ---- DnsRecordType tests ----
-
-    #[test]
-    fn dns_record_type_namecheap_str() {
-        assert_eq!(DnsRecordType::A.as_namecheap_str(), "A");
-        assert_eq!(DnsRecordType::Aaaa.as_namecheap_str(), "AAAA");
-        assert_eq!(DnsRecordType::Cname.as_namecheap_str(), "CNAME");
-        assert_eq!(DnsRecordType::Txt.as_namecheap_str(), "TXT");
-        assert_eq!(DnsRecordType::Mx.as_namecheap_str(), "MX");
-        assert_eq!(DnsRecordType::MxE.as_namecheap_str(), "MXE");
-        assert_eq!(DnsRecordType::Url.as_namecheap_str(), "URL");
-        assert_eq!(DnsRecordType::Url301.as_namecheap_str(), "URL301");
-        assert_eq!(DnsRecordType::Frame.as_namecheap_str(), "FRAME");
-    }
-
     // ---- XML parsing for DNS responses ----
 
     #[test]
@@ -1237,13 +1125,6 @@ mod tests {
         let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainDNSSetCustomResult Domain="pepe.xyz" Updated="false" /></CommandResponse></ApiResponse>"#;
         let attrs = first_tag_attrs(xml, "DomainDNSSetCustomResult").unwrap();
         assert!(!attr_bool(&attrs, "Updated").unwrap());
-    }
-
-    #[test]
-    fn parses_dns_set_hosts_result() {
-        let xml = r#"<ApiResponse Status="OK"><CommandResponse><DomainDNSSetHostsResult Domain="pepe.xyz" IsSuccess="true" /></CommandResponse></ApiResponse>"#;
-        let attrs = first_tag_attrs(xml, "DomainDNSSetHostsResult").unwrap();
-        assert!(attr_bool(&attrs, "IsSuccess").unwrap());
     }
 
     #[test]
@@ -1343,7 +1224,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn real_sandbox_quote_supported_tlds() {
+    async fn real_sandbox_quote_multiple_tlds() {
         let config = sandbox_config().expect("Namecheap API credentials not set in env");
         let registrar = NamecheapRegistrar::new(config);
         for (domain, expected_tld) in [
@@ -1362,20 +1243,6 @@ mod tests {
             assert_eq!(quote.tld, expected_tld);
             assert!(quote.price_usd > Decimal::ZERO);
         }
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn real_sandbox_unsupported_tld_rejected() {
-        let config = sandbox_config().expect("Namecheap API credentials not set in env");
-        let registrar = NamecheapRegistrar::new(config);
-        let err = registrar
-            .quote(&DomainQuoteRequest {
-                domain: "test.page".to_string(),
-            })
-            .await
-            .unwrap_err();
-        assert!(matches!(err, DomainError::UnsupportedTld));
     }
 
     #[tokio::test]
@@ -1495,39 +1362,6 @@ mod tests {
                 eprintln!("Namecheap sandbox domain not registered: {msg}");
             }
             Err(e) => panic!("set_nameservers failed: {e}"),
-        }
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn real_sandbox_set_dns_records() {
-        let config = sandbox_config().expect("Namecheap API credentials not set in env");
-        let provisioner = NamecheapDnsProvisioner::new(config);
-        let result = provisioner
-            .set_dns_records(
-                "test-meme.xyz",
-                &[
-                    DnsRecord {
-                        host_name: "@".to_string(),
-                        record_type: DnsRecordType::A,
-                        address: "192.0.2.1".to_string(),
-                        ttl: Some(1800),
-                    },
-                    DnsRecord {
-                        host_name: "www".to_string(),
-                        record_type: DnsRecordType::Cname,
-                        address: "test-meme.xyz".to_string(),
-                        ttl: None,
-                    },
-                ],
-            )
-            .await;
-        match result {
-            Ok(()) => {}
-            Err(DomainError::Namecheap(ref msg)) if msg.contains("not found") => {
-                eprintln!("Namecheap sandbox domain not registered: {msg}");
-            }
-            Err(e) => panic!("set_dns_records failed: {e}"),
         }
     }
 

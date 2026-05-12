@@ -3137,7 +3137,7 @@ async fn check_alternative_domains(
     exclude_tld: &str,
 ) -> Vec<crate::domain::DomainQuote> {
     let mut alternatives = Vec::new();
-    for tld in crate::domain::SUPPORTED_TLDS {
+    for tld in crate::domain::SUGGESTED_TLDS {
         if *tld == exclude_tld {
             continue;
         }

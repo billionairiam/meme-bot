@@ -8,7 +8,7 @@ use crate::deployment::cloudflare::publish_dir_from_site_dir;
 use crate::deployment::github::{ensure_github_repo, git_output, push_site_to_github};
 use crate::deployment::{DeploymentError, DeploymentRequest, DeploymentResult, SiteDeployer};
 use crate::domain::{
-    ApiErrorResponse, CloudflareZoneResult, DnsRecord, DomainError, DomainPurchaseRequest,
+    ApiErrorResponse, CloudflareZoneResult, DomainError, DomainPurchaseRequest,
     DomainPurchaseResult, DomainQuote, DomainQuoteRequest, DomainRegistrar,
 };
 
@@ -151,28 +151,6 @@ impl HttpClientDnsProvisioner {
             .post(format!("{}/api/v1/dns/set-nameservers", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&serde_json::json!({"domain": domain, "nameservers": nameservers}))
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| DomainError::Http(e.to_string()))?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(map_http_error(response).await)
-        }
-    }
-
-    pub async fn set_dns_records(
-        &self,
-        domain: &str,
-        records: &[DnsRecord],
-    ) -> Result<(), DomainError> {
-        let response = self
-            .client
-            .post(format!("{}/api/v1/dns/set-records", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(&serde_json::json!({"domain": domain, "records": records}))
             .timeout(Duration::from_secs(30))
             .send()
             .await
