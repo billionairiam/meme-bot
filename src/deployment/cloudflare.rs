@@ -2,7 +2,6 @@ use std::{path::Path, process::Stdio, time::Duration};
 
 use async_trait::async_trait;
 use reqwest::{Client, StatusCode};
-use serde::Deserialize;
 use serde_json::json;
 use tokio::process::Command;
 use tokio::time::sleep;
@@ -14,8 +13,6 @@ const PAGES_DEPLOYMENT_POLL_ATTEMPTS: usize = 36;
 const PAGES_DEPLOYMENT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const PAGES_DOMAIN_POLL_ATTEMPTS: usize = 120;
 const PAGES_DOMAIN_POLL_INTERVAL: Duration = Duration::from_secs(10);
-
-const API_PAGES_DEPLOY_TIMEOUT: Duration = Duration::from_secs(300);
 
 // ---- Pages deployment helpers ----
 
@@ -182,13 +179,13 @@ pub fn verify_deployment_commit(
         return Ok(());
     };
 
-    if let Some(actual) = deployment.commit_hash.as_deref() {
-        if !actual.eq_ignore_ascii_case(expected) {
-            return Err(DeploymentError::CloudflarePages(format!(
-                "deployment {} used commit {}, expected {}",
-                deployment.id, actual, expected
-            )));
-        }
+    if let Some(actual) = deployment.commit_hash.as_deref()
+        && !actual.eq_ignore_ascii_case(expected)
+    {
+        return Err(DeploymentError::CloudflarePages(format!(
+            "deployment {} used commit {}, expected {}",
+            deployment.id, actual, expected
+        )));
     }
 
     Ok(())
@@ -659,92 +656,4 @@ impl SiteDeployer for CloudflarePagesDeployer {
     }
 }
 
-// ---- HttpClientPagesDeployer ----
-
-#[derive(Debug, Deserialize)]
-struct PagesDeployResponse {
-    cloudflare_pages_url: String,
-    #[serde(default)]
-    custom_domain: Option<String>,
-}
-
-pub struct HttpClientPagesDeployer {
-    base_url: String,
-    api_key: String,
-    client: Client,
-}
-
-impl HttpClientPagesDeployer {
-    pub fn new(base_url: String, api_key: String) -> Self {
-        Self {
-            base_url,
-            api_key,
-            client: Client::new(),
-        }
-    }
-}
-
-#[async_trait]
-impl SiteDeployer for HttpClientPagesDeployer {
-    async fn deploy(
-        &self,
-        request: &DeploymentRequest,
-    ) -> Result<DeploymentResult, DeploymentError> {
-        ensure_github_repo(
-            &self.client,
-            &request.repo_owner,
-            &request.repo_name,
-            &request.github_token,
-        )
-        .await?;
-        push_site_to_github(request).await?;
-        let commit_sha = git_output(&request.site_dir, &["rev-parse", "HEAD"]).await?;
-
-        let response = self
-            .client
-            .post(format!("{}/api/v1/pages/deploy", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(&serde_json::json!({
-                "project_name": request.cloudflare_project_name,
-                "github_owner": request.repo_owner,
-                "github_repo": request.repo_name,
-                "production_branch": request.production_branch,
-                "publish_dir": publish_dir_from_site_dir(&request.site_dir),
-                "custom_domain": request.custom_domain,
-                "expected_commit_sha": commit_sha.trim(),
-            }))
-            .timeout(API_PAGES_DEPLOY_TIMEOUT)
-            .send()
-            .await
-            .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
-
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
-
-        if status.is_success() {
-            let deploy_response: PagesDeployResponse = serde_json::from_str(&body)
-                .map_err(|e| DeploymentError::CloudflarePages(format!("parse response: {e}")))?;
-            Ok(DeploymentResult {
-                github_owner: request.repo_owner.clone(),
-                github_repo_name: request.repo_name.clone(),
-                github_repo_url: format!(
-                    "https://github.com/{}/{}",
-                    request.repo_owner, request.repo_name
-                ),
-                github_commit_sha: commit_sha.trim().to_string(),
-                cloudflare_project_name: request.cloudflare_project_name.clone(),
-                cloudflare_pages_url: deploy_response.cloudflare_pages_url,
-                custom_domain: deploy_response.custom_domain,
-            })
-        } else {
-            let err_msg = serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
-                .unwrap_or(body);
-            Err(DeploymentError::CloudflarePages(err_msg))
-        }
-    }
-}
+// HttpClientPagesDeployer lives in api_client module

@@ -5,9 +5,9 @@ use thiserror::Error;
 use crate::domain::DomainError;
 
 pub mod cloudflare;
-mod github;
+pub(crate) mod github;
 
-pub use cloudflare::{CloudflarePagesDeployer, HttpClientPagesDeployer};
+pub use cloudflare::CloudflarePagesDeployer;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeploymentRequest {
     pub repo_owner: String,

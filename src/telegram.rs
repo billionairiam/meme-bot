@@ -25,8 +25,10 @@ use crate::{
     db,
     domain::{
         CloudflareDnsProvisioner, DnsProvisioner, DomainError, DomainPurchaseRequest,
-        DomainQuoteRequest, DomainRegistrar, HttpClientDnsProvisioner, HttpClientDomainRegistrar,
-        NamecheapDnsProvisioner, NamecheapRegistrar,
+        DomainQuoteRequest, DomainRegistrar, NamecheapDnsProvisioner, NamecheapRegistrar,
+    },
+    api_client::{
+        HttpClientDnsProvisioner, HttpClientDomainRegistrar,
     },
     models::{PaymentChain, WebsiteInput},
     payment::{

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr, time::Duration};
+use std::{collections::HashMap, str::FromStr};
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -394,90 +394,7 @@ impl DomainRegistrar for NamecheapRegistrar {
     }
 }
 
-// ---- HttpClientDomainRegistrar ----
-
-pub struct HttpClientDomainRegistrar {
-    base_url: String,
-    api_key: String,
-    client: Client,
-}
-
-impl HttpClientDomainRegistrar {
-    pub fn new(base_url: String, api_key: String) -> Self {
-        Self {
-            base_url,
-            api_key,
-            client: Client::new(),
-        }
-    }
-}
-
-async fn map_http_error(response: reqwest::Response) -> DomainError {
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    match serde_json::from_str::<ApiErrorResponse>(&body) {
-        Ok(api_err) => match api_err.error.as_str() {
-            "unsupported_tld" => DomainError::UnsupportedTld,
-            "unavailable" => DomainError::Unavailable,
-            "already_registered_to_account" => DomainError::AlreadyRegisteredToAccount,
-            "premium_rejected" => DomainError::PremiumRejected,
-            "missing_config" => DomainError::MissingConfig(api_err.message),
-            "namecheap_error" => DomainError::Namecheap(api_err.message),
-            "cloudflare_error" => DomainError::Cloudflare(api_err.message),
-            "upstream_http_error" | "upstream_parse_error" => DomainError::Http(api_err.message),
-            _ => DomainError::Http(format!("{status}: {}", api_err.message)),
-        },
-        Err(_) => DomainError::Http(format!("{status}: {body}")),
-    }
-}
-
-#[async_trait]
-impl DomainRegistrar for HttpClientDomainRegistrar {
-    async fn quote(&self, request: &DomainQuoteRequest) -> Result<DomainQuote, DomainError> {
-        let response = self
-            .client
-            .post(format!("{}/api/v1/domain/quote", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(request)
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| DomainError::Http(e.to_string()))?;
-
-        if response.status().is_success() {
-            response
-                .json()
-                .await
-                .map_err(|e| DomainError::Parse(e.to_string()))
-        } else {
-            Err(map_http_error(response).await)
-        }
-    }
-
-    async fn purchase(
-        &self,
-        request: &DomainPurchaseRequest,
-    ) -> Result<DomainPurchaseResult, DomainError> {
-        let response = self
-            .client
-            .post(format!("{}/api/v1/domain/purchase", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(request)
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| DomainError::Http(e.to_string()))?;
-
-        if response.status().is_success() {
-            response
-                .json()
-                .await
-                .map_err(|e| DomainError::Parse(e.to_string()))
-        } else {
-            Err(map_http_error(response).await)
-        }
-    }
-}
+// HttpClientDomainRegistrar and HttpClientDnsProvisioner live in api_client module
 
 #[derive(Debug)]
 struct NamecheapCheckResult {
@@ -1097,91 +1014,6 @@ impl DnsProvisioner for CloudflareDnsProvisioner {
     }
 }
 
-// ---- HttpClientDnsProvisioner ----
-
-pub struct HttpClientDnsProvisioner {
-    base_url: String,
-    api_key: String,
-    client: Client,
-}
-
-impl HttpClientDnsProvisioner {
-    pub fn new(base_url: String, api_key: String) -> Self {
-        Self {
-            base_url,
-            api_key,
-            client: Client::new(),
-        }
-    }
-}
-
-#[async_trait]
-impl DnsProvisioner for HttpClientDnsProvisioner {
-    async fn create_zone(&self, domain: &str) -> Result<CloudflareZoneResult, DomainError> {
-        let response = self
-            .client
-            .post(format!("{}/api/v1/dns/create-zone", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(&serde_json::json!({"domain": domain}))
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| DomainError::Http(e.to_string()))?;
-
-        if response.status().is_success() {
-            response
-                .json()
-                .await
-                .map_err(|e| DomainError::Parse(e.to_string()))
-        } else {
-            Err(map_http_error(response).await)
-        }
-    }
-
-    async fn set_namecheap_nameservers(
-        &self,
-        domain: &str,
-        nameservers: &[String],
-    ) -> Result<(), DomainError> {
-        let response = self
-            .client
-            .post(format!("{}/api/v1/dns/set-nameservers", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(&serde_json::json!({"domain": domain, "nameservers": nameservers}))
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| DomainError::Http(e.to_string()))?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(map_http_error(response).await)
-        }
-    }
-
-    async fn set_dns_records(
-        &self,
-        domain: &str,
-        records: &[DnsRecord],
-    ) -> Result<(), DomainError> {
-        let response = self
-            .client
-            .post(format!("{}/api/v1/dns/set-records", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(&serde_json::json!({"domain": domain, "records": records}))
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| DomainError::Http(e.to_string()))?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(map_http_error(response).await)
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

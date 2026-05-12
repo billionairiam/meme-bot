@@ -6,7 +6,8 @@ use tracing::info;
 
 use crate::{
     config::Config,
-    deployment::{HttpClientPagesDeployer, SiteDeployer},
+    api_client::HttpClientPagesDeployer,
+    deployment::SiteDeployer,
     generation::{CliGenerationProvider, GenerationRouter},
     queue::{GenerationQueue, GenerationQueueConfig, UserNotification},
 };
