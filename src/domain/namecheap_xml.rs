@@ -1,5 +1,10 @@
 use std::{collections::HashMap, str::FromStr};
 
+use quick_xml::{
+    Reader,
+    escape::unescape,
+    events::{BytesStart, Event},
+};
 use rust_decimal::Decimal;
 
 use super::DomainError;
@@ -14,161 +19,154 @@ impl<'a> NamecheapXml<'a> {
     }
 
     pub(super) fn price_for_years(&self, tld: &str, years: i32) -> Result<Decimal, DomainError> {
-        let register_body = self
-            .product_category_body("REGISTER")
-            .ok_or_else(|| DomainError::Parse("missing REGISTER pricing category".to_string()))?;
-        Self::price_for_years_in_category(register_body, tld, years)
-    }
+        let mut reader = Reader::from_str(self.xml);
+        reader.config_mut().trim_text(true);
 
-    fn product_category_body(&self, category_name: &str) -> Option<&'a str> {
-        let mut cursor = 0;
-        while let Some(start) = self.xml[cursor..].find("<ProductCategory ") {
-            let absolute_start = cursor + start;
-            let Some(end) = self.xml[absolute_start..].find('>') else {
-                break;
-            };
-            let category_tag = &self.xml[absolute_start..absolute_start + end + 1];
-            let category_attrs = Self::parse_attrs(category_tag);
-            let name = category_attrs
-                .get("Name")
-                .map(|value| value.to_ascii_uppercase());
+        let tld = tld.trim_start_matches('.').to_ascii_lowercase();
+        let mut in_register_category = false;
+        let mut in_target_product = false;
+        let mut saw_register_category = false;
+        let mut saw_target_product = false;
 
-            let category_close = "</ProductCategory>";
-            let content_start = absolute_start + end + 1;
-            let Some(close_offset) = self.xml[content_start..].find(category_close) else {
-                break;
-            };
-            let category_body = &self.xml[content_start..content_start + close_offset];
-
-            if name.as_deref() == Some(category_name) {
-                return Some(category_body);
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(element)) => {
+                    let attrs = Self::attrs_from_start(&reader, &element)?;
+                    if element.name().as_ref() == b"ProductCategory" {
+                        if attrs
+                            .get("Name")
+                            .is_some_and(|name| name.eq_ignore_ascii_case("REGISTER"))
+                        {
+                            in_register_category = true;
+                            saw_register_category = true;
+                        }
+                    } else if in_register_category
+                        && element.name().as_ref() == b"Product"
+                        && product_name_matches(&attrs, &tld)
+                    {
+                        in_target_product = true;
+                        saw_target_product = true;
+                    } else if in_target_product
+                        && element.name().as_ref() == b"Price"
+                        && price_duration_matches(&attrs, years)
+                    {
+                        return attrs.decimal("Price");
+                    }
+                }
+                Ok(Event::Empty(element)) => {
+                    let attrs = Self::attrs_from_start(&reader, &element)?;
+                    if element.name().as_ref() == b"ProductCategory" {
+                        if attrs
+                            .get("Name")
+                            .is_some_and(|name| name.eq_ignore_ascii_case("REGISTER"))
+                        {
+                            saw_register_category = true;
+                        }
+                    } else if in_register_category
+                        && element.name().as_ref() == b"Product"
+                        && product_name_matches(&attrs, &tld)
+                    {
+                        saw_target_product = true;
+                    } else if in_target_product
+                        && element.name().as_ref() == b"Price"
+                        && price_duration_matches(&attrs, years)
+                    {
+                        return attrs.decimal("Price");
+                    }
+                }
+                Ok(Event::End(element)) => {
+                    if element.name().as_ref() == b"Product" {
+                        in_target_product = false;
+                    } else if element.name().as_ref() == b"ProductCategory" {
+                        in_register_category = false;
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Ok(_) => {}
+                Err(error) => return Err(DomainError::Parse(error.to_string())),
             }
-            cursor = content_start + close_offset + category_close.len();
         }
 
-        None
-    }
-
-    fn price_for_years_in_category(
-        category_body: &str,
-        tld: &str,
-        years: i32,
-    ) -> Result<Decimal, DomainError> {
-        let mut cursor = 0;
-        while let Some(start) = category_body[cursor..].find("<Product ") {
-            let absolute_start = cursor + start;
-            let Some(end) = category_body[absolute_start..].find('>') else {
-                break;
-            };
-            let product_tag = &category_body[absolute_start..absolute_start + end + 1];
-            let product_attrs = Self::parse_attrs(product_tag);
-            let product_name = product_attrs
-                .get("Name")
-                .map(|value| value.trim_start_matches('.').to_ascii_lowercase());
-
-            let product_close = "</Product>";
-            let content_start = absolute_start + end + 1;
-            let Some(close_offset) = category_body[content_start..].find(product_close) else {
-                break;
-            };
-            let product_body = &category_body[content_start..content_start + close_offset];
-
-            if product_name.as_deref() == Some(tld) {
-                return Self::price_in_product(product_body, years);
-            }
-            cursor = content_start + close_offset + product_close.len();
+        if !saw_register_category {
+            return Err(DomainError::Parse(
+                "missing REGISTER pricing category".to_string(),
+            ));
         }
-
-        Err(DomainError::Parse(format!("missing pricing for .{tld}")))
-    }
-
-    fn price_in_product(product_body: &str, years: i32) -> Result<Decimal, DomainError> {
-        let mut cursor = 0;
-        while let Some(start) = product_body[cursor..].find("<Price ") {
-            let absolute_start = cursor + start;
-            let Some(end) = product_body[absolute_start..].find('>') else {
-                break;
-            };
-            let tag = &product_body[absolute_start..absolute_start + end + 1];
-            let attrs = Self::parse_attrs(tag);
-            let duration = attrs
-                .get("Duration")
-                .and_then(|value| value.parse::<i32>().ok());
-            let duration_type = attrs
-                .get("DurationType")
-                .map(|value| value.to_ascii_uppercase());
-
-            if duration == Some(years) && duration_type.as_deref() == Some("YEAR") {
-                return attrs.decimal("Price");
-            }
-            cursor = absolute_start + end + 1;
+        if !saw_target_product {
+            return Err(DomainError::Parse(format!("missing pricing for .{tld}")));
         }
-
         Err(DomainError::Parse(format!(
             "missing {years} year registration price"
         )))
     }
 
     pub(super) fn first_tag_text(&self, tag: &str) -> Option<String> {
-        let open_start = self.xml.find(&format!("<{tag}"))?;
-        let open_end = self.xml[open_start..].find('>')? + open_start;
-        let close_start = self.xml[open_end + 1..].find(&format!("</{tag}>"))? + open_end + 1;
-        Some(self.xml[open_end + 1..close_start].trim().to_string())
+        let mut reader = Reader::from_str(self.xml);
+        reader.config_mut().trim_text(true);
+        let tag = tag.as_bytes();
+        let mut collecting = false;
+        let mut depth = 0usize;
+        let mut text = String::new();
+
+        loop {
+            match reader.read_event().ok()? {
+                Event::Start(element) if element.name().as_ref() == tag => {
+                    collecting = true;
+                    depth = 1;
+                }
+                Event::Start(_) if collecting => depth += 1,
+                Event::Text(event) if collecting => {
+                    let decoded = event.decode().ok()?;
+                    let unescaped = unescape(&decoded).ok()?;
+                    text.push_str(unescaped.trim());
+                }
+                Event::CData(event) if collecting => {
+                    let decoded = event.decode().ok()?;
+                    text.push_str(decoded.trim());
+                }
+                Event::End(element) if collecting && element.name().as_ref() == tag => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(text);
+                    }
+                }
+                Event::End(_) if collecting => depth = depth.saturating_sub(1),
+                Event::Eof => return None,
+                _ => {}
+            }
+        }
     }
 
     pub(super) fn first_tag_attrs(&self, tag: &str) -> Option<NamecheapXmlAttrs> {
-        let start = self.xml.find(&format!("<{tag} "))?;
-        let end = self.xml[start..].find('>')? + start;
-        Some(Self::parse_attrs(&self.xml[start..=end]))
+        let mut reader = Reader::from_str(self.xml);
+        reader.config_mut().trim_text(true);
+        let tag = tag.as_bytes();
+
+        loop {
+            match reader.read_event().ok()? {
+                Event::Start(element) | Event::Empty(element) if element.name().as_ref() == tag => {
+                    return Self::attrs_from_start(&reader, &element).ok();
+                }
+                Event::Eof => return None,
+                _ => {}
+            }
+        }
     }
 
+    #[cfg(test)]
     pub(super) fn parse_attrs(tag: &str) -> NamecheapXmlAttrs {
-        let mut attrs = HashMap::new();
-        let bytes = tag.as_bytes();
-        let mut index = 0;
-
-        while index < bytes.len() {
-            while index < bytes.len() && !bytes[index].is_ascii_alphabetic() {
-                index += 1;
+        let mut reader = Reader::from_str(tag);
+        reader.config_mut().trim_text(true);
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
+                    return Self::attrs_from_start(&reader, &element)
+                        .unwrap_or_else(|_| NamecheapXmlAttrs::empty());
+                }
+                Ok(Event::Eof) | Err(_) => return NamecheapXmlAttrs::empty(),
+                Ok(_) => {}
             }
-            let key_start = index;
-            while index < bytes.len()
-                && (bytes[index].is_ascii_alphanumeric()
-                    || bytes[index] == b'_'
-                    || bytes[index] == b'-')
-            {
-                index += 1;
-            }
-            if key_start == index {
-                break;
-            }
-            let key = &tag[key_start..index];
-
-            while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-                index += 1;
-            }
-            if index >= bytes.len() || bytes[index] != b'=' {
-                continue;
-            }
-            index += 1;
-            while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-                index += 1;
-            }
-            if index >= bytes.len() || bytes[index] != b'"' {
-                continue;
-            }
-            index += 1;
-            let value_start = index;
-            while index < bytes.len() && bytes[index] != b'"' {
-                index += 1;
-            }
-            if index <= bytes.len() {
-                attrs.insert(key.to_string(), Self::unescape(&tag[value_start..index]));
-            }
-            index += 1;
         }
-
-        NamecheapXmlAttrs { attrs }
     }
 
     pub(super) fn domain_parts(domain: &str) -> Result<(String, String), DomainError> {
@@ -180,13 +178,30 @@ impl<'a> NamecheapXml<'a> {
         Ok((sld.to_string(), tld.to_string()))
     }
 
+    #[cfg(test)]
     pub(super) fn unescape(value: &str) -> String {
-        value
-            .replace("&quot;", "\"")
-            .replace("&apos;", "'")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&amp;", "&")
+        unescape(value)
+            .map(|value| value.into_owned())
+            .unwrap_or_else(|_| value.to_string())
+    }
+
+    fn attrs_from_start(
+        reader: &Reader<&[u8]>,
+        element: &BytesStart<'_>,
+    ) -> Result<NamecheapXmlAttrs, DomainError> {
+        let mut attrs = HashMap::new();
+        for attr in element.attributes() {
+            let attr = attr.map_err(|error| DomainError::Parse(error.to_string()))?;
+            let key = std::str::from_utf8(attr.key.as_ref())
+                .map_err(|error| DomainError::Parse(error.to_string()))?
+                .to_string();
+            let value = attr
+                .decode_and_unescape_value(reader.decoder())
+                .map_err(|error| DomainError::Parse(error.to_string()))?
+                .into_owned();
+            attrs.insert(key, value);
+        }
+        Ok(NamecheapXmlAttrs { attrs })
     }
 }
 
@@ -195,6 +210,13 @@ pub(super) struct NamecheapXmlAttrs {
 }
 
 impl NamecheapXmlAttrs {
+    #[cfg(test)]
+    fn empty() -> Self {
+        Self {
+            attrs: HashMap::new(),
+        }
+    }
+
     pub(super) fn get(&self, name: &str) -> Option<&String> {
         self.attrs.get(name)
     }
@@ -218,4 +240,23 @@ impl NamecheapXmlAttrs {
             .cloned()
             .ok_or_else(|| DomainError::Parse(format!("missing {name}")))
     }
+}
+
+fn product_name_matches(attrs: &NamecheapXmlAttrs, tld: &str) -> bool {
+    attrs
+        .get("Name")
+        .map(|value| value.trim_start_matches('.').to_ascii_lowercase())
+        .as_deref()
+        == Some(tld)
+}
+
+fn price_duration_matches(attrs: &NamecheapXmlAttrs, years: i32) -> bool {
+    let duration = attrs
+        .get("Duration")
+        .and_then(|value| value.parse::<i32>().ok());
+    let duration_type = attrs
+        .get("DurationType")
+        .map(|value| value.to_ascii_uppercase());
+
+    duration == Some(years) && duration_type.as_deref() == Some("YEAR")
 }
