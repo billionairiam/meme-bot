@@ -5,8 +5,8 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::{
-    config::Config,
     api_client::HttpClientPagesDeployer,
+    config::Config,
     deployment::SiteDeployer,
     generation::{CliGenerationProvider, GenerationRouter},
     queue::{GenerationQueue, GenerationQueueConfig, UserNotification},

@@ -5,16 +5,16 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
+    api_client::{HttpClientDnsProvisioner, HttpClientDomainRegistrar},
     db,
     domain::{
         DomainError, DomainPurchaseRequest, DomainQuoteRequest, DomainRegistrar,
         NamecheapDnsProvisioner, NamecheapRegistrar,
     },
-    api_client::{HttpClientDnsProvisioner, HttpClientDomainRegistrar},
 };
 
 use super::helpers::{domain_error_for_user, html_escape};
-use super::types::{TelegramUiConfig, EXTERNAL_STEP_MAX_ATTEMPTS};
+use super::types::{EXTERNAL_STEP_MAX_ATTEMPTS, TelegramUiConfig};
 
 pub(crate) async fn quote_domain_with_retries(
     registrar: &dyn DomainRegistrar,

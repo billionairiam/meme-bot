@@ -9,9 +9,7 @@ use crate::models::PaymentChain;
 
 use super::helpers::{build_mode_label, html_escape, is_message_not_modified};
 use super::keyboards::*;
-use super::types::{
-    DraftStep, OrderDraft, Sessions, TelegramUiConfig, UiMessage,
-};
+use super::types::{DraftStep, OrderDraft, Sessions, TelegramUiConfig, UiMessage};
 
 pub(crate) async fn send_screen(
     bot: &Bot,
@@ -86,11 +84,7 @@ fn ask_logo_text() -> &'static str {
     "🖼 <b>1/7 Logo</b>\nUpload token logo."
 }
 
-async fn status_text(
-    user_id: UserId,
-    sessions: &Sessions,
-    pool: &SqlitePool,
-) -> String {
+async fn status_text(user_id: UserId, sessions: &Sessions, pool: &SqlitePool) -> String {
     if let Some(draft) = super::helpers::get_session(user_id, sessions) {
         return format!(
             "📊 <b>Current Order</b>\nStatus: <code>{:?}</code>\nMode: <b>{}</b>\nPrice: <b>{}</b> USDT",
@@ -238,8 +232,7 @@ pub(crate) async fn show_template_confirmation(
     template_id: &str,
     config: &TelegramUiConfig,
 ) -> ResponseResult<()> {
-    let Some(template) =
-        super::helpers::find_template(&config.template_options, template_id)
+    let Some(template) = super::helpers::find_template(&config.template_options, template_id)
     else {
         return send_screen(
             bot,
@@ -270,8 +263,7 @@ pub(crate) async fn edit_template_confirmation(
     template_id: &str,
     config: &TelegramUiConfig,
 ) -> ResponseResult<()> {
-    let Some(template) =
-        super::helpers::find_template(&config.template_options, template_id)
+    let Some(template) = super::helpers::find_template(&config.template_options, template_id)
     else {
         return edit_screen(
             bot,
@@ -362,10 +354,7 @@ pub(crate) async fn edit_history(
     .await
 }
 
-pub(crate) async fn edit_payment_chain_menu(
-    bot: &Bot,
-    target: UiMessage,
-) -> ResponseResult<()> {
+pub(crate) async fn edit_payment_chain_menu(bot: &Bot, target: UiMessage) -> ResponseResult<()> {
     edit_screen(bot, target, payment_chain_text(), payment_chain_keyboard()).await
 }
 

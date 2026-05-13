@@ -22,7 +22,10 @@ pub(crate) fn get_session(user_id: UserId, sessions: &Sessions) -> Option<OrderD
         .cloned()
 }
 
-pub(crate) async fn session_step_name(user_id: UserId, sessions: &Sessions) -> Option<&'static str> {
+pub(crate) async fn session_step_name(
+    user_id: UserId,
+    sessions: &Sessions,
+) -> Option<&'static str> {
     sessions
         .lock()
         .expect("sessions lock")
@@ -110,7 +113,10 @@ pub(crate) fn template_price(
         .iter()
         .position(|template| template.id == template_id)
         .unwrap_or(0);
-    prices.get(index).copied().unwrap_or(rust_decimal::Decimal::ZERO)
+    prices
+        .get(index)
+        .copied()
+        .unwrap_or(rust_decimal::Decimal::ZERO)
 }
 
 pub(crate) fn build_mode_label(build_mode: &super::types::BuildModeDraft) -> &'static str {
@@ -131,9 +137,7 @@ pub(crate) fn payment_address_for_chain(
     }
 }
 
-pub(crate) fn payment_error_for_user(
-    error: &crate::payment::PaymentVerificationError,
-) -> String {
+pub(crate) fn payment_error_for_user(error: &crate::payment::PaymentVerificationError) -> String {
     use crate::payment::PaymentVerificationError;
     match error {
         PaymentVerificationError::NotFound => "TX not found.".to_string(),
@@ -180,9 +184,7 @@ pub(crate) fn domain_error_for_user(error: &crate::domain::DomainError) -> Strin
     }
 }
 
-pub(crate) fn website_input_from_draft(
-    draft: &OrderDraft,
-) -> Option<crate::models::WebsiteInput> {
+pub(crate) fn website_input_from_draft(draft: &OrderDraft) -> Option<crate::models::WebsiteInput> {
     Some(crate::models::WebsiteInput {
         token_ticker: draft.ticker.clone()?,
         token_name: draft.token_name.clone()?,

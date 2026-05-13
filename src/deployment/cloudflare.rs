@@ -213,10 +213,7 @@ async fn parse_pages_domain_status_response(
         .ok_or_else(|| DeploymentError::DomainBind("domain response missing status".to_string()))
 }
 
-pub fn ensure_domain_status_not_failed(
-    domain: &str,
-    status: &str,
-) -> Result<(), DeploymentError> {
+pub fn ensure_domain_status_not_failed(domain: &str, status: &str) -> Result<(), DeploymentError> {
     match status {
         "active" | "pending" | "initializing" => {
             if status != "active" {
@@ -693,7 +690,9 @@ pub async fn create_cloudflare_zone(
         .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
 
     if !status.is_success() {
-        return Err(DeploymentError::CloudflarePages(format!("{status}: {body}")));
+        return Err(DeploymentError::CloudflarePages(format!(
+            "{status}: {body}"
+        )));
     }
 
     let json: serde_json::Value = serde_json::from_str(&body)

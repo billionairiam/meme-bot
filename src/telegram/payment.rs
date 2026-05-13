@@ -10,8 +10,8 @@ use uuid::Uuid;
 use crate::{
     db,
     payment::{
-        ChainPaymentVerifier, PaymentService, PaymentVerificationError,
-        PaymentVerificationOutcome, PaymentVerificationRequest, PaymentVerifier,
+        ChainPaymentVerifier, PaymentService, PaymentVerificationError, PaymentVerificationOutcome,
+        PaymentVerificationRequest, PaymentVerifier,
     },
 };
 
@@ -21,9 +21,7 @@ use super::helpers::{
     payment_error_for_user, set_session,
 };
 use super::keyboards::status_keyboard;
-use super::types::{
-    DraftStep, Sessions, TelegramUiConfig, EXTERNAL_STEP_MAX_ATTEMPTS,
-};
+use super::types::{DraftStep, EXTERNAL_STEP_MAX_ATTEMPTS, Sessions, TelegramUiConfig};
 
 pub(crate) struct PaymentTxProcess<'a> {
     pub bot: &'a Bot,
@@ -36,7 +34,9 @@ pub(crate) struct PaymentTxProcess<'a> {
     pub tx_hash: &'a str,
 }
 
-pub(crate) async fn process_payment_tx_context(request: PaymentTxProcess<'_>) -> ResponseResult<()> {
+pub(crate) async fn process_payment_tx_context(
+    request: PaymentTxProcess<'_>,
+) -> ResponseResult<()> {
     let PaymentTxProcess {
         bot,
         chat_id,

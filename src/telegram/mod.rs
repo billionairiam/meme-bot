@@ -10,18 +10,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use sqlx::SqlitePool;
-use teloxide::{
-    dispatching::UpdateFilterExt,
-    dptree,
-    prelude::*,
-    utils::client_from_env,
-};
+use teloxide::{dispatching::UpdateFilterExt, dptree, prelude::*, utils::client_from_env};
 use tracing::info;
 
 use crate::config::Config;
 
-pub use types::{TelegramUiConfig, TemplateOption};
 pub use screens::payment_instruction;
+pub use types::{TelegramUiConfig, TemplateOption};
 
 use handlers::{handle_callback, handle_message};
 use helpers::configured_proxy;

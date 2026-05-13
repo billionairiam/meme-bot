@@ -13,15 +13,15 @@ use meme_bot::{
     deployment::{
         DeploymentError,
         cloudflare::{
-            ensure_domain_status_not_failed,
+            PagesDeploymentStatus, ensure_domain_status_not_failed,
             parse_pages_deployment_response, response_success, verify_deployment_commit,
-            verify_existing_pages_project, PagesDeploymentStatus,
+            verify_existing_pages_project,
         },
     },
     domain::{
-        ApiErrorResponse, CloudflareZoneResult, DomainError,
-        DomainPurchaseRequest, DomainPurchaseResult, DomainQuote, DomainQuoteRequest,
-        DomainRegistrar, NamecheapDnsProvisioner, NamecheapRegistrar,
+        ApiErrorResponse, CloudflareZoneResult, DomainError, DomainPurchaseRequest,
+        DomainPurchaseResult, DomainQuote, DomainQuoteRequest, DomainRegistrar,
+        NamecheapDnsProvisioner, NamecheapRegistrar,
     },
     logging::init_logging,
 };
@@ -478,7 +478,8 @@ async fn wait_pages_deployment_success(
                     "deployment {} ended with status {}",
                     deployment.id,
                     deployment.stage_status.unwrap_or_default()
-                )).into());
+                ))
+                .into());
             }
             _ => sleep(PAGES_DEPLOYMENT_POLL_INTERVAL).await,
         }
@@ -486,7 +487,8 @@ async fn wait_pages_deployment_success(
 
     Err(DomainError::Cloudflare(format!(
         "deployment {deployment_id} did not complete before timeout"
-    )).into())
+    ))
+    .into())
 }
 
 async fn bind_pages_custom_domain(
@@ -531,7 +533,7 @@ async fn bind_pages_custom_domain(
     for _ in 0..PAGES_DOMAIN_POLL_ATTEMPTS {
         if let Some(status) = get_pages_domain_status(state, project_name, domain).await? {
             ensure_domain_status_not_failed(domain, &status)?;
-        return Ok(());
+            return Ok(());
         }
         sleep(PAGES_DOMAIN_POLL_INTERVAL).await;
     }
@@ -582,9 +584,6 @@ async fn get_pages_domain_status(
         .ok_or_else(|| DomainError::Cloudflare("domain response missing status".to_string()))?;
     Ok(Some(domain_status.to_string()))
 }
-
-
-
 
 // ---- ApiError ----
 
