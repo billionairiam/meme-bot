@@ -8,7 +8,7 @@ use crate::deployment::cloudflare::publish_dir_from_site_dir;
 use crate::deployment::github::{ensure_github_repo, git_output, push_site_to_github};
 use crate::deployment::{DeploymentError, DeploymentRequest, DeploymentResult, SiteDeployer};
 use crate::domain::{
-    ApiErrorResponse, CloudflareZoneResult, DomainError, DomainPurchaseRequest,
+    ApiErrorResponse, CloudflareZoneResult, DnsProvisioner, DomainError, DomainPurchaseRequest,
     DomainPurchaseResult, DomainQuote, DomainQuoteRequest, DomainRegistrar,
 };
 
@@ -161,6 +161,17 @@ impl HttpClientDnsProvisioner {
         } else {
             Err(map_http_error(response).await)
         }
+    }
+}
+
+#[async_trait]
+impl DnsProvisioner for HttpClientDnsProvisioner {
+    async fn set_namecheap_nameservers(
+        &self,
+        domain: &str,
+        nameservers: &[String],
+    ) -> Result<(), DomainError> {
+        self.set_namecheap_nameservers(domain, nameservers).await
     }
 }
 
