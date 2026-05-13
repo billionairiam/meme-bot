@@ -13,9 +13,9 @@ use meme_bot::{
     deployment::{
         DeploymentError,
         cloudflare::{
-            PagesDeploymentStatus, ensure_domain_status_not_failed,
-            parse_pages_deployment_response, response_success, verify_deployment_commit,
-            verify_existing_pages_project,
+            PagesDeploymentStatus, ensure_domain_status_not_failed, ensure_zone_exists,
+            get_zone_info, parse_existing_zone, parse_pages_deployment_response, response_success,
+            verify_deployment_commit, verify_existing_pages_project,
         },
     },
     domain::{
@@ -205,6 +205,29 @@ async fn dns_create_zone(
         return Err(ApiError(err));
     }
 
+    // Check if zone already exists (from a previous create-zone call)
+    let zones_url = format!(
+        "https://api.cloudflare.com/client/v4/zones?name={}",
+        request.domain
+    );
+    let existing = state
+        .cf_client
+        .get(&zones_url)
+        .bearer_auth(&state.cf_api_token)
+        .send()
+        .await
+        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+    if existing.status().is_success() {
+        let body = existing
+            .text()
+            .await
+            .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+        if let Some(existing_zone) = parse_existing_zone(&body) {
+            info!(domain = %request.domain, zone_id = %existing_zone.zone_id, "zone already exists");
+            return Ok(Json(existing_zone));
+        }
+    }
+
     let response = state
         .cf_client
         .post("https://api.cloudflare.com/client/v4/zones")
@@ -223,14 +246,11 @@ async fn dns_create_zone(
         })?;
 
     let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| {
-            let err = DomainError::Cloudflare(e.to_string());
-            error!(domain = %request.domain, error = %err, "create zone read response body failed");
-            err
-        })?;
+    let body = response.text().await.map_err(|e| {
+        let err = DomainError::Cloudflare(e.to_string());
+        error!(domain = %request.domain, error = %err, "create zone read response body failed");
+        err
+    })?;
 
     if !status.is_success() {
         let err = DomainError::Cloudflare(format!("{status}: {body}"));
@@ -238,12 +258,11 @@ async fn dns_create_zone(
         return Err(err)?;
     }
 
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| {
-            let err = DomainError::Cloudflare(format!("parse response: {e}"));
-            error!(domain = %request.domain, error = %err, "create zone parse failed");
-            err
-        })?;
+    let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        let err = DomainError::Cloudflare(format!("parse response: {e}"));
+        error!(domain = %request.domain, error = %err, "create zone parse failed");
+        err
+    })?;
 
     if json.get("success").and_then(|v| v.as_bool()) != Some(true) {
         let errors = json
@@ -520,15 +539,31 @@ async fn wait_pages_deployment_success(
     .into())
 }
 
+/// Check zone exists. Does not require the zone to be "active" yet — that
+/// check happens during Pages domain polling (step 3).
 async fn bind_pages_custom_domain(
     state: &AppState,
     project_name: &str,
     domain: &str,
 ) -> Result<(), ApiError> {
-    if let Some(status) = get_pages_domain_status(state, project_name, domain).await? {
-        ensure_domain_status_not_failed(domain, &status)?;
+    // Step 1: ensure the domain's Cloudflare zone exists.
+    let _zone_id = ensure_zone_exists(&state.cf_client, &state.cf_api_token, domain)
+        .await
+        .map_err(|e| ApiError(DomainError::from(e)))?;
+
+    // If Pages domain is already bound, verify both Pages and zone status.
+    if let Some(pages_status) = get_pages_domain_status(state, project_name, domain).await? {
+        ensure_domain_status_not_failed(domain, &pages_status)?;
+        if let Some((_, zone_status)) = get_zone_info(&state.cf_client, &state.cf_api_token, domain)
+            .await
+            .map_err(|e| ApiError(DomainError::from(e)))?
+        {
+            ensure_domain_status_not_failed(domain, &zone_status)?;
+        }
         return Ok(());
     }
+
+    // Step 2: bind custom domain to Pages project.
     let bind_url = format!(
         "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects/{}/domains",
         state.cf_account_id, project_name
@@ -553,22 +588,36 @@ async fn bind_pages_custom_domain(
             .map(|success| !success)
             .unwrap_or(false)
     {
-        warn!(status = %bind_status, body = %bind_body, "custom domain bind failed");
+        warn!(?bind_status, %bind_body, "custom domain bind failed");
         return Err(DomainError::Cloudflare(format!(
             "custom domain bind failed: {bind_status}: {bind_body}"
         )))?;
     }
 
+    // Step 3: poll until both Pages domain status and zone status are active.
     for _ in 0..PAGES_DOMAIN_POLL_ATTEMPTS {
-        if let Some(status) = get_pages_domain_status(state, project_name, domain).await? {
-            ensure_domain_status_not_failed(domain, &status)?;
-            return Ok(());
+        let pages = get_pages_domain_status(state, project_name, domain).await?;
+        let zone = get_zone_info(&state.cf_client, &state.cf_api_token, domain)
+            .await
+            .map_err(|e| ApiError(DomainError::from(e)))?;
+        match (pages.as_deref(), zone.as_ref().map(|z| z.1.as_str())) {
+            // Pages domain active + zone active → done
+            (Some("active"), Some("active")) => return Ok(()),
+            // Pages domain active but zone not yet active → keep waiting
+            (Some(pages_status), Some(zone_status)) => {
+                ensure_domain_status_not_failed(domain, pages_status)?;
+                ensure_domain_status_not_failed(domain, zone_status)?;
+            }
+            (Some(pages_status), None) => {
+                ensure_domain_status_not_failed(domain, pages_status)?;
+            }
+            _ => {}
         }
         sleep(PAGES_DOMAIN_POLL_INTERVAL).await;
     }
 
     Err(DomainError::Cloudflare(format!(
-        "custom domain {domain} was not visible after binding"
+        "custom domain {domain} did not become active before timeout"
     )))?
 }
 

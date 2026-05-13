@@ -15,6 +15,8 @@ const PAGES_DEPLOYMENT_POLL_ATTEMPTS: usize = 36;
 const PAGES_DEPLOYMENT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const PAGES_DOMAIN_POLL_ATTEMPTS: usize = 120;
 const PAGES_DOMAIN_POLL_INTERVAL: Duration = Duration::from_secs(10);
+pub const ZONE_POLL_ATTEMPTS: usize = 40; // 40 * 30s = 20 min
+pub const ZONE_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 // ---- Pages deployment helpers ----
 
@@ -657,6 +659,94 @@ impl SiteDeployer for CloudflarePagesDeployer {
 
 // HttpClientPagesDeployer lives in api_client module
 
+// ---- Zone helpers ----
+
+pub fn parse_existing_zone(body: &str) -> Option<CloudflareZoneResult> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    let zone = json.get("result")?.as_array()?.first()?;
+    let zone_id = zone.get("id")?.as_str()?.to_string();
+    let nameservers: Vec<String> = zone
+        .get("name_servers")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|ns| ns.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(CloudflareZoneResult {
+        zone_id,
+        nameservers,
+    })
+}
+
+/// Returns (zone_id, zone_status) if the zone exists.
+pub async fn get_zone_info(
+    client: &Client,
+    api_token: &str,
+    domain: &str,
+) -> Result<Option<(String, String)>, DeploymentError> {
+    let response = client
+        .get(format!(
+            "https://api.cloudflare.com/client/v4/zones?name={domain}"
+        ))
+        .bearer_auth(api_token)
+        .send()
+        .await
+        .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| DeploymentError::CloudflarePages(format!("parse zone list: {e}")))?;
+    let zone = match json
+        .get("result")
+        .and_then(|r| r.as_array())
+        .and_then(|zones| zones.first())
+    {
+        Some(z) => z,
+        None => return Ok(None),
+    };
+    let zone_id = zone
+        .get("id")
+        .and_then(|id| id.as_str())
+        .unwrap_or("")
+        .to_string();
+    if zone_id.is_empty() {
+        return Ok(None);
+    }
+    let zone_status = zone
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    Ok(Some((zone_id, zone_status)))
+}
+
+/// Poll Cloudflare until the domain zone is visible, up to ~20 min.
+pub async fn ensure_zone_exists(
+    client: &Client,
+    api_token: &str,
+    domain: &str,
+) -> Result<String, DeploymentError> {
+    for attempt in 0..ZONE_POLL_ATTEMPTS {
+        if let Some((zone_id, _status)) = get_zone_info(client, api_token, domain).await? {
+            return Ok(zone_id);
+        }
+        if attempt == 0 {
+            tracing::info!(domain = %domain, "zone not found yet, waiting for Cloudflare zone provisioning (up to 20 min)");
+        }
+        sleep(ZONE_POLL_INTERVAL).await;
+    }
+    Err(DeploymentError::CloudflarePages(format!(
+        "domain {domain} zone still not visible in Cloudflare after waiting for zone provisioning"
+    )))
+}
+
 // ---- Cloudflare zone creation ----
 
 pub async fn create_cloudflare_zone(
@@ -671,6 +761,26 @@ pub async fn create_cloudflare_zone(
     }
 
     let client = Client::new();
+
+    // Check if zone already exists.
+    let zones_url = format!("https://api.cloudflare.com/client/v4/zones?name={domain}");
+    let existing = client
+        .get(&zones_url)
+        .bearer_auth(api_token)
+        .send()
+        .await
+        .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
+    if existing.status().is_success() {
+        let body = existing
+            .text()
+            .await
+            .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
+        if let Some(zone) = parse_existing_zone(&body) {
+            tracing::info!(domain = %domain, zone_id = %zone.zone_id, "zone already exists");
+            return Ok(zone);
+        }
+    }
+
     let response = client
         .post("https://api.cloudflare.com/client/v4/zones")
         .bearer_auth(api_token)
