@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use crate::{
     api_client::HttpClientDomainRegistrar,
     db,
-    domain::{DomainRegistrar, NamecheapRegistrar},
+    domain::DomainRegistrar,
     models::PaymentChain,
     validation::{
         validate_contract_address, validate_domain, validate_telegram_url, validate_x_url,
@@ -709,17 +709,23 @@ async fn handle_order_step(
                     .map(|_| ());
             }
 
-            let registrar: Box<dyn DomainRegistrar> = if let (Some(base_url), Some(api_key)) = (
+            let (Some(base_url), Some(api_key)) = (
                 config.api_service_base_url.as_deref(),
                 config.api_service_api_key.as_deref(),
-            ) {
-                Box::new(HttpClientDomainRegistrar::new(
-                    base_url.to_string(),
-                    api_key.to_string(),
-                ))
-            } else {
-                Box::new(NamecheapRegistrar::new(config.namecheap.clone()))
+            ) else {
+                let _ = bot
+                    .send_message(
+                        msg.chat.id,
+                        "❌ Domain service is not configured. Contact admin.",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .await;
+                return Ok(());
             };
+            let registrar: Box<dyn DomainRegistrar> = Box::new(HttpClientDomainRegistrar::new(
+                base_url.to_string(),
+                api_key.to_string(),
+            ));
             match quote_domain_with_retries(registrar.as_ref(), &domain).await {
                 Ok(quote) if quote.available && !quote.is_premium => {
                     info!(

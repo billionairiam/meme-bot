@@ -52,10 +52,6 @@ pub struct Config {
     pub local_templates_dir: String,
     pub github_owner: String,
     pub github_token: String,
-    pub cloudflare_account_id: String,
-    pub cloudflare_api_token: String,
-    pub cloudflare_wrangler_command: String,
-    pub cloudflare_wrangler_args: String,
     pub api_service_base_url: Option<String>,
     pub api_service_api_key: Option<String>,
     pub namecheap: NamecheapConfig,
@@ -187,14 +183,6 @@ impl Config {
                 .unwrap_or_else(|_| "./templates".to_string()),
             github_owner: env::var("GITHUB_OWNER").unwrap_or_default(),
             github_token: env::var("GITHUB_TOKEN").unwrap_or_default(),
-            cloudflare_account_id: env::var("CLOUDFLARE_ACCOUNT_ID").unwrap_or_default(),
-            cloudflare_api_token: env::var("CLOUDFLARE_API_TOKEN").unwrap_or_default(),
-            cloudflare_wrangler_command: env::var("CLOUDFLARE_WRANGLER_COMMAND")
-                .unwrap_or_else(|_| "npx".to_string()),
-            cloudflare_wrangler_args: env::var("CLOUDFLARE_WRANGLER_ARGS").unwrap_or_else(|_| {
-                "wrangler pages deploy {site_dir} --project-name={project_name} --branch={branch}"
-                    .to_string()
-            }),
             api_service_base_url: env::var("API_SERVICE_BASE_URL")
                 .ok()
                 .filter(|v| !v.is_empty()),

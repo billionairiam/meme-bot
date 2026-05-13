@@ -7,7 +7,6 @@ use crate::domain::DomainError;
 pub mod cloudflare;
 pub(crate) mod github;
 
-pub use cloudflare::CloudflarePagesDeployer;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeploymentRequest {
     pub repo_owner: String,
@@ -77,19 +76,6 @@ pub trait SiteDeployer: Send + Sync {
 mod tests {
     use super::cloudflare::*;
     use std::fs;
-
-    #[test]
-    fn renders_wrangler_args() {
-        let args = render_wrangler_args(
-            "wrangler pages deploy {site_dir} --project-name={project_name} --branch={branch}",
-            "./dist",
-            "pepe-site",
-            "main",
-        )
-        .unwrap();
-        assert_eq!(args[0], "wrangler");
-        assert_eq!(args[4], "--project-name=pepe-site");
-    }
 
     #[test]
     fn parses_cloudflare_success_field() {

@@ -7,10 +7,7 @@ use uuid::Uuid;
 use crate::{
     api_client::{HttpClientDnsProvisioner, HttpClientDomainRegistrar},
     db,
-    domain::{
-        DomainError, DomainPurchaseRequest, DomainQuoteRequest, DomainRegistrar,
-        NamecheapDnsProvisioner, NamecheapRegistrar,
-    },
+    domain::{DomainError, DomainPurchaseRequest, DomainQuoteRequest, DomainRegistrar},
 };
 
 use super::helpers::{domain_error_for_user, html_escape};
@@ -153,17 +150,24 @@ pub(crate) async fn maybe_purchase_domain_after_tx(
         domain = %domain,
         "starting post-payment domain purchase flow"
     );
-    let registrar: Box<dyn DomainRegistrar> = if let (Some(base_url), Some(api_key)) = (
+    let (Some(base_url), Some(api_key)) = (
         config.api_service_base_url.as_deref(),
         config.api_service_api_key.as_deref(),
-    ) {
-        Box::new(HttpClientDomainRegistrar::new(
-            base_url.to_string(),
-            api_key.to_string(),
-        ))
-    } else {
-        Box::new(NamecheapRegistrar::new(config.namecheap.clone()))
+    ) else {
+        warn!(
+            quote_id = %quote_id,
+            domain = %domain,
+            "domain purchase skipped: API_SERVICE_BASE_URL/API_SERVICE_API_KEY not configured"
+        );
+        return (
+            false,
+            "<b>Domain:</b> API server not configured. Contact admin.".to_string(),
+        );
     };
+    let registrar: Box<dyn DomainRegistrar> = Box::new(HttpClientDomainRegistrar::new(
+        base_url.to_string(),
+        api_key.to_string(),
+    ));
 
     let quote_record = match db::get_domain_quote_for_purchase(pool, quote_id).await {
         Ok(record) => record,
@@ -404,48 +408,19 @@ async fn setup_cloudflare_dns_after_purchase(
     config: &TelegramUiConfig,
     domain: &str,
 ) -> Result<crate::domain::CloudflareZoneResult, String> {
-    if let (Some(base_url), Some(api_key)) = (
+    let (Some(base_url), Some(api_key)) = (
         config.api_service_base_url.as_deref(),
         config.api_service_api_key.as_deref(),
-    ) {
-        let dns = HttpClientDnsProvisioner::new(base_url.to_string(), api_key.to_string());
-        info!(%domain, "creating cloudflare zone through api-server");
-        return match dns.create_zone(domain).await {
-            Ok(zone) => match dns
-                .set_namecheap_nameservers(domain, &zone.nameservers)
-                .await
-            {
-                Ok(()) => {
-                    info!(
-                        %domain,
-                        cloudflare_zone_id = %zone.zone_id,
-                        nameservers = ?zone.nameservers,
-                        "namecheap nameservers updated through api-server"
-                    );
-                    Ok(zone)
-                }
-                Err(error) => Err(format!(
-                    "\n<b>DNS nameserver update failed.</b> {}",
-                    html_escape(&domain_error_for_user(&error))
-                )),
-            },
-            Err(error) => Err(format!(
-                "\n<b>Cloudflare zone creation failed.</b> {}",
-                html_escape(&domain_error_for_user(&error))
-            )),
-        };
-    }
+    ) else {
+        return Err(
+            "\n<b>DNS setup failed.</b> API server not configured. Contact admin.".to_string(),
+        );
+    };
 
-    let namecheap = NamecheapDnsProvisioner::new(config.namecheap.clone());
-    info!(%domain, "creating cloudflare zone directly");
-    match crate::deployment::cloudflare::create_cloudflare_zone(
-        &config.cloudflare_account_id,
-        &config.cloudflare_api_token,
-        domain,
-    )
-    .await
-    {
-        Ok(zone) => match namecheap
+    let dns = HttpClientDnsProvisioner::new(base_url.to_string(), api_key.to_string());
+    info!(%domain, "creating cloudflare zone through api-server");
+    match dns.create_zone(domain).await {
+        Ok(zone) => match dns
             .set_namecheap_nameservers(domain, &zone.nameservers)
             .await
         {
@@ -454,7 +429,7 @@ async fn setup_cloudflare_dns_after_purchase(
                     %domain,
                     cloudflare_zone_id = %zone.zone_id,
                     nameservers = ?zone.nameservers,
-                    "namecheap nameservers updated directly"
+                    "namecheap nameservers updated through api-server"
                 );
                 Ok(zone)
             }
@@ -463,13 +438,10 @@ async fn setup_cloudflare_dns_after_purchase(
                 html_escape(&domain_error_for_user(&error))
             )),
         },
-        Err(error) => {
-            let domain_err: DomainError = error.into();
-            Err(format!(
-                "\n<b>Cloudflare zone creation failed.</b> {}",
-                html_escape(&domain_error_for_user(&domain_err))
-            ))
-        }
+        Err(error) => Err(format!(
+            "\n<b>Cloudflare zone creation failed.</b> {}",
+            html_escape(&domain_error_for_user(&error))
+        )),
     }
 }
 
