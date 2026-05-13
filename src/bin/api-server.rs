@@ -156,7 +156,10 @@ async fn domain_quote(
         .quote(&request)
         .await
         .map(Json)
-        .map_err(ApiError)
+        .map_err(|e| {
+            error!(domain = %request.domain, error = %e, "domain quote failed");
+            ApiError(e)
+        })
 }
 
 async fn domain_purchase(
@@ -169,7 +172,10 @@ async fn domain_purchase(
         .purchase(&request)
         .await
         .map(Json)
-        .map_err(ApiError)
+        .map_err(|e| {
+            error!(domain = %request.domain, error = %e, "domain purchase failed");
+            ApiError(e)
+        })
 }
 
 // ---- DNS ----
@@ -192,9 +198,11 @@ async fn dns_create_zone(
     info!(domain = %request.domain, "create zone");
 
     if state.cf_account_id.is_empty() || state.cf_api_token.is_empty() {
-        return Err(ApiError(DomainError::MissingConfig(
+        let err = DomainError::MissingConfig(
             "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN".to_string(),
-        )));
+        );
+        error!(domain = %request.domain, error = %err, "create zone failed");
+        return Err(ApiError(err));
     }
 
     let response = state
@@ -208,29 +216,43 @@ async fn dns_create_zone(
         }))
         .send()
         .await
-        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+        .map_err(|e| {
+            let err = DomainError::Cloudflare(e.to_string());
+            error!(domain = %request.domain, error = %err, "create zone http request failed");
+            err
+        })?;
 
     let status = response.status();
     let body = response
         .text()
         .await
-        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+        .map_err(|e| {
+            let err = DomainError::Cloudflare(e.to_string());
+            error!(domain = %request.domain, error = %err, "create zone read response body failed");
+            err
+        })?;
 
     if !status.is_success() {
-        return Err(DomainError::Cloudflare(format!("{status}: {body}")))?;
+        let err = DomainError::Cloudflare(format!("{status}: {body}"));
+        error!(domain = %request.domain, error = %err, "create zone upstream error");
+        return Err(err)?;
     }
 
     let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| DomainError::Cloudflare(format!("parse response: {e}")))?;
+        .map_err(|e| {
+            let err = DomainError::Cloudflare(format!("parse response: {e}"));
+            error!(domain = %request.domain, error = %err, "create zone parse failed");
+            err
+        })?;
 
     if json.get("success").and_then(|v| v.as_bool()) != Some(true) {
         let errors = json
             .get("errors")
             .map(|e| e.to_string())
             .unwrap_or_else(|| "unknown error".to_string());
-        return Err(DomainError::Cloudflare(format!(
-            "zone creation failed: {errors}"
-        )))?;
+        let err = DomainError::Cloudflare(format!("zone creation failed: {errors}"));
+        error!(domain = %request.domain, error = %err, "create zone cloudflare rejected");
+        return Err(err)?;
     }
 
     let result = json
@@ -263,13 +285,16 @@ async fn dns_set_nameservers(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SetNameserversRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    info!(domain = %request.domain, "set nameservers");
+    info!(domain = %request.domain, nameservers = ?request.nameservers, "set nameservers");
     state
         .nc_dns
         .set_namecheap_nameservers(&request.domain, &request.nameservers)
         .await
         .map(|_| Json(serde_json::json!({})))
-        .map_err(ApiError)
+        .map_err(|e| {
+            error!(domain = %request.domain, error = %e, "set nameservers failed");
+            ApiError(e)
+        })
 }
 
 // ---- Cloudflare Pages (Git integration) ----
@@ -303,9 +328,11 @@ async fn pages_deploy(
     );
 
     if state.cf_account_id.is_empty() || state.cf_api_token.is_empty() {
-        return Err(ApiError(DomainError::MissingConfig(
+        let err = DomainError::MissingConfig(
             "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN".to_string(),
-        )));
+        );
+        error!(project = %request.project_name, error = %err, "pages deploy failed");
+        return Err(ApiError(err));
     }
 
     let cf_url = format!(
@@ -340,6 +367,7 @@ async fn pages_deploy(
             .text()
             .await
             .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
+        error!(project = %request.project_name, status = %status, body = %body, "get existing pages project failed");
         return Err(DomainError::Cloudflare(format!(
             "get project failed: {status}: {body}"
         )))?;
@@ -397,6 +425,7 @@ async fn pages_deploy(
                 .get("errors")
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "unknown error".to_string());
+            error!(project = %request.project_name, errors = %errors, "cloudflare pages project creation rejected");
             return Err(DomainError::Cloudflare(format!(
                 "pages project creation failed: {errors}"
             )))?;

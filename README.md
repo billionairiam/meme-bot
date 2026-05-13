@@ -114,32 +114,114 @@ The `api-server` binary exposes Namecheap and Cloudflare operations behind a RES
 
 All under `/api/v1/`. Auth: `X-API-Key` header (except health).
 
-#### Domain (Namecheap)
+#### `GET /api/v1/health`
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/domain/quote` | Check domain availability and get price |
-| POST | `/domain/purchase` | Register a domain |
+No auth required. Returns `{"status":"ok"}`.
 
-#### DNS
+#### `POST /api/v1/domain/quote`
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/dns/create-zone` | Create a Cloudflare zone for a domain |
-| POST | `/dns/set-nameservers` | Set Namecheap nameservers for a domain |
-| POST | `/dns/set-records` | Set DNS records on Namecheap |
+Check domain availability and get price.
 
-#### Cloudflare Pages (Git Integration)
+Request:
+```json
+{"domain": "example.xyz"}
+```
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/pages/deploy` | Create a Cloudflare Pages project connected to a GitHub repo, optionally bind a custom domain |
+Response (200):
+```json
+{
+  "domain": "example.xyz",
+  "tld": "xyz",
+  "available": true,
+  "is_premium": false,
+  "price_usd": "1.48",
+  "years": 1
+}
+```
 
-#### Health
+#### `POST /api/v1/domain/purchase`
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/health` | Returns `{"status":"ok"}` |
+Register a domain.
+
+Request:
+```json
+{"domain": "example.xyz", "years": 1, "privacy_enabled": true}
+```
+
+Response (200):
+```json
+{
+  "namecheap_order_id": "123456",
+  "namecheap_transaction_id": "789012",
+  "charged_amount_usd": "1.48"
+}
+```
+
+#### `POST /api/v1/dns/create-zone`
+
+Create a Cloudflare zone for a domain. Returns the Cloudflare-assigned nameservers so the caller can then point the domain's nameservers at them via `/dns/set-nameservers`.
+
+Request:
+```json
+{"domain": "example.xyz"}
+```
+
+Response (200):
+```json
+{
+  "zone_id": "abc123def456",
+  "nameservers": ["dave.ns.cloudflare.com", "lola.ns.cloudflare.com"]
+}
+```
+
+#### `POST /api/v1/dns/set-nameservers`
+
+Point a Namecheap domain's nameservers at Cloudflare.
+
+Request:
+```json
+{
+  "domain": "example.xyz",
+  "nameservers": ["dave.ns.cloudflare.com", "lola.ns.cloudflare.com"]
+}
+```
+
+Response (200): `{}`
+
+#### `POST /api/v1/pages/deploy`
+
+Create or verify a Cloudflare Pages project connected to a GitHub repo, trigger a deployment, wait for it to succeed, and optionally bind a custom domain. This is a long-running endpoint (up to ~5 minutes due to deployment polling).
+
+Request:
+```json
+{
+  "project_name": "example.xyz",
+  "github_owner": "memebot",
+  "github_repo": "example.xyz",
+  "production_branch": "main",
+  "publish_dir": "/",
+  "custom_domain": "example.xyz",
+  "expected_commit_sha": "abc123def"
+}
+```
+
+| Field | Required | Default | Notes |
+|-------|----------|---------|-------|
+| `project_name` | Yes | — | Cloudflare Pages project name |
+| `github_owner` | Yes | — | GitHub user/org that owns the repo |
+| `github_repo` | Yes | — | GitHub repository name |
+| `production_branch` | Yes | — | Branch to deploy (e.g. `main`) |
+| `publish_dir` | No | `"/"` | Directory within the repo to serve |
+| `custom_domain` | No | — | Custom domain to bind after deployment |
+| `expected_commit_sha` | No | — | If set, the deployment's commit hash is verified against this value |
+
+Response (200):
+```json
+{
+  "cloudflare_pages_url": "https://example-xyz.pages.dev",
+  "custom_domain": "example.xyz"
+}
+```
 
 ### Error format
 
@@ -284,12 +366,53 @@ curl -X POST http://127.0.0.1:8080/api/v1/domain/quote \
   -d '{"domain":"test.xyz"}'
 # → {"error":"unauthorized","message":"invalid API key"}
 
-# With correct key
+# ---- Domain ----
+
+# Check domain availability and price
 curl -X POST http://127.0.0.1:8080/api/v1/domain/quote \
   -H "Content-Type: application/json" \
   -H "X-API-Key: <your-key>" \
   -d '{"domain":"test.xyz"}'
-# → {"domain":"test.xyz","available":...,"price":...,"currency":"USD","tld":"xyz",...}
+# → {"domain":"test.xyz","tld":"xyz","available":true,"is_premium":false,"price_usd":"1.48","years":1}
+
+# Register a domain (sandbox only!)
+curl -X POST http://127.0.0.1:8080/api/v1/domain/purchase \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <your-key>" \
+  -d '{"domain":"test.xyz","years":1,"privacy_enabled":true}'
+# → {"namecheap_order_id":"123456","namecheap_transaction_id":"789012","charged_amount_usd":"1.48"}
+
+# ---- DNS ----
+
+# Create a Cloudflare zone and get the assigned nameservers
+curl -X POST http://127.0.0.1:8080/api/v1/dns/create-zone \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <your-key>" \
+  -d '{"domain":"test.xyz"}'
+# → {"zone_id":"abc123def456","nameservers":["dave.ns.cloudflare.com","lola.ns.cloudflare.com"]}
+
+# Point Namecheap domain nameservers at Cloudflare
+curl -X POST http://127.0.0.1:8080/api/v1/dns/set-nameservers \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <your-key>" \
+  -d '{"domain":"test.xyz","nameservers":["dave.ns.cloudflare.com","lola.ns.cloudflare.com"]}'
+# → {}
+
+# ---- Cloudflare Pages ----
+
+# Create Pages project connected to a GitHub repo and deploy
+curl -X POST http://127.0.0.1:8080/api/v1/pages/deploy \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <your-key>" \
+  -d '{
+    "project_name": "test.xyz",
+    "github_owner": "memebot",
+    "github_repo": "test.xyz",
+    "production_branch": "main",
+    "publish_dir": "/",
+    "custom_domain": "test.xyz"
+  }'
+# → {"cloudflare_pages_url":"https://test-xyz.pages.dev","custom_domain":"test.xyz"}
 ```
 
 ### Reverse proxy (Caddy)
@@ -532,26 +655,57 @@ cargo test
 
 ```
 mem-bot/
-├── migrations/          # SQLx migration files
+├── migrations/              # SQLx migration files
 ├── src/
-│   ├── lib.rs           # Library root (shared modules)
+│   ├── lib.rs               # Library root (shared modules)
 │   ├── bin/
 │   │   ├── meme-bot.rs      # Telegram bot + queue worker
 │   │   └── api-server.rs    # API server binary
-│   ├── app.rs           # App wiring (queue + deployer)
-│   ├── config.rs        # Env var configuration
-│   ├── db.rs            # Database queries
-│   ├── deployment.rs    # SiteDeployer trait + impls
-│   ├── domain.rs        # DomainRegistrar/DnsProvisioner trait + impls
-│   ├── generation.rs    # AI agent generation
-│   ├── models.rs        # Shared domain types
-│   ├── payment.rs       # Payment verification
-│   ├── queue.rs         # Generation job queue
-│   ├── telegram.rs      # Telegram bot UI
-│   └── validation.rs    # Input validation
-├── templates/           # Local template files
+│   ├── api_client.rs        # HttpClient* structs (API server proxy)
+│   ├── app.rs               # App wiring (queue + deployer)
+│   ├── config.rs            # Env var configuration
+│   ├── db.rs                # Database queries
+│   ├── deployment/
+│   │   ├── mod.rs           # SiteDeployer trait + types
+│   │   ├── cloudflare.rs    # CloudflarePagesDeployer + create_cloudflare_zone
+│   │   └── github.rs        # GitHub repo create + push
+│   ├── domain/
+│   │   ├── mod.rs           # Module re-exports
+│   │   ├── registrar.rs     # DomainRegistrar trait + DomainError
+│   │   ├── namecheap.rs     # NamecheapRegistrar impl
+│   │   ├── namecheap_xml.rs # Namecheap XML parser
+│   │   ├── dns.rs           # DnsProvisioner trait + NamecheapDnsProvisioner
+│   │   └── tests.rs         # Domain integration tests
+│   ├── generation.rs        # AI agent generation
+│   ├── models.rs            # Shared domain types
+│   ├── payment.rs           # Payment verification
+│   ├── queue.rs             # Generation job queue
+│   ├── telegram/
+│   │   ├── mod.rs           # Dispatcher + handler setup
+│   │   ├── handlers.rs      # Command/message/callback handlers
+│   │   ├── screens.rs       # Wizard step screens
+│   │   ├── keyboards.rs     # Inline keyboard builders
+│   │   ├── domain_flow.rs   # Domain purchase + DNS provisioning
+│   │   ├── payment.rs       # Payment chain selection + TX submission
+│   │   ├── helpers.rs       # Utility functions
+│   │   └── types.rs         # Telegram-specific types
+│   └── validation.rs        # Input validation
+├── prompts/                 # Agent prompt templates
+├── scripts/                 # generate-api-key.sh, set_telegram_commands.sh
 ├── .cargo/
-│   └── config.toml      # Cargo aliases (build-musl-release)
+│   └── config.toml          # Cargo aliases (build-musl-release)
 ├── Cargo.toml
 └── CLAUDE.md
 ```
+
+curl -X POST https://api.sunyukong.vip/api/v1/domain/purchase \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: lUtWop9prCWw7J41Mx6PRw3eQFyw9XUPAzM9bx83IVvgGyHV5Ujfyo8/P1XJb0xc" \
+  -d '{"domain":"callyouearsss.xyz","years":1,"privacy_enabled":true}'
+
+curl -X POST https://api.sunyukong.vip/api/v1/domain/quote   -H "Content-Type: application/json"   -H "X-API-Key: lUtWop9prCWw7J41Mx6PRw3eQFyw9XUPAzM9bx83IVvgGyHV5Ujfyo8/P1XJb0xc"   -d '{"domain":"callyouear.xyz"}'
+
+curl -X POST https://api.sunyukong.vip/api/v1/dns/set-nameservers \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: lUtWop9prCWw7J41Mx6PRw3eQFyw9XUPAzM9bx83IVvgGyHV5Ujfyo8/P1XJb0xc" \
+  -d '{"domain":"callyouearsss.xyz","nameservers":["dave.ns.cloudflare.com","lola.ns.cloudflare.com"]}'
