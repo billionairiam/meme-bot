@@ -1443,6 +1443,46 @@ fn parse_db_datetime(value: &str) -> anyhow::Result<DateTime<Utc>> {
     Ok(DateTime::from_naive_utc_and_offset(naive, Utc))
 }
 
+/// Reset generation jobs stuck in `needs_manual_review` or `running` back to
+/// `queued` so they are retried on next startup. Also resets matching order
+/// `site_status`. Returns the number of jobs reset.
+pub async fn reset_stuck_generation_jobs(pool: &SqlitePool) -> anyhow::Result<u64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE generation_jobs
+        SET status = 'queued',
+            attempt_count = 0,
+            started_at = NULL,
+            finished_at = NULL,
+            locked_by = NULL,
+            locked_at = NULL,
+            updated_at = datetime('now')
+        WHERE status IN ('needs_manual_review', 'running')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let count = result.rows_affected();
+    if count > 0 {
+        sqlx::query(
+            r#"
+            UPDATE orders
+            SET site_status = 'queued', updated_at = datetime('now')
+            WHERE site_status IN ('needs_manual_review', 'generating')
+              AND payment_status = 'paid'
+              AND id IN (
+                  SELECT order_id FROM generation_jobs WHERE status = 'queued'
+              )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::domain::DomainQuote;

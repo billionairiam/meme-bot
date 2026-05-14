@@ -50,6 +50,12 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("normalize sqlite uuid storage")?;
 
+    match meme_bot::db::reset_stuck_generation_jobs(&pool).await {
+        Ok(0) => {}
+        Ok(count) => info!(count, "reset stuck generation jobs back to queued"),
+        Err(error) => warn!(?error, "failed to reset stuck generation jobs"),
+    }
+
     let (notification_tx, mut notification_rx) =
         mpsc::unbounded_channel::<meme_bot::queue::UserNotification>();
 
