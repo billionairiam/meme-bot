@@ -93,37 +93,32 @@ async fn status_text(user_id: UserId, sessions: &Sessions, pool: &SqlitePool) ->
             draft.site_price_usdt
         );
     }
-    match db::get_user_order(pool, user_id.0 as i64).await {
-        Ok(Some(order)) => {
-            let site_display = match order.site_status.as_str() {
-                "collecting_assets" => "📝 Collecting info",
-                "queued" => "⏳ Queued for generation",
-                "generating" => "⚙️ Generating website",
-                "deploying" => "🚀 Deploying",
-                "live" => "✅ Live",
-                "needs_manual_review" => "🔧 Under admin review",
-                "failed" => "❌ Failed",
-                other => other,
-            };
-            format!(
-                "📊 <b>Order Status</b>\nPayment: {}\nSite: {}\nAmount: {} USDT\nChain: {}\nDomain: {}",
-                order.payment_status,
-                site_display,
-                order.amount_usdt,
-                order.payment_chain.as_deref().unwrap_or("—"),
-                order.requested_domain.as_deref().unwrap_or("—"),
-            )
+    match db::get_active_orders(pool, user_id.0 as i64).await {
+        Ok(orders) if orders.is_empty() => {
+            "📊 <b>Order Status</b>\nNo active order. Use /create.".to_string()
         }
-        Ok(None) => "📊 <b>Order Status</b>\nNo active order. Use /create.".to_string(),
+        Ok(orders) => {
+            let mut lines = vec!["📊 <b>Order Status</b>".to_string()];
+            for order in &orders {
+                lines.push(format!(
+                    "• {} · {} USDT · {} · {}",
+                    order.status.display_label(),
+                    order.total_usdt,
+                    order.payment_chain.map(|c| c.as_str()).unwrap_or("—"),
+                    order.requested_domain.as_deref().unwrap_or("—"),
+                ));
+            }
+            lines.join("\n")
+        }
         Err(_) => "📊 <b>Order Status</b>\nCheck failed. Try later.".to_string(),
     }
 }
 
 async fn history_text(user_id: UserId, pool: &SqlitePool) -> String {
-    match db::get_user_paid_order_history(pool, user_id.0 as i64, 10).await {
-        Ok(items) if items.is_empty() => "🧾 <b>History</b>\nNo paid orders.".to_string(),
+    match db::get_completed_orders(pool, user_id.0 as i64, 10).await {
+        Ok(items) if items.is_empty() => "🧾 <b>History</b>\nNo completed orders.".to_string(),
         Ok(items) => {
-            let mut lines = vec!["🧾 <b>Paid Orders</b>".to_string()];
+            let mut lines = vec!["🧾 <b>Completed Orders</b>".to_string()];
             for (index, item) in items.iter().enumerate() {
                 let domain = item
                     .custom_domain
@@ -137,12 +132,11 @@ async fn history_text(user_id: UserId, pool: &SqlitePool) -> String {
                     .map(|value| value.format("%Y-%m-%d").to_string())
                     .unwrap_or_else(|| "—".to_string());
                 lines.push(format!(
-                    "{}. {} · {} USDT · {} · {} · {}",
+                    "{}. {} · {} USDT · {} · {}",
                     index + 1,
                     html_escape(domain),
-                    item.amount_usdt,
+                    item.total_usdt,
                     chain,
-                    item.site_status,
                     paid_at
                 ));
             }
@@ -152,7 +146,7 @@ async fn history_text(user_id: UserId, pool: &SqlitePool) -> String {
             warn!(
                 ?error,
                 user_id = user_id.0 as i64,
-                "failed to load paid order history"
+                "failed to load completed order history"
             );
             "🧾 <b>History</b>\nCheck failed. Try later.".to_string()
         }

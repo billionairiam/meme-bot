@@ -7,10 +7,7 @@ use rust_decimal::Decimal;
 use teloxide::types::{ChatId, MessageId, UserId};
 use uuid::Uuid;
 
-use crate::{
-    config::GenerationProviderName,
-    models::PaymentChain,
-};
+use crate::{config::GenerationProviderName, models::PaymentChain};
 
 pub(crate) type Sessions = Arc<Mutex<HashMap<UserId, OrderDraft>>>;
 
@@ -164,7 +161,6 @@ pub(crate) struct OrderDraft {
     pub x_link: Option<String>,
     pub telegram_link: Option<String>,
     pub website_url: Option<String>,
-    pub domain_quote_id: Option<Uuid>,
     pub domain_price_usdt: Option<Decimal>,
     pub alternative_domains: Option<Vec<crate::domain::DomainQuote>>,
     pub total_usdt: Option<Decimal>,
@@ -241,7 +237,6 @@ impl OrderDraft {
             x_link: None,
             telegram_link: None,
             website_url: None,
-            domain_quote_id: None,
             domain_price_usdt: None,
             alternative_domains: None,
             total_usdt: None,

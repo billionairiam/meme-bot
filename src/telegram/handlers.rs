@@ -9,7 +9,7 @@ use crate::{
     api_client::HttpClientDomainRegistrar,
     db,
     domain::DomainRegistrar,
-    models::PaymentChain,
+    models::{OrderStatus, PaymentChain},
     validation::{
         validate_contract_address, validate_domain, validate_telegram_url, validate_x_url,
     },
@@ -346,7 +346,7 @@ async fn start_new_order_session(
     )
     .await?;
 
-    if db::has_pending_order(pool, telegram_user_id.0 as i64).await? {
+    if db::has_unpaid_order(pool, telegram_user_id.0 as i64).await? {
         anyhow::bail!("has pending order");
     }
 
@@ -354,13 +354,12 @@ async fn start_new_order_session(
         BuildModeDraft::Template => crate::models::BuildMode::Template,
         BuildModeDraft::AiFree => crate::models::BuildMode::AiFree,
     };
-    let order_id = db::create_site_order(
+    let order_id = db::create_order(
         pool,
         db_user_id,
         build_mode,
         draft.template_id.as_deref(),
         draft.site_price_usdt,
-        None,
     )
     .await?;
     info!(
@@ -425,8 +424,11 @@ async fn handle_order_step(
         if let Some(text) = msg.text().map(str::trim)
             && looks_like_tx_hash(text)
         {
-            match db::get_latest_pending_payment_context_for_user(pool, user_id.0 as i64).await {
-                Ok(Some(context)) => {
+            match db::get_unpaid_order(pool, user_id.0 as i64).await {
+                Ok(Some(order))
+                    if order.status == crate::models::OrderStatus::NeedPay
+                        && order.payment_chain.is_some() =>
+                {
                     return process_payment_tx_context(PaymentTxProcess {
                         bot: &bot,
                         chat_id: msg.chat.id,
@@ -434,17 +436,19 @@ async fn handle_order_step(
                         config: &config,
                         sessions: &sessions,
                         pool,
-                        context,
+                        order_id: order.id,
+                        chain: order.payment_chain.unwrap(),
+                        amount_usdt: order.total_usdt,
                         tx_hash: text,
                     })
                     .await;
                 }
-                Ok(None) => {}
+                Ok(_) => {}
                 Err(error) => {
                     warn!(
                         ?error,
                         user_id = user_id.0 as i64,
-                        "failed to recover pending payment context"
+                        "failed to recover unpaid order for tx hash"
                     );
                     return bot
                         .send_message(
@@ -722,10 +726,7 @@ async fn handle_order_step(
                         Err(e) => {
                             warn!(?e, user_id = user_id.0 as i64, "failed to upsert user");
                             return bot
-                                .send_message(
-                                    msg.chat.id,
-                                    "<b>Error.</b>\nPlease try again.",
-                                )
+                                .send_message(msg.chat.id, "<b>Error.</b>\nPlease try again.")
                                 .parse_mode(ParseMode::Html)
                                 .await
                                 .map(|_| ());
@@ -802,52 +803,46 @@ async fn handle_order_step(
                     draft.db_user_id = Some(db_user_id);
                     draft.domain_price_usdt = Some(quote.price_usd);
                     let total = draft.site_price_usdt + quote.price_usd;
-                    match db::record_domain_quote(pool, db_user_id, &quote, quote.price_usd).await {
-                        Ok(quote_id) => {
-                            info!(
-                                user_id = user_id.0 as i64,
-                                quote_id = %quote_id,
-                                domain = %quote.domain,
-                                "domain quote persisted"
-                            );
-                            if let Some(order_id) = draft.order_id
-                                && let Err(error) = db::prepare_order_for_payment(
-                                    pool,
-                                    order_id,
-                                    total,
-                                    Some(quote_id),
-                                )
+                    if let Some(order_id) = draft.order_id {
+                        if let Err(error) =
+                            db::set_order_domain_pricing(pool, order_id, quote.price_usd, total)
                                 .await
-                            {
-                                warn!(
-                                    ?error,
-                                    user_id = user_id.0 as i64,
-                                    order_id = %order_id,
-                                    quote_id = %quote_id,
-                                    "failed to attach domain quote to pending order"
-                                );
-                                return bot
-                                    .send_message(
-                                        msg.chat.id,
-                                        "<b>Quote save failed.</b>\nPlease try again.",
-                                    )
-                                    .parse_mode(ParseMode::Html)
-                                    .await
-                                    .map(|_| ());
-                            }
-                            draft.domain_quote_id = Some(quote_id)
-                        }
-                        Err(e) => {
-                            warn!(?e, "failed to record domain quote");
+                        {
+                            warn!(
+                                ?error,
+                                user_id = user_id.0 as i64,
+                                order_id = %order_id,
+                                "failed to set domain pricing on order"
+                            );
                             return bot
                                 .send_message(
                                     msg.chat.id,
-                                    "<b>Quote failed.</b>\nPlease try again.",
+                                    "<b>Quote save failed.</b>\nPlease try again.",
                                 )
                                 .parse_mode(ParseMode::Html)
                                 .await
                                 .map(|_| ());
                         }
+                        if let Err(error) = db::update_order_field(
+                            pool,
+                            order_id,
+                            "requested_domain",
+                            &quote.domain,
+                        )
+                        .await
+                        {
+                            warn!(
+                                ?error,
+                                order_id = %order_id,
+                                "failed to update requested_domain on order"
+                            );
+                        }
+                        info!(
+                            user_id = user_id.0 as i64,
+                            order_id = %order_id,
+                            domain = %quote.domain,
+                            "domain pricing persisted on order"
+                        );
                     }
                     draft.total_usdt = Some(total);
                     draft.step = DraftStep::ReadyToPay;
@@ -940,10 +935,18 @@ async fn handle_order_step(
                     .map(|_| ());
             };
 
-            let context = match db::get_payment_context_by_order(pool, order_id).await {
-                Ok(context) => context,
+            let order = match db::get_order(pool, order_id).await {
+                Ok(Some(order)) => order,
+                Ok(None) => {
+                    warn!(order_id = %order_id, "order not found");
+                    return bot
+                        .send_message(msg.chat.id, "⚠️ <b>Order not found.</b>\nUse /create.")
+                        .parse_mode(ParseMode::Html)
+                        .await
+                        .map(|_| ());
+                }
                 Err(error) => {
-                    warn!(?error, order_id = %order_id, "failed to load payment context");
+                    warn!(?error, order_id = %order_id, "failed to load order");
                     return bot
                         .send_message(
                             msg.chat.id,
@@ -954,6 +957,10 @@ async fn handle_order_step(
                         .map(|_| ());
                 }
             };
+            let chain = order
+                .payment_chain
+                .or(draft.payment_chain)
+                .unwrap_or(PaymentChain::Erc20);
 
             process_payment_tx_context(PaymentTxProcess {
                 bot: &bot,
@@ -962,7 +969,9 @@ async fn handle_order_step(
                 config: &config,
                 sessions: &sessions,
                 pool,
-                context,
+                order_id,
+                chain,
+                amount_usdt: order.total_usdt,
                 tx_hash: text,
             })
             .await
@@ -1040,29 +1049,39 @@ async fn handle_continue_command(
         return continue_step_screen(bot, chat_id, &draft).await;
     }
 
-    match db::get_pending_order_for_user(pool, user_id.0 as i64).await {
+    match db::get_unpaid_order(pool, user_id.0 as i64).await {
         Ok(Some(order)) => {
             let build_mode = match order.build_mode {
                 Some(crate::models::BuildMode::Template) => BuildModeDraft::Template,
                 _ => BuildModeDraft::AiFree,
             };
+            let step = match order.status {
+                OrderStatus::NeedLogo => DraftStep::WaitingLogo,
+                OrderStatus::NeedTicker => DraftStep::WaitingTicker,
+                OrderStatus::NeedName => DraftStep::WaitingTokenName,
+                OrderStatus::NeedContract => DraftStep::WaitingContractAddress,
+                OrderStatus::NeedXLink => DraftStep::WaitingXLink,
+                OrderStatus::NeedTme => DraftStep::WaitingTelegramLink,
+                OrderStatus::NeedDomain => DraftStep::WaitingWebsiteUrl,
+                OrderStatus::NeedPay => DraftStep::ReadyToPay,
+                _ => DraftStep::ReadyToPay,
+            };
             let draft = OrderDraft {
                 build_mode,
-                step: DraftStep::ReadyToPay,
-                site_price_usdt: order.amount_usdt,
+                step,
+                site_price_usdt: order.site_price_usdt,
                 template_id: order.template_id.clone(),
-                logo_file_id: None,
-                ticker: None,
-                token_name: None,
-                contract_address: None,
-                x_link: None,
-                telegram_link: None,
-                website_url: None,
-                domain_quote_id: None,
-                domain_price_usdt: None,
+                logo_file_id: order.logo_asset_path.clone(),
+                ticker: order.token_ticker.clone(),
+                token_name: order.token_name.clone(),
+                contract_address: order.contract_address.clone(),
+                x_link: order.x_url.clone(),
+                telegram_link: order.telegram_url.clone(),
+                website_url: order.requested_domain.clone(),
+                domain_price_usdt: Some(order.domain_price_usdt),
                 alternative_domains: None,
-                total_usdt: Some(order.amount_usdt),
-                payment_chain: None,
+                total_usdt: Some(order.total_usdt),
+                payment_chain: order.payment_chain,
                 order_id: Some(order.id),
                 db_user_id: Some(order.user_id),
                 updated_at: chrono::Utc::now(),
@@ -1166,19 +1185,18 @@ async fn edit_payment_chain_and_ask_tx(
     let order_id = if let Some(order_id) = draft.order_id {
         order_id
     } else {
-        let order_id = match db::get_or_create_site_order(
+        let order_id = match db::create_order(
             pool,
             db_user_id,
             build_mode,
             template_id,
-            total,
-            draft.domain_quote_id,
+            draft.site_price_usdt,
         )
         .await
         {
             Ok(id) => id,
             Err(e) => {
-                warn!(?e, "failed to create site order");
+                warn!(?e, "failed to create order");
                 return edit_screen(
                     bot,
                     target,
@@ -1194,12 +1212,13 @@ async fn edit_payment_chain_and_ask_tx(
             order_id = %order_id,
             total_usdt = %total,
             chain = chain.as_str(),
-            "site order created before payment"
+            "order created before payment"
         );
         set_session(user_id, draft.clone(), sessions);
         order_id
     };
 
+    // Save wizard fields to order
     let Some(input) = website_input_from_draft(&draft) else {
         return edit_screen(
             bot,
@@ -1209,15 +1228,36 @@ async fn edit_payment_chain_and_ask_tx(
         )
         .await;
     };
-    if let Err(error) =
-        db::prepare_order_for_payment(pool, order_id, total, draft.domain_quote_id).await
+    let field_updates: &[(&str, &str)] = &[
+        ("token_ticker", &input.token_ticker),
+        ("token_name", &input.token_name),
+        ("contract_address", &input.contract_address),
+        ("x_url", &input.x_url),
+        ("telegram_url", &input.telegram_url),
+        ("logo_asset_path", &input.logo_asset_path),
+    ];
+    for (field, value) in field_updates {
+        if let Err(error) = db::update_order_field(pool, order_id, field, value).await {
+            warn!(?error, order_id = %order_id, field, "failed to update order field");
+        }
+    }
+    if let Some(domain) = input.requested_domain.as_deref()
+        && let Err(error) = db::update_order_field(pool, order_id, "requested_domain", domain).await
     {
-        warn!(
-            ?error,
-            user_id = user_id.0 as i64,
-            order_id = %order_id,
-            "failed to update order total and domain quote before payment"
-        );
+        warn!(?error, order_id = %order_id, "failed to update requested_domain");
+    }
+
+    // Set domain pricing
+    let domain_price = draft
+        .domain_price_usdt
+        .unwrap_or(rust_decimal::Decimal::ZERO);
+    if let Err(error) = db::set_order_domain_pricing(pool, order_id, domain_price, total).await {
+        warn!(?error, order_id = %order_id, "failed to set domain pricing");
+    }
+
+    // Transition to need_pay status
+    if let Err(error) = db::update_order_status(pool, order_id, OrderStatus::NeedPay).await {
+        warn!(?error, order_id = %order_id, "failed to update order status to need_pay");
         return edit_screen(
             bot,
             target,
@@ -1225,33 +1265,6 @@ async fn edit_payment_chain_and_ask_tx(
             main_menu_keyboard(),
         )
         .await;
-    }
-    let website_id = match db::upsert_website_for_order(pool, db_user_id, order_id, &input).await {
-        Ok(id) => {
-            info!(
-                user_id = user_id.0 as i64,
-                order_id = %order_id,
-                website_id = %id,
-                domain = input.requested_domain.as_deref().unwrap_or("<none>"),
-                "website input persisted before payment"
-            );
-            id
-        }
-        Err(error) => {
-            warn!(?error, order_id = %order_id, "failed to persist website input before payment");
-            return edit_screen(
-                bot,
-                target,
-                "<b>Order save failed.</b>\nPlease try again.",
-                main_menu_keyboard(),
-            )
-            .await;
-        }
-    };
-    if let Some(quote_id) = draft.domain_quote_id
-        && let Err(error) = db::attach_quote_website(pool, quote_id, website_id).await
-    {
-        warn!(?error, quote_id = %quote_id, website_id = %website_id, "failed to attach quote to website");
     }
 
     let payment_window = match db::attach_payment_chain(pool, order_id, chain).await {
@@ -1369,45 +1382,33 @@ async fn handle_alternative_domain_selection(
         }
     };
 
-    let domain_quote_id =
-        match db::record_domain_quote(pool, db_user_id, &quote, quote.price_usd).await {
-            Ok(id) => id,
-            Err(e) => {
-                warn!(?e, "failed to record domain quote for alt domain");
-                return edit_screen(
-                    bot,
-                    target,
-                    "<b>Selection failed.</b>\nPlease try again.",
-                    main_menu_keyboard(),
-                )
-                .await;
-            }
-        };
-
     let total = site_price_usdt + quote.price_usd;
-    if let Some(order_id) = draft.order_id
-        && let Err(error) =
-            db::prepare_order_for_payment(pool, order_id, total, Some(domain_quote_id)).await
-    {
-        warn!(
-            ?error,
-            user_id = user_id.0 as i64,
-            order_id = %order_id,
-            quote_id = %domain_quote_id,
-            "failed to attach alternative domain quote to pending order"
-        );
-        return edit_screen(
-            bot,
-            target,
-            "<b>Quote save failed.</b>\nPlease try again.",
-            main_menu_keyboard(),
-        )
-        .await;
+    if let Some(order_id) = draft.order_id {
+        if let Err(error) =
+            db::set_order_domain_pricing(pool, order_id, quote.price_usd, total).await
+        {
+            warn!(
+                ?error,
+                user_id = user_id.0 as i64,
+                order_id = %order_id,
+                "failed to set domain pricing for alt domain"
+            );
+            return edit_screen(
+                bot,
+                target,
+                "<b>Quote save failed.</b>\nPlease try again.",
+                main_menu_keyboard(),
+            )
+            .await;
+        }
+        if let Err(error) = db::update_order_field(pool, order_id, "requested_domain", domain).await
+        {
+            warn!(?error, order_id = %order_id, "failed to update requested_domain for alt domain");
+        }
     }
     draft.website_url = Some(domain.to_string());
     draft.db_user_id = Some(db_user_id);
     draft.domain_price_usdt = Some(quote.price_usd);
-    draft.domain_quote_id = Some(domain_quote_id);
     draft.total_usdt = Some(total);
     draft.step = DraftStep::ReadyToPay;
     draft.alternative_domains = None;
