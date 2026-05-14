@@ -8,7 +8,7 @@ use teloxide::types::{ChatId, MessageId, UserId};
 use uuid::Uuid;
 
 use crate::{
-    config::{GenerationProviderName, NamecheapConfig},
+    config::GenerationProviderName,
     models::PaymentChain,
 };
 
@@ -76,7 +76,7 @@ pub struct TelegramUiConfig {
     pub solana_rpc_url: String,
     pub usdt_sol_mint: String,
     pub usdt_sol_min_confirmations: u64,
-    pub namecheap: NamecheapConfig,
+    pub auto_purchase_after_tx: bool,
 }
 
 #[derive(Clone)]
@@ -121,7 +121,7 @@ impl TelegramUiConfig {
             solana_rpc_url: config.solana_rpc_url.clone(),
             usdt_sol_mint: config.usdt_sol_mint.clone(),
             usdt_sol_min_confirmations: config.usdt_sol_min_confirmations,
-            namecheap: config.namecheap.clone(),
+            auto_purchase_after_tx: config.auto_purchase_after_tx,
         }
     }
 }

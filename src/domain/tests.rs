@@ -454,7 +454,6 @@ fn sandbox_config() -> Option<NamecheapConfig> {
         username,
         client_ip,
         sandbox: true,
-        auto_purchase_after_tx: false,
         contact: sandbox_contact_config(),
     })
 }
@@ -541,7 +540,6 @@ async fn real_sandbox_missing_api_config() {
         username: String::new(),
         client_ip: String::new(),
         sandbox: true,
-        auto_purchase_after_tx: false,
         contact: sandbox_contact_config(),
     };
     let registrar = NamecheapRegistrar::new(config);

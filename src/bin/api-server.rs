@@ -300,7 +300,6 @@ fn namecheap_config_from_env() -> NamecheapConfig {
         sandbox: env::var("NAMECHEAP_SANDBOX")
             .unwrap_or_else(|_| "true".to_string())
             .eq_ignore_ascii_case("true"),
-        auto_purchase_after_tx: false,
         contact: NamecheapContactConfig {
             first_name,
             last_name,

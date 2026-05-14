@@ -116,7 +116,7 @@ pub(crate) async fn maybe_purchase_domain_after_tx(
     quote_id: Option<Uuid>,
     domain: Option<&str>,
 ) -> (bool, String) {
-    if !config.namecheap.auto_purchase_after_tx {
+    if !config.auto_purchase_after_tx {
         info!(
             quote_id = %quote_id.map(|id| id.to_string()).unwrap_or_else(|| "<none>".to_string()),
             domain = domain.unwrap_or("<none>"),

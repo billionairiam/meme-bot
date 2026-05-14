@@ -54,7 +54,7 @@ pub struct Config {
     pub github_token: String,
     pub api_service_base_url: Option<String>,
     pub api_service_api_key: Option<String>,
-    pub namecheap: NamecheapConfig,
+    pub auto_purchase_after_tx: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -64,7 +64,6 @@ pub struct NamecheapConfig {
     pub username: String,
     pub client_ip: String,
     pub sandbox: bool,
-    pub auto_purchase_after_tx: bool,
     pub contact: NamecheapContactConfig,
 }
 
@@ -189,30 +188,7 @@ impl Config {
             api_service_api_key: env::var("API_SERVICE_API_KEY")
                 .ok()
                 .filter(|v| !v.is_empty()),
-            namecheap: NamecheapConfig {
-                api_user: env::var("NAMECHEAP_API_USER").unwrap_or_default(),
-                api_key: env::var("NAMECHEAP_API_KEY").unwrap_or_default(),
-                username: env::var("NAMECHEAP_USERNAME").unwrap_or_default(),
-                client_ip: env::var("NAMECHEAP_CLIENT_IP").unwrap_or_default(),
-                sandbox: env::var("NAMECHEAP_SANDBOX")
-                    .unwrap_or_else(|_| "true".to_string())
-                    .eq_ignore_ascii_case("true"),
-                auto_purchase_after_tx: env_bool("NAMECHEAP_AUTO_PURCHASE_AFTER_TX", false),
-                contact: NamecheapContactConfig {
-                    first_name: env::var("NAMECHEAP_CONTACT_FIRST_NAME").unwrap_or_default(),
-                    last_name: env::var("NAMECHEAP_CONTACT_LAST_NAME").unwrap_or_default(),
-                    address1: env::var("NAMECHEAP_CONTACT_ADDRESS1").unwrap_or_default(),
-                    city: env::var("NAMECHEAP_CONTACT_CITY").unwrap_or_default(),
-                    state_province: env::var("NAMECHEAP_CONTACT_STATE").unwrap_or_default(),
-                    postal_code: env::var("NAMECHEAP_CONTACT_POSTAL_CODE").unwrap_or_default(),
-                    country: env::var("NAMECHEAP_CONTACT_COUNTRY").unwrap_or_default(),
-                    phone: env::var("NAMECHEAP_CONTACT_PHONE").unwrap_or_default(),
-                    email: env::var("NAMECHEAP_CONTACT_EMAIL").unwrap_or_default(),
-                    organization: env::var("NAMECHEAP_CONTACT_ORGANIZATION")
-                        .ok()
-                        .filter(|value| !value.trim().is_empty()),
-                },
-            },
+            auto_purchase_after_tx: env_bool("AUTO_PURCHASE_AFTER_TX", false),
         })
     }
 }
