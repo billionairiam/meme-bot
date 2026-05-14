@@ -116,6 +116,18 @@ pub(crate) async fn maybe_purchase_domain_after_tx(
     quote_id: Option<Uuid>,
     domain: Option<&str>,
 ) -> (bool, String) {
+    if config.skip_domain_purchase {
+        warn!(
+            quote_id = %quote_id.map(|id| id.to_string()).unwrap_or_else(|| "<none>".to_string()),
+            domain = domain.unwrap_or("<none>"),
+            "SKIP_DOMAIN_PURCHASE is enabled — skipping domain purchase and DNS setup"
+        );
+        return (
+            true,
+            "<b>Domain:</b> purchase skipped (testing mode).".to_string(),
+        );
+    }
+
     if !config.auto_purchase_after_tx {
         info!(
             quote_id = %quote_id.map(|id| id.to_string()).unwrap_or_else(|| "<none>".to_string()),

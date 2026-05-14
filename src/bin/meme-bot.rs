@@ -25,6 +25,9 @@ async fn main() -> anyhow::Result<()> {
     if config.skip_payment_verification {
         warn!("⚠️  SKIP_PAYMENT_VERIFICATION is enabled — all TX hashes will be accepted without on-chain verification");
     }
+    if config.skip_domain_purchase {
+        warn!("⚠️  SKIP_DOMAIN_PURCHASE is enabled — domain purchase and DNS setup will be skipped");
+    }
 
     let database_url = config
         .database_url

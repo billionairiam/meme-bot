@@ -78,6 +78,7 @@ pub struct TelegramUiConfig {
     pub usdt_sol_min_confirmations: u64,
     pub auto_purchase_after_tx: bool,
     pub skip_payment_verification: bool,
+    pub skip_domain_purchase: bool,
 }
 
 #[derive(Clone)]
@@ -124,6 +125,7 @@ impl TelegramUiConfig {
             usdt_sol_min_confirmations: config.usdt_sol_min_confirmations,
             auto_purchase_after_tx: config.auto_purchase_after_tx,
             skip_payment_verification: config.skip_payment_verification,
+            skip_domain_purchase: config.skip_domain_purchase,
         }
     }
 }

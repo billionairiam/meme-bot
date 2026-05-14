@@ -709,6 +709,49 @@ async fn handle_order_step(
                     .map(|_| ());
             }
 
+            if config.skip_domain_purchase {
+                warn!(
+                    user_id = user_id.0 as i64,
+                    chat_id = %msg.chat.id,
+                    domain = %domain,
+                    "SKIP_DOMAIN_PURCHASE: accepting domain without quote"
+                );
+                let db_user_id =
+                    match db::upsert_user(pool, user_id.0 as i64, None, None, None, true).await {
+                        Ok(id) => id,
+                        Err(e) => {
+                            warn!(?e, user_id = user_id.0 as i64, "failed to upsert user");
+                            return bot
+                                .send_message(
+                                    msg.chat.id,
+                                    "<b>Error.</b>\nPlease try again.",
+                                )
+                                .parse_mode(ParseMode::Html)
+                                .await
+                                .map(|_| ());
+                        }
+                    };
+                draft.website_url = Some(domain.clone());
+                draft.db_user_id = Some(db_user_id);
+                draft.domain_price_usdt = Some(rust_decimal::Decimal::ZERO);
+                let total = draft.site_price_usdt;
+                draft.total_usdt = Some(total);
+                draft.step = DraftStep::ReadyToPay;
+                set_session(user_id, draft.clone(), &sessions);
+                return bot
+                    .send_message(
+                        msg.chat.id,
+                        format!(
+                            "✅ <b>Domain accepted</b> (testing mode)\nDomain: <b>{domain}</b>\nWebsite: <b>{}</b> USDT\nTotal: <b>{total}</b> USDT\n\nChoose payment chain.",
+                            draft.site_price_usdt
+                        ),
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .reply_markup(payment_chain_keyboard())
+                    .await
+                    .map(|_| ());
+            }
+
             let (Some(base_url), Some(api_key)) = (
                 config.api_service_base_url.as_deref(),
                 config.api_service_api_key.as_deref(),
