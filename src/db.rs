@@ -1443,21 +1443,20 @@ fn parse_db_datetime(value: &str) -> anyhow::Result<DateTime<Utc>> {
     Ok(DateTime::from_naive_utc_and_offset(naive, Utc))
 }
 
-/// Reset generation jobs stuck in `needs_manual_review` or `running` back to
-/// `queued` so they are retried on next startup. Also resets matching order
-/// `site_status`. Returns the number of jobs reset.
+/// Reset generation jobs stuck in `running` back to `queued` so they are
+/// retried after a restart. Jobs in `needs_manual_review` are left for the
+/// admin. Returns the number of jobs reset.
 pub async fn reset_stuck_generation_jobs(pool: &SqlitePool) -> anyhow::Result<u64> {
     let result = sqlx::query(
         r#"
         UPDATE generation_jobs
         SET status = 'queued',
-            attempt_count = 0,
             started_at = NULL,
             finished_at = NULL,
             locked_by = NULL,
             locked_at = NULL,
             updated_at = datetime('now')
-        WHERE status IN ('needs_manual_review', 'running')
+        WHERE status = 'running'
         "#,
     )
     .execute(pool)
@@ -1469,7 +1468,7 @@ pub async fn reset_stuck_generation_jobs(pool: &SqlitePool) -> anyhow::Result<u6
             r#"
             UPDATE orders
             SET site_status = 'queued', updated_at = datetime('now')
-            WHERE site_status IN ('needs_manual_review', 'generating')
+            WHERE site_status = 'generating'
               AND payment_status = 'paid'
               AND id IN (
                   SELECT order_id FROM generation_jobs WHERE status = 'queued'
