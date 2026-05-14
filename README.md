@@ -709,3 +709,5 @@ curl -X POST https://api.sunyukong.vip/api/v1/dns/set-nameservers \
   -H "Content-Type: application/json" \
   -H "X-API-Key: lUtWop9prCWw7J41Mx6PRw3eQFyw9XUPAzM9bx83IVvgGyHV5Ujfyo8/P1XJb0xc" \
   -d '{"domain":"callyouearsss.xyz","nameservers":["dave.ns.cloudflare.com","lola.ns.cloudflare.com"]}'
+
+❯我觉得我们现在的db部分太过复杂，我们其实只需要三个表，一个是users，一个是orders表，一个是websites表

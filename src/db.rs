@@ -1454,8 +1454,7 @@ pub async fn reset_stuck_generation_jobs(pool: &SqlitePool) -> anyhow::Result<u6
             started_at = NULL,
             finished_at = NULL,
             locked_by = NULL,
-            locked_at = NULL,
-            updated_at = datetime('now')
+            locked_at = NULL
         WHERE status = 'running'
         "#,
     )

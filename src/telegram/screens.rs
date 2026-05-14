@@ -94,14 +94,26 @@ async fn status_text(user_id: UserId, sessions: &Sessions, pool: &SqlitePool) ->
         );
     }
     match db::get_user_order(pool, user_id.0 as i64).await {
-        Ok(Some(order)) => format!(
-            "📊 <b>Order Status</b>\nPayment: {}\nSite: {}\nAmount: {} USDT\nChain: {}\nDomain: {}",
-            order.payment_status,
-            order.site_status,
-            order.amount_usdt,
-            order.payment_chain.as_deref().unwrap_or("—"),
-            order.requested_domain.as_deref().unwrap_or("—"),
-        ),
+        Ok(Some(order)) => {
+            let site_display = match order.site_status.as_str() {
+                "collecting_assets" => "📝 Collecting info",
+                "queued" => "⏳ Queued for generation",
+                "generating" => "⚙️ Generating website",
+                "deploying" => "🚀 Deploying",
+                "live" => "✅ Live",
+                "needs_manual_review" => "🔧 Under admin review",
+                "failed" => "❌ Failed",
+                other => other,
+            };
+            format!(
+                "📊 <b>Order Status</b>\nPayment: {}\nSite: {}\nAmount: {} USDT\nChain: {}\nDomain: {}",
+                order.payment_status,
+                site_display,
+                order.amount_usdt,
+                order.payment_chain.as_deref().unwrap_or("—"),
+                order.requested_domain.as_deref().unwrap_or("—"),
+            )
+        }
         Ok(None) => "📊 <b>Order Status</b>\nNo active order. Use /create.".to_string(),
         Err(_) => "📊 <b>Order Status</b>\nCheck failed. Try later.".to_string(),
     }
