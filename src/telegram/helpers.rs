@@ -162,6 +162,7 @@ pub(crate) fn payment_error_for_user(error: &crate::payment::PaymentVerification
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn domain_error_for_user(error: &crate::domain::DomainError) -> String {
     use crate::domain::DomainError;
     match error {
@@ -196,6 +197,7 @@ pub(crate) fn website_input_from_draft(draft: &OrderDraft) -> Option<crate::mode
     })
 }
 
+#[allow(dead_code)]
 pub(crate) async fn download_telegram_logo(
     bot: &Bot,
     file_id: &str,

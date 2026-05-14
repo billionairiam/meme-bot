@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::time::{Duration, sleep};
 use tracing::{error, info, warn};
@@ -10,14 +10,11 @@ use crate::{
     db,
     deployment::{DeploymentRequest, SiteDeployer},
     generation::{GenerationError, GenerationRouter, SiteGenerationRequest},
+    models::{Order, WebsiteInput},
 };
 
 const MAX_JOB_ATTEMPTS: i64 = 3;
 const STALE_RUNNING_JOB_MINUTES: i64 = 120;
-
-fn uuid_value(id: Uuid) -> String {
-    id.to_string()
-}
 
 #[derive(Clone, Debug)]
 pub struct UserNotification {
@@ -70,136 +67,97 @@ impl GenerationQueue {
 
     pub async fn tick(&self) -> anyhow::Result<()> {
         let _permit = self.semaphore.acquire().await?;
-        self.reclaim_stale_running_jobs().await?;
-        let Some(job) = self.lock_next_job().await? else {
+        self.reclaim_stale_locked_orders().await?;
+
+        let order = {
+            let _guard = self.lock_mutex.lock().await;
+            db::lock_next_generation_order(&self.pool, &self.worker_id, MAX_JOB_ATTEMPTS).await?
+        };
+
+        let Some(order) = order else {
             return Ok(());
         };
 
+        let order_id = order.id;
+        let attempt_count = order.attempt_count;
+
         info!(
-            job_id = %job.job_id,
-            order_id = %job.order_id,
-            website_id = %job.website_id,
-            attempt = job.attempt_count + 1,
-            domain = job.requested_domain.as_deref().unwrap_or("<none>"),
-            "locked generation job"
+            order_id = %order_id,
+            attempt = attempt_count,
+            domain = order.requested_domain.as_deref().unwrap_or("<none>"),
+            ticker = order.token_ticker.as_deref().unwrap_or("<none>"),
+            "locked order for generation"
         );
-        let job_id = job.job_id;
-        let website_id = job.website_id;
-        let attempt_count = job.attempt_count;
-        let request = job.into_generation_request(&self.generated_sites_dir);
+
+        let Some(input) = order.website_input() else {
+            error!(order_id = %order_id, "order is missing required wizard fields");
+            self.mark_manual_review(order_id).await?;
+            self.notify_user(
+                order_id,
+                "⚠️ <b>Order is incomplete.</b>\n\nYour order needs manual review. Contact admin.",
+            )
+            .await;
+            return Ok(());
+        };
+
+        let request = build_generation_request(&order, &input, &self.generated_sites_dir);
+
         info!(
-            job_id = %job_id,
-            order_id = %request.order_id,
+            order_id = %order_id,
             output_dir = %request.output_dir.display(),
             build_mode = %request.build_mode,
-            domain = request.input.requested_domain.as_deref().unwrap_or("<none>"),
+            domain = input.requested_domain.as_deref().unwrap_or("<none>"),
             "starting site generation"
         );
-        sqlx::query(
-            "UPDATE orders SET site_status = 'generating', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(uuid_value(request.order_id))
-        .execute(&self.pool)
-        .await?;
 
         match self.router.generate(&request).await {
             Ok(result) => {
                 info!(
-                    job_id = %job_id,
-                    order_id = %request.order_id,
+                    order_id = %order_id,
                     provider = %result.provider_name,
-                    output_dir = %request.output_dir.display(),
                     "site generation succeeded"
                 );
-                sqlx::query(
-                    r#"
-                    UPDATE generation_jobs
-                    SET status = 'succeeded', finished_at = datetime('now'), locked_by = NULL, locked_at = NULL
-                    WHERE id = ?
-                    "#,
-                )
-                .bind(uuid_value(job_id))
-                .execute(&self.pool)
-                .await?;
 
-                sqlx::query(
-                    r#"
-                    UPDATE websites
-                    SET generation_provider_used = ?, deployment_status = 'generated', updated_at = datetime('now')
-                    WHERE order_id = ?
-                    "#,
+                // Create website record
+                if let Err(e) = db::create_website(
+                    &self.pool,
+                    order.user_id,
+                    order_id,
+                    &input,
+                    Some(&result.provider_name),
                 )
-                .bind(result.provider_name)
-                .bind(uuid_value(request.order_id))
-                .execute(&self.pool)
-                .await?;
+                .await
+                {
+                    error!(order_id = %order_id, error = %e, "failed to create website record");
+                }
 
                 if let Some(deployer) = &self.deployer {
-                    sqlx::query(
-                        "UPDATE orders SET site_status = 'deploying', updated_at = datetime('now') WHERE id = ?",
-                    )
-                    .bind(uuid_value(request.order_id))
-                    .execute(&self.pool)
-                    .await?;
-                    sqlx::query(
-                        "UPDATE websites SET deployment_status = 'deploying', updated_at = datetime('now') WHERE id = ?",
-                    )
-                    .bind(uuid_value(website_id))
-                    .execute(&self.pool)
-                    .await?;
                     let deployment_request =
                         request.deployment_request(&self.repo_owner, &self.github_token);
                     info!(
-                        order_id = %request.order_id,
-                        website_id = %website_id,
-                        repo_owner = %deployment_request.repo_owner,
+                        order_id = %order_id,
                         repo_name = %deployment_request.repo_name,
                         project_name = %deployment_request.cloudflare_project_name,
                         custom_domain = deployment_request.custom_domain.as_deref().unwrap_or("<none>"),
-                        site_dir = %deployment_request.site_dir,
                         "starting site deployment"
                     );
-                    let deployment = self
-                        .deploy_with_retries(deployer.as_ref(), &deployment_request, website_id)
-                        .await;
-                    match deployment {
+                    match self
+                        .deploy_with_retries(deployer.as_ref(), &deployment_request)
+                        .await
+                    {
                         Ok(deployment) => {
                             info!(
-                                order_id = %request.order_id,
-                                website_id = %website_id,
+                                order_id = %order_id,
                                 repo = %format!("{}/{}", deployment.github_owner, deployment.github_repo_name),
-                                commit_sha = %deployment.github_commit_sha,
                                 pages_url = %deployment.cloudflare_pages_url,
                                 custom_domain = deployment.custom_domain.as_deref().unwrap_or("<none>"),
                                 "site deployment succeeded"
                             );
-                            for stage in [
-                                "github_create",
-                                "git_push",
-                                "pages_create",
-                                "pages_deploy",
-                                "domain_bind",
-                            ] {
-                                db::record_deployment_attempt(
-                                    &self.pool,
-                                    website_id,
-                                    stage,
-                                    "succeeded",
-                                    None,
-                                )
-                                .await?;
-                            }
                             db::update_website_deployment_success(
                                 &self.pool,
-                                request.order_id,
+                                order_id,
                                 &deployment,
                             )
-                            .await?;
-                            sqlx::query(
-                                "UPDATE orders SET site_status = 'live', updated_at = datetime('now') WHERE id = ?",
-                            )
-                            .bind(uuid_value(request.order_id))
-                            .execute(&self.pool)
                             .await?;
 
                             let site_url = deployment
@@ -208,259 +166,93 @@ impl GenerationQueue {
                                 .map(|d| format!("https://{d}"))
                                 .unwrap_or_else(|| deployment.cloudflare_pages_url.clone());
                             self.notify_user(
-                                request.order_id,
+                                order_id,
                                 &format!(
-                                    "🎉 <b>Your website is live!</b>\n\n🌐 {site_url}\n\nCheck /status for details."
+                                    "🎉 <b>Your website is live!</b>\n\n🌐 {site_url}\n\nCheck /history for details."
                                 ),
-                            )
-                            .await;
+                            ).await;
                         }
                         Err(error) => {
                             error!(
-                                order_id = %request.order_id,
-                                website_id = %website_id,
+                                order_id = %order_id,
                                 stage = error.stage(),
                                 error = %error,
                                 "deployment failed"
                             );
-                            let deployment_status = if error.stage() == "domain_bind" {
-                                "domain_bind_failed"
-                            } else {
-                                "deployment_failed"
-                            };
-                            sqlx::query(
-                                r#"
-                                UPDATE websites
-                                SET deployment_status = ?, updated_at = datetime('now')
-                                WHERE order_id = ?
-                                "#,
-                            )
-                            .bind(deployment_status)
-                            .bind(uuid_value(request.order_id))
-                            .execute(&self.pool)
-                            .await?;
-                            let went_to_review = self
-                                .retry_or_manual_review(job_id, request.order_id, attempt_count)
-                                .await?;
+                            let went_to_review =
+                                self.retry_or_manual_review(order_id, attempt_count).await?;
                             if went_to_review {
                                 self.notify_user(
-                                    request.order_id,
-                                    "⚠️ <b>Website deployment failed after retries.</b>\n\nYour order needs manual review. Contact admin for assistance.",
-                                )
-                                .await;
+                                    order_id,
+                                    "⚠️ <b>Website deployment failed after retries.</b>\n\nYour order needs manual review. Contact admin.",
+                                ).await;
                             }
                         }
                     }
                 } else {
                     error!(
-                        order_id = %request.order_id,
+                        order_id = %order_id,
                         "API_SERVICE_BASE_URL/API_SERVICE_API_KEY are required; meme-bot cannot deploy directly"
                     );
-                    sqlx::query(
-                        "UPDATE orders SET site_status = 'needs_manual_review', updated_at = datetime('now') WHERE id = ?",
-                    )
-                    .bind(uuid_value(request.order_id))
-                    .execute(&self.pool)
-                    .await?;
-                    sqlx::query(
-                        r#"
-                        UPDATE websites
-                        SET deployment_status = 'deployment_failed', updated_at = datetime('now')
-                        WHERE order_id = ?
-                        "#,
-                    )
-                    .bind(uuid_value(request.order_id))
-                    .execute(&self.pool)
-                    .await?;
-                    db::record_deployment_attempt(
-                        &self.pool,
-                        website_id,
-                        "pages_deploy",
-                        "failed",
-                        Some("API_SERVICE_BASE_URL and API_SERVICE_API_KEY are required; meme-bot cannot deploy directly"),
-                    )
-                    .await?;
-                    self.mark_manual_review(job_id, request.order_id).await?;
+                    self.mark_manual_review(order_id).await?;
                     self.notify_user(
-                        request.order_id,
-                        "⚠️ <b>Website deployment is not configured.</b>\n\nYour order needs manual review. Contact admin for assistance.",
-                    )
-                    .await;
+                        order_id,
+                        "⚠️ <b>Website deployment is not configured.</b>\n\nYour order needs manual review. Contact admin.",
+                    ).await;
                 }
             }
             Err(GenerationError::QuotaExhausted | GenerationError::ProviderUnavailable) => {
                 warn!(
-                    job_id = %job_id,
-                    order_id = %request.order_id,
+                    order_id = %order_id,
                     attempt = attempt_count,
                     "generation provider unavailable or quota exhausted"
                 );
-                let went_to_review = self
-                    .retry_or_manual_review(job_id, request.order_id, attempt_count)
-                    .await?;
+                let went_to_review = self.retry_or_manual_review(order_id, attempt_count).await?;
                 if went_to_review {
                     self.notify_user(
-                        request.order_id,
-                        "⚠️ <b>Website generation could not complete.</b>\n\nAll providers are unavailable. Your order needs manual review. Contact admin.",
-                    )
-                    .await;
+                        order_id,
+                        "⚠️ <b>Website generation could not complete.</b>\n\nAll providers are unavailable. Contact admin.",
+                    ).await;
                 }
             }
             Err(error) => {
                 error!(
-                    job_id = %job_id,
-                    order_id = %request.order_id,
+                    order_id = %order_id,
                     attempt = attempt_count,
                     error = %error,
                     "generation failed"
                 );
-                let went_to_review = self
-                    .retry_or_manual_review(job_id, request.order_id, attempt_count)
-                    .await?;
+                let went_to_review = self.retry_or_manual_review(order_id, attempt_count).await?;
                 if went_to_review {
                     self.notify_user(
-                        request.order_id,
-                        "⚠️ <b>Website generation failed after retries.</b>\n\nYour order needs manual review. Contact admin for assistance.",
-                    )
-                    .await;
+                        order_id,
+                        "⚠️ <b>Website generation failed after retries.</b>\n\nYour order needs manual review. Contact admin.",
+                    ).await;
                 }
             }
         }
         Ok(())
     }
 
-    async fn lock_next_job(&self) -> anyhow::Result<Option<GenerationJobRow>> {
-        let _guard = self.lock_mutex.lock().await;
-        let mut tx = self.pool.begin().await?;
-        let row = sqlx::query(
-            r#"
-            SELECT gj.id AS job_id, gj.order_id, gj.website_id, gj.attempt_count,
-                   o.build_mode, o.template_id,
-                   w.token_ticker, w.token_name, w.contract_address,
-                   w.x_url, w.telegram_url, w.logo_asset_path, w.requested_domain
-            FROM generation_jobs gj
-            JOIN orders o ON o.id = gj.order_id
-            JOIN websites w ON w.id = gj.website_id
-            WHERE gj.status = 'queued'
-              AND o.payment_status = 'paid'
-            ORDER BY gj.priority DESC, gj.queued_at ASC
-            LIMIT 1
-            "#,
+    async fn reclaim_stale_locked_orders(&self) -> anyhow::Result<()> {
+        let results = db::reclaim_stale_locked_orders(
+            &self.pool,
+            STALE_RUNNING_JOB_MINUTES,
+            MAX_JOB_ATTEMPTS,
         )
-        .fetch_optional(&mut *tx)
         .await?;
 
-        let Some(row) = row else {
-            tx.commit().await?;
-            return Ok(None);
-        };
-
-        let job_id: Uuid = Uuid::parse_str(row.get::<&str, _>("job_id"))?;
-        let update = sqlx::query(
-            r#"
-            UPDATE generation_jobs
-            SET status = 'running', started_at = COALESCE(started_at, datetime('now')),
-                locked_by = ?, locked_at = datetime('now'), attempt_count = attempt_count + 1
-            WHERE id = ?
-              AND status = 'queued'
-            "#,
-        )
-        .bind(&self.worker_id)
-        .bind(uuid_value(job_id))
-        .execute(&mut *tx)
-        .await?;
-        if update.rows_affected() != 1 {
-            tx.commit().await?;
-            return Ok(None);
+        for (order_id, went_to_review) in results {
+            if went_to_review {
+                warn!(%order_id, "moved stale order to manual review");
+                self.notify_user(
+                    order_id,
+                    "⚠️ <b>Website processing stalled after retries.</b>\n\nYour order needs manual review. Contact admin.",
+                ).await;
+            } else {
+                warn!(%order_id, "requeued stale locked order");
+            }
         }
-        tx.commit().await?;
-
-        Ok(Some(GenerationJobRow {
-            job_id,
-            order_id: Uuid::parse_str(row.get::<&str, _>("order_id"))?,
-            website_id: Uuid::parse_str(row.get::<&str, _>("website_id"))?,
-            build_mode: row
-                .get::<Option<String>, _>("build_mode")
-                .unwrap_or_default(),
-            template_id: row.get("template_id"),
-            token_ticker: row.get("token_ticker"),
-            token_name: row.get("token_name"),
-            contract_address: row.get("contract_address"),
-            x_url: row.get("x_url"),
-            telegram_url: row.get("telegram_url"),
-            logo_asset_path: row.get("logo_asset_path"),
-            requested_domain: row.get("requested_domain"),
-            attempt_count: row.get::<i64, _>("attempt_count") + 1,
-        }))
-    }
-
-    async fn reclaim_stale_running_jobs(&self) -> anyhow::Result<()> {
-        let stale_cutoff = format!("-{STALE_RUNNING_JOB_MINUTES} minutes");
-        let retry_rows = sqlx::query(
-            r#"
-            UPDATE generation_jobs
-            SET status = 'queued',
-                finished_at = NULL,
-                locked_by = NULL,
-                locked_at = NULL
-            WHERE status = 'running'
-              AND locked_at IS NOT NULL
-              AND locked_at < datetime('now', ?)
-              AND attempt_count < ?
-            RETURNING order_id
-            "#,
-        )
-        .bind(&stale_cutoff)
-        .bind(MAX_JOB_ATTEMPTS)
-        .fetch_all(&self.pool)
-        .await?;
-
-        for row in retry_rows {
-            let order_id: Uuid = Uuid::parse_str(row.get::<&str, _>("order_id"))?;
-            sqlx::query(
-                "UPDATE orders SET site_status = 'queued', updated_at = datetime('now') WHERE id = ?",
-            )
-            .bind(uuid_value(order_id))
-            .execute(&self.pool)
-            .await?;
-            warn!(%order_id, "requeued stale running generation job");
-        }
-
-        let review_rows = sqlx::query(
-            r#"
-            UPDATE generation_jobs
-            SET status = 'needs_manual_review',
-                finished_at = datetime('now'),
-                locked_by = NULL,
-                locked_at = NULL
-            WHERE status = 'running'
-              AND locked_at IS NOT NULL
-              AND locked_at < datetime('now', ?)
-              AND attempt_count >= ?
-            RETURNING order_id
-            "#,
-        )
-        .bind(&stale_cutoff)
-        .bind(MAX_JOB_ATTEMPTS)
-        .fetch_all(&self.pool)
-        .await?;
-
-        for row in review_rows {
-            let order_id: Uuid = Uuid::parse_str(row.get::<&str, _>("order_id"))?;
-            sqlx::query(
-                "UPDATE orders SET site_status = 'needs_manual_review', updated_at = datetime('now') WHERE id = ?",
-            )
-            .bind(uuid_value(order_id))
-            .execute(&self.pool)
-            .await?;
-            warn!(%order_id, "moved stale running generation job to manual review");
-            self.notify_user(
-                order_id,
-                "⚠️ <b>Website processing stalled after retries.</b>\n\nYour order needs manual review. Contact admin for assistance.",
-            )
-            .await;
-        }
-
         Ok(())
     }
 
@@ -468,49 +260,24 @@ impl GenerationQueue {
         &self,
         deployer: &dyn SiteDeployer,
         request: &DeploymentRequest,
-        website_id: Uuid,
     ) -> Result<crate::deployment::DeploymentResult, crate::deployment::DeploymentError> {
         let mut last_error = None;
         for attempt in 1..=MAX_JOB_ATTEMPTS {
             info!(
-                repo_owner = %request.repo_owner,
                 repo_name = %request.repo_name,
                 project_name = %request.cloudflare_project_name,
-                custom_domain = request.custom_domain.as_deref().unwrap_or("<none>"),
                 attempt,
                 "deployment attempt started"
             );
             match deployer.deploy(request).await {
-                Ok(result) => {
-                    info!(
-                        repo_owner = %request.repo_owner,
-                        repo_name = %request.repo_name,
-                        project_name = %request.cloudflare_project_name,
-                        commit_sha = %result.github_commit_sha,
-                        pages_url = %result.cloudflare_pages_url,
-                        attempt,
-                        "deployment attempt succeeded"
-                    );
-                    return Ok(result);
-                }
+                Ok(result) => return Ok(result),
                 Err(error) => {
                     error!(
-                        order_id = %request.custom_domain.as_deref().unwrap_or(&request.repo_name),
+                        repo_name = %request.repo_name,
                         attempt,
                         error = %error,
-                        "deployment failed"
+                        "deployment attempt failed"
                     );
-                    if let Err(record_error) = db::record_deployment_attempt(
-                        &self.pool,
-                        website_id,
-                        error.stage(),
-                        "failed",
-                        Some(&format!("attempt {attempt}: {error}")),
-                    )
-                    .await
-                    {
-                        error!(error = %record_error, "failed to record deployment retry");
-                    }
                     if attempt >= MAX_JOB_ATTEMPTS {
                         return Err(error);
                     }
@@ -526,66 +293,30 @@ impl GenerationQueue {
         }))
     }
 
-    async fn mark_manual_review(&self, job_id: Uuid, order_id: Uuid) -> anyhow::Result<()> {
-        sqlx::query(
-            "UPDATE orders SET site_status = 'needs_manual_review', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(uuid_value(order_id))
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            r#"
-            UPDATE generation_jobs
-            SET status = 'needs_manual_review', finished_at = datetime('now'), locked_by = NULL, locked_at = NULL
-            WHERE id = ?
-            "#,
-        )
-        .bind(uuid_value(job_id))
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+    async fn mark_manual_review(&self, order_id: Uuid) -> anyhow::Result<()> {
+        db::mark_order_manual_review(&self.pool, order_id).await
     }
 
     async fn retry_or_manual_review(
         &self,
-        job_id: Uuid,
         order_id: Uuid,
         attempt_count: i64,
     ) -> anyhow::Result<bool> {
         if attempt_count < MAX_JOB_ATTEMPTS {
             warn!(
                 order_id = %order_id,
-                job_id = %job_id,
                 attempt = attempt_count,
                 max_attempts = MAX_JOB_ATTEMPTS,
-                "requeueing job for retry"
+                "requeueing order for retry"
             );
-            sqlx::query(
-                "UPDATE orders SET site_status = 'queued', updated_at = datetime('now') WHERE id = ?",
-            )
-            .bind(uuid_value(order_id))
-            .execute(&self.pool)
-            .await?;
-            sqlx::query(
-                r#"
-                UPDATE generation_jobs
-                SET status = 'queued', finished_at = NULL, locked_by = NULL, locked_at = NULL
-                WHERE id = ?
-                "#,
-            )
-            .bind(uuid_value(job_id))
-            .execute(&self.pool)
-            .await?;
+            db::requeue_order_for_retry(&self.pool, order_id).await?;
             return Ok(false);
         }
-
-        self.mark_manual_review(job_id, order_id).await?;
+        self.mark_manual_review(order_id).await?;
         warn!(
             order_id = %order_id,
-            job_id = %job_id,
             attempt = attempt_count,
-            max_attempts = MAX_JOB_ATTEMPTS,
-            "job moved to manual review after retries"
+            "order moved to manual review after retries"
         );
         Ok(true)
     }
@@ -597,11 +328,12 @@ impl GenerationQueue {
         match sqlx::query(
             "SELECT u.telegram_user_id FROM users u JOIN orders o ON o.user_id = u.id WHERE o.id = ?",
         )
-        .bind(uuid_value(order_id))
+        .bind(order_id.to_string())
         .fetch_optional(&self.pool)
         .await
         {
             Ok(Some(row)) => {
+                use sqlx::Row;
                 let telegram_user_id: i64 = row.get("telegram_user_id");
                 let notification = UserNotification {
                     telegram_user_id,
@@ -618,6 +350,28 @@ impl GenerationQueue {
                 warn!(order_id = %order_id, ?error, "cannot notify user: db lookup failed");
             }
         }
+    }
+}
+
+fn build_generation_request(
+    order: &Order,
+    input: &WebsiteInput,
+    generated_sites_dir: &str,
+) -> SiteGenerationRequest {
+    let dir_name = order
+        .requested_domain
+        .clone()
+        .unwrap_or_else(|| format!("site-{}", &order.id.simple().to_string()[..8]));
+    let output_dir = std::path::Path::new(generated_sites_dir).join(dir_name);
+    SiteGenerationRequest {
+        order_id: order.id,
+        build_mode: order
+            .build_mode
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_else(|| "ai_free".to_string()),
+        template_local_path: order.template_id.clone(),
+        input: input.clone(),
+        output_dir,
     }
 }
 
@@ -659,71 +413,43 @@ fn project_name_from_repo_name(repo_name: &str) -> String {
         .collect()
 }
 
-struct GenerationJobRow {
-    job_id: Uuid,
-    order_id: Uuid,
-    website_id: Uuid,
-    build_mode: String,
-    template_id: Option<String>,
-    token_ticker: String,
-    token_name: String,
-    contract_address: String,
-    x_url: String,
-    telegram_url: String,
-    logo_asset_path: String,
-    requested_domain: Option<String>,
-    attempt_count: i64,
-}
-
-impl GenerationJobRow {
-    fn into_generation_request(self, generated_sites_dir: &str) -> SiteGenerationRequest {
-        let dir_name = self
-            .requested_domain
-            .clone()
-            .unwrap_or_else(|| format!("site-{}", &self.order_id.simple().to_string()[..8]));
-        let output_dir = std::path::Path::new(generated_sites_dir).join(dir_name);
-        SiteGenerationRequest {
-            order_id: self.order_id,
-            build_mode: self.build_mode,
-            template_local_path: self.template_id,
-            input: crate::models::WebsiteInput {
-                token_ticker: self.token_ticker,
-                token_name: self.token_name,
-                contract_address: self.contract_address,
-                x_url: self.x_url,
-                telegram_url: self.telegram_url,
-                logo_asset_path: self.logo_asset_path,
-                requested_domain: self.requested_domain,
-            },
-            output_dir,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use uuid::Uuid;
 
-    use super::GenerationJobRow;
+    use crate::models::{BuildMode, OrderStatus};
+
+    use super::build_generation_request;
+
     #[test]
     fn generation_request_uses_configured_sites_dir_and_domain_folder() {
-        let row = GenerationJobRow {
-            job_id: Uuid::new_v4(),
-            website_id: Uuid::new_v4(),
-            order_id: Uuid::new_v4(),
-            build_mode: "ai_free".to_string(),
+        let order = crate::models::Order {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            status: OrderStatus::PaidAndGenerating,
+            build_mode: Some(BuildMode::AiFree),
             template_id: None,
-            token_ticker: "AAA".to_string(),
-            token_name: "AAA BBB".to_string(),
-            contract_address: "0x123".to_string(),
-            x_url: "https://x.com/aaabbb".to_string(),
-            telegram_url: "https://t.me/aaabbb".to_string(),
-            logo_asset_path: "/tmp/logo.png".to_string(),
+            token_ticker: Some("AAA".to_string()),
+            token_name: Some("AAA BBB".to_string()),
+            contract_address: Some("0x123".to_string()),
+            x_url: Some("https://x.com/aaabbb".to_string()),
+            telegram_url: Some("https://t.me/aaabbb".to_string()),
+            logo_asset_path: Some("/tmp/logo.png".to_string()),
             requested_domain: Some("aaabbb.com".to_string()),
+            site_price_usdt: rust_decimal::Decimal::new(50, 0),
+            domain_price_usdt: rust_decimal::Decimal::ZERO,
+            total_usdt: rust_decimal::Decimal::new(50, 0),
+            payment_chain: None,
+            tx_hash: None,
+            payment_expires_at: None,
+            paid_at: None,
             attempt_count: 0,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
         };
+        let input = order.website_input().unwrap();
 
-        let request = row.into_generation_request("/www/websites");
+        let request = build_generation_request(&order, &input, "/www/websites");
 
         assert_eq!(
             request.output_dir,

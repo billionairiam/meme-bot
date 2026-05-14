@@ -554,9 +554,7 @@ impl CloudflarePagesClient {
         let _zone_id = self.wait_zone_active(domain).await?;
 
         // If Pages domain is already bound, verify both Pages status.
-        if let Some(pages_status) =
-            self.get_pages_domain_status(project_name, domain).await?
-        {
+        if let Some(pages_status) = self.get_pages_domain_status(project_name, domain).await? {
             ensure_domain_status_not_failed(domain, &pages_status)?;
             return Ok(());
         }
@@ -717,9 +715,7 @@ impl CloudflarePagesClient {
             }
         }
 
-        let deployment = self
-            .trigger_deployment(&request.project_name)
-            .await?;
+        let deployment = self.trigger_deployment(&request.project_name).await?;
         let deployment = self
             .wait_deployment_success(
                 &request.project_name,

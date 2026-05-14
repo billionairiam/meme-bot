@@ -10,9 +10,7 @@ use axum::{
 };
 use meme_bot::{
     config::{NamecheapConfig, NamecheapContactConfig, load_env_file},
-    deployment::{
-        CloudflarePagesClient, DeploymentError, PagesDeployRequest,
-    },
+    deployment::{CloudflarePagesClient, DeploymentError, PagesDeployRequest},
     domain::{
         ApiErrorResponse, CloudflareZoneResult, DomainError, DomainPurchaseRequest,
         DomainPurchaseResult, DomainQuote, DomainQuoteRequest, DomainRegistrar,
@@ -219,15 +217,10 @@ async fn pages_deploy(
         repo = format!("{}/{}", request.github_owner, request.github_repo),
         "pages deploy"
     );
-    state
-        .cf
-        .deploy(&request)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            error!(project = %request.project_name, error = %e, "pages deploy failed");
-            ApiError(DomainError::from(e))
-        })
+    state.cf.deploy(&request).await.map(Json).map_err(|e| {
+        error!(project = %request.project_name, error = %e, "pages deploy failed");
+        ApiError(DomainError::from(e))
+    })
 }
 
 // ---- ApiError ----

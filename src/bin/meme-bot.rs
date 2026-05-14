@@ -23,10 +23,14 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::from_env()?;
     if config.skip_payment_verification {
-        warn!("⚠️  SKIP_PAYMENT_VERIFICATION is enabled — all TX hashes will be accepted without on-chain verification");
+        warn!(
+            "⚠️  SKIP_PAYMENT_VERIFICATION is enabled — all TX hashes will be accepted without on-chain verification"
+        );
     }
     if config.skip_domain_purchase {
-        warn!("⚠️  SKIP_DOMAIN_PURCHASE is enabled — domain purchase and DNS setup will be skipped");
+        warn!(
+            "⚠️  SKIP_DOMAIN_PURCHASE is enabled — domain purchase and DNS setup will be skipped"
+        );
     }
 
     let database_url = config
@@ -50,10 +54,13 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("normalize sqlite uuid storage")?;
 
-    match meme_bot::db::reset_stuck_generation_jobs(&pool).await {
+    match meme_bot::db::reset_generating_orders_on_startup(&pool).await {
         Ok(0) => {}
-        Ok(count) => info!(count, "reset stuck generation jobs back to queued"),
-        Err(error) => warn!(?error, "failed to reset stuck generation jobs"),
+        Ok(count) => info!(
+            count,
+            "reset stuck paid_and_generating orders (cleared locks)"
+        ),
+        Err(error) => warn!(?error, "failed to reset stuck generating orders"),
     }
 
     let (notification_tx, mut notification_rx) =

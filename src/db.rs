@@ -4,19 +4,13 @@ use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use uuid::Uuid;
 
 use crate::deployment::DeploymentResult;
-use crate::domain::{CloudflareZoneResult, DomainPurchaseResult, DomainQuote};
-use crate::models::{BuildMode, Order, OrderType, PaymentChain, WebsiteInput};
-use crate::payment::{PaymentVerificationError, PaymentVerificationOutcome};
+use crate::models::{BuildMode, Order, OrderStatus, PaymentChain, WebsiteInput};
 
 pub const PAYMENT_WINDOW_MINUTES: i64 = 30;
 pub const ASSET_COLLECTION_TIMEOUT_MINUTES: i64 = 60;
 
 fn uuid_value(id: Uuid) -> String {
     id.to_string()
-}
-
-fn optional_uuid_value(id: Option<Uuid>) -> Option<String> {
-    id.map(uuid_value)
 }
 
 fn uuid_from_row(row: &SqliteRow, column: &str) -> anyhow::Result<Uuid> {
@@ -27,6 +21,7 @@ fn uuid_from_row(row: &SqliteRow, column: &str) -> anyhow::Result<Uuid> {
     Ok(Uuid::from_slice(&bytes)?)
 }
 
+#[allow(dead_code)]
 fn optional_uuid_from_row(row: &SqliteRow, column: &str) -> anyhow::Result<Option<Uuid>> {
     if let Ok(value) = row.try_get::<Option<String>, _>(column) {
         return value
@@ -45,29 +40,11 @@ fn optional_uuid_from_row(row: &SqliteRow, column: &str) -> anyhow::Result<Optio
 
 pub async fn normalize_sqlite_uuid_storage(pool: &SqlitePool) -> anyhow::Result<()> {
     const UUID_COLUMNS: &[(&str, &str)] = &[
-        ("payment_attempts", "id"),
-        ("payment_attempts", "order_id"),
-        ("payment_attempts", "user_id"),
-        ("payment_transactions", "id"),
-        ("payment_transactions", "order_id"),
-        ("generation_jobs", "id"),
-        ("generation_jobs", "order_id"),
-        ("generation_jobs", "website_id"),
-        ("generation_attempts", "id"),
-        ("generation_attempts", "order_id"),
-        ("domain_registrations", "id"),
-        ("domain_registrations", "domain_quote_id"),
-        ("domain_quotes", "id"),
-        ("domain_quotes", "user_id"),
-        ("domain_quotes", "website_id"),
-        ("deployment_attempts", "id"),
-        ("deployment_attempts", "website_id"),
         ("websites", "id"),
         ("websites", "user_id"),
         ("websites", "order_id"),
         ("orders", "id"),
         ("orders", "user_id"),
-        ("orders", "domain_quote_id"),
         ("templates", "id"),
         ("users", "id"),
     ];
@@ -124,11 +101,9 @@ pub async fn normalize_sqlite_uuid_storage(pool: &SqlitePool) -> anyhow::Result<
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-pub struct PaymentWindow {
-    pub started_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-}
+// ============================================================
+// Users
+// ============================================================
 
 pub async fn upsert_user(
     pool: &SqlitePool,
@@ -168,110 +143,52 @@ pub async fn upsert_user(
     uuid_from_row(&row, "id")
 }
 
-pub async fn create_site_order(
+// ============================================================
+// Orders
+// ============================================================
+
+/// Create a new order in need_logo status. Fails if user already has an
+/// unpaid order (need_logo ~ need_pay).
+pub async fn create_order(
     pool: &SqlitePool,
     user_id: Uuid,
     build_mode: BuildMode,
     template_id: Option<&str>,
-    amount_usdt: Decimal,
-    domain_quote_id: Option<Uuid>,
+    site_price_usdt: Decimal,
 ) -> anyhow::Result<Uuid> {
-    get_or_create_site_order(
-        pool,
-        user_id,
-        build_mode,
-        template_id,
-        amount_usdt,
-        domain_quote_id,
-    )
-    .await
-}
-
-pub async fn get_or_create_site_order(
-    pool: &SqlitePool,
-    user_id: Uuid,
-    build_mode: BuildMode,
-    template_id: Option<&str>,
-    amount_usdt: Decimal,
-    domain_quote_id: Option<Uuid>,
-) -> anyhow::Result<Uuid> {
-    if let Some(quote_id) = domain_quote_id
-        && let Some(existing) = find_order_by_domain_quote(pool, quote_id).await?
-    {
-        return Ok(existing);
-    }
-
     let id = Uuid::new_v4();
-    let result = sqlx::query(
+    let row = sqlx::query(
         r#"
         INSERT INTO orders (
-            id, user_id, order_type, build_mode, template_id, amount_usdt,
-            payment_status, site_status, domain_quote_id
+            id, user_id, build_mode, template_id, status,
+            site_price_usdt, total_usdt
         )
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', 'collecting_assets', ?)
+        VALUES (?, ?, ?, ?, 'need_logo', ?, ?)
         RETURNING id
         "#,
     )
     .bind(uuid_value(id))
     .bind(uuid_value(user_id))
-    .bind(OrderType::SiteFee.as_str())
     .bind(build_mode.as_str())
     .bind(template_id)
-    .bind(amount_usdt.to_string())
-    .bind(optional_uuid_value(domain_quote_id))
+    .bind(site_price_usdt.to_string())
+    .bind(site_price_usdt.to_string())
     .fetch_one(pool)
-    .await;
-
-    match result {
-        Ok(row) => uuid_from_row(&row, "id"),
-        Err(error) => {
-            if let Some(quote_id) = domain_quote_id
-                && let Some(existing) = find_order_by_domain_quote(pool, quote_id).await?
-            {
-                return Ok(existing);
-            }
-            Err(error.into())
-        }
-    }
-}
-
-pub async fn prepare_order_for_payment(
-    pool: &SqlitePool,
-    order_id: Uuid,
-    amount_usdt: Decimal,
-    domain_quote_id: Option<Uuid>,
-) -> anyhow::Result<()> {
-    let result = sqlx::query(
-        r#"
-        UPDATE orders
-        SET amount_usdt = ?,
-            domain_quote_id = ?,
-            updated_at = datetime('now')
-        WHERE id = ?
-          AND payment_status = 'pending'
-          AND site_status = 'collecting_assets'
-        "#,
-    )
-    .bind(amount_usdt.to_string())
-    .bind(optional_uuid_value(domain_quote_id))
-    .bind(uuid_value(order_id))
-    .execute(pool)
     .await?;
-    if result.rows_affected() != 1 {
-        anyhow::bail!("order is not collecting assets or does not exist");
-    }
-    Ok(())
+
+    uuid_from_row(&row, "id")
 }
 
-pub async fn has_pending_order(pool: &SqlitePool, telegram_user_id: i64) -> anyhow::Result<bool> {
+/// Check if user has an unpaid (wizard/payment) order.
+pub async fn has_unpaid_order(pool: &SqlitePool, telegram_user_id: i64) -> anyhow::Result<bool> {
     let row = sqlx::query(
         r#"
         SELECT 1
         FROM orders o
         JOIN users u ON o.user_id = u.id
         WHERE u.telegram_user_id = ?
-          AND o.payment_status = 'pending'
-          AND o.site_status IN ('draft', 'collecting_assets')
+          AND o.status IN ('need_logo', 'need_ticker', 'need_name', 'need_contract',
+                           'need_x_link', 'need_tme', 'need_domain', 'need_pay')
         LIMIT 1
         "#,
     )
@@ -281,20 +198,19 @@ pub async fn has_pending_order(pool: &SqlitePool, telegram_user_id: i64) -> anyh
     Ok(row.is_some())
 }
 
-pub async fn get_pending_order_for_user(
+/// Get the user's current unpaid order (wizard or payment step).
+pub async fn get_unpaid_order(
     pool: &SqlitePool,
     telegram_user_id: i64,
 ) -> anyhow::Result<Option<Order>> {
     let row = sqlx::query(
         r#"
-        SELECT o.id, o.user_id, o.order_type, o.build_mode, o.template_id,
-               o.amount_usdt, o.payment_chain, o.payment_status, o.site_status,
-               o.payment_started_at, o.payment_expires_at, o.paid_at
+        SELECT o.*
         FROM orders o
         JOIN users u ON o.user_id = u.id
         WHERE u.telegram_user_id = ?
-          AND o.payment_status = 'pending'
-          AND o.site_status IN ('draft', 'collecting_assets')
+          AND o.status IN ('need_logo', 'need_ticker', 'need_name', 'need_contract',
+                           'need_x_link', 'need_tme', 'need_domain', 'need_pay')
         ORDER BY o.created_at DESC
         LIMIT 1
         "#,
@@ -303,173 +219,148 @@ pub async fn get_pending_order_for_user(
     .fetch_optional(pool)
     .await?;
 
-    let Some(r) = row else {
-        return Ok(None);
-    };
-
-    let order_type = match r.get::<&str, _>("order_type") {
-        "site_fee" => OrderType::SiteFee,
-        "domain_fee" => OrderType::DomainFee,
-        value => anyhow::bail!("unknown order_type: {value}"),
-    };
-
-    let build_mode = r
-        .get::<Option<&str>, _>("build_mode")
-        .and_then(|v| match v {
-            "template" => Some(BuildMode::Template),
-            "ai_free" => Some(BuildMode::AiFree),
-            _ => None,
-        });
-
-    Ok(Some(Order {
-        id: uuid_from_row(&r, "id")?,
-        user_id: uuid_from_row(&r, "user_id")?,
-        order_type,
-        build_mode,
-        template_id: r.get("template_id"),
-        amount_usdt: Decimal::from_str_exact(r.get::<&str, _>("amount_usdt"))?,
-        payment_chain: r
-            .get::<Option<&str>, _>("payment_chain")
-            .and_then(PaymentChain::from_db),
-        payment_status: r.get("payment_status"),
-        site_status: r.get("site_status"),
-        payment_started_at: r.get("payment_started_at"),
-        payment_expires_at: r.get("payment_expires_at"),
-        paid_at: r.get("paid_at"),
-    }))
+    row.as_ref().map(order_from_row).transpose()
 }
 
+/// Get a specific order by ID.
+pub async fn get_order(pool: &SqlitePool, order_id: Uuid) -> anyhow::Result<Option<Order>> {
+    let row = sqlx::query("SELECT * FROM orders WHERE id = ?")
+        .bind(uuid_value(order_id))
+        .fetch_optional(pool)
+        .await?;
+
+    row.as_ref().map(order_from_row).transpose()
+}
+
+/// Update the order status (wizard step transitions).
+pub async fn update_order_status(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    status: OrderStatus,
+) -> anyhow::Result<()> {
+    let result =
+        sqlx::query("UPDATE orders SET status = ?, updated_at = datetime('now') WHERE id = ?")
+            .bind(status.as_str())
+            .bind(uuid_value(order_id))
+            .execute(pool)
+            .await?;
+    if result.rows_affected() != 1 {
+        anyhow::bail!("order does not exist: {order_id}");
+    }
+    Ok(())
+}
+
+/// Update a wizard field on the order.
+pub async fn update_order_field(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    field: &str,
+    value: &str,
+) -> anyhow::Result<()> {
+    let allowed = [
+        "token_ticker",
+        "token_name",
+        "contract_address",
+        "x_url",
+        "telegram_url",
+        "logo_asset_path",
+        "requested_domain",
+    ];
+    if !allowed.contains(&field) {
+        anyhow::bail!("disallowed field: {field}");
+    }
+    let sql = format!("UPDATE orders SET {field} = ?, updated_at = datetime('now') WHERE id = ?");
+    sqlx::query(&sql)
+        .bind(value)
+        .bind(uuid_value(order_id))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Set domain pricing on an order.
+pub async fn set_order_domain_pricing(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    domain_price_usdt: Decimal,
+    total_usdt: Decimal,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE orders
+        SET domain_price_usdt = ?, total_usdt = ?, updated_at = datetime('now')
+        WHERE id = ?
+        "#,
+    )
+    .bind(domain_price_usdt.to_string())
+    .bind(total_usdt.to_string())
+    .bind(uuid_value(order_id))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Cancel the user's unpaid order.
 pub async fn cancel_order_for_user(
     pool: &SqlitePool,
     telegram_user_id: i64,
     order_id: Option<Uuid>,
 ) -> anyhow::Result<u64> {
-    let mut tx = pool.begin().await?;
     let mut sql = r#"
-        SELECT o.id, o.domain_quote_id
-        FROM orders o
-        JOIN users u ON u.id = o.user_id
-        WHERE u.telegram_user_id = ?
-          AND o.payment_status = 'pending'
-          AND o.site_status IN ('draft', 'collecting_assets')
+        UPDATE orders
+        SET status = 'cancelled', updated_at = datetime('now')
+        WHERE user_id IN (SELECT id FROM users WHERE telegram_user_id = ?)
+          AND status IN ('need_logo', 'need_ticker', 'need_name', 'need_contract',
+                         'need_x_link', 'need_tme', 'need_domain', 'need_pay')
     "#
     .to_string();
     if order_id.is_some() {
-        sql.push_str(" AND o.id = ?");
+        sql.push_str(" AND id = ?");
     }
     let mut query = sqlx::query(&sql).bind(telegram_user_id);
-    if let Some(order_id) = order_id {
-        query = query.bind(uuid_value(order_id));
+    if let Some(oid) = order_id {
+        query = query.bind(uuid_value(oid));
     }
-    let rows = query.fetch_all(&mut *tx).await?;
-    for row in &rows {
-        if let Some(quote_id) = optional_uuid_from_row(row, "domain_quote_id")? {
-            sqlx::query(
-                "UPDATE domain_quotes SET status = 'expired', updated_at = datetime('now') WHERE id = ? AND status = 'quoted'",
-            )
-            .bind(uuid_value(quote_id))
-            .execute(&mut *tx)
-            .await?;
-        }
-    }
-    for row in &rows {
-        let id = uuid_from_row(row, "id")?;
-        sqlx::query(
-            r#"
-            UPDATE orders
-            SET payment_status = 'expired',
-                site_status = 'failed',
-                payment_expires_at = COALESCE(payment_expires_at, datetime('now')),
-                updated_at = datetime('now')
-            WHERE id = ?
-              AND payment_status = 'pending'
-            "#,
-        )
-        .bind(uuid_value(id))
-        .execute(&mut *tx)
-        .await?;
-    }
-    let cancelled = rows.len() as u64;
-    tx.commit().await?;
-    Ok(cancelled)
+    let result = query.execute(pool).await?;
+    Ok(result.rows_affected())
 }
 
+/// Expire stale pending orders (asset collection timeout or payment window expired).
 pub async fn expire_stale_pending_orders_for_user(
     pool: &SqlitePool,
     telegram_user_id: i64,
 ) -> anyhow::Result<u64> {
-    let mut tx = pool.begin().await?;
-    let rows = sqlx::query(
+    let result = sqlx::query(
         r#"
-        SELECT o.id, o.domain_quote_id
-        FROM orders o
-        JOIN users u ON u.id = o.user_id
-        WHERE u.telegram_user_id = ?
-          AND o.payment_status = 'pending'
+        UPDATE orders
+        SET status = 'cancelled', updated_at = datetime('now')
+        WHERE user_id IN (SELECT id FROM users WHERE telegram_user_id = ?)
+          AND status IN ('need_logo', 'need_ticker', 'need_name', 'need_contract',
+                         'need_x_link', 'need_tme', 'need_domain', 'need_pay')
           AND (
-            (o.site_status IN ('draft', 'collecting_assets') AND datetime(o.updated_at) < datetime('now', ?))
-            OR (o.payment_expires_at IS NOT NULL AND datetime(o.payment_expires_at) < datetime('now'))
+            datetime(updated_at) < datetime('now', ?)
+            OR (payment_expires_at IS NOT NULL AND datetime(payment_expires_at) < datetime('now'))
           )
         "#,
     )
     .bind(telegram_user_id)
     .bind(format!("-{ASSET_COLLECTION_TIMEOUT_MINUTES} minutes"))
-    .fetch_all(&mut *tx)
+    .execute(pool)
     .await?;
-    for row in &rows {
-        if let Some(quote_id) = optional_uuid_from_row(row, "domain_quote_id")? {
-            sqlx::query(
-                "UPDATE domain_quotes SET status = 'expired', updated_at = datetime('now') WHERE id = ? AND status IN ('quoted', 'paid')",
-            )
-            .bind(uuid_value(quote_id))
-            .execute(&mut *tx)
-            .await?;
-        }
-    }
-    for row in &rows {
-        let id = uuid_from_row(row, "id")?;
-        sqlx::query(
-            r#"
-            UPDATE orders
-            SET payment_status = 'expired',
-                site_status = CASE
-                    WHEN site_status IN ('draft', 'collecting_assets') THEN 'failed'
-                    ELSE site_status
-                END,
-                updated_at = datetime('now')
-            WHERE id = ?
-              AND payment_status = 'pending'
-            "#,
-        )
-        .bind(uuid_value(id))
-        .execute(&mut *tx)
-        .await?;
-    }
-    let expired = rows.len() as u64;
-    tx.commit().await?;
-    Ok(expired)
+    Ok(result.rows_affected())
 }
 
-async fn find_order_by_domain_quote(
-    pool: &SqlitePool,
-    quote_id: Uuid,
-) -> anyhow::Result<Option<Uuid>> {
-    let row = sqlx::query(
-        r#"
-        SELECT id
-        FROM orders
-        WHERE domain_quote_id = ?
-        ORDER BY created_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(uuid_value(quote_id))
-    .fetch_optional(pool)
-    .await?;
+// ============================================================
+// Payment
+// ============================================================
 
-    row.as_ref().map(|row| uuid_from_row(row, "id")).transpose()
+#[derive(Debug, Clone)]
+pub struct PaymentWindow {
+    pub started_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
 }
 
+/// Attach payment chain and start payment window.
 pub async fn attach_payment_chain(
     pool: &SqlitePool,
     order_id: Uuid,
@@ -481,268 +372,71 @@ pub async fn attach_payment_chain(
         r#"
         UPDATE orders
         SET payment_chain = ?,
-            payment_started_at = COALESCE(payment_started_at, ?),
             payment_expires_at = COALESCE(payment_expires_at, ?),
             updated_at = datetime('now')
         WHERE id = ?
-          AND payment_status = 'pending'
-        RETURNING payment_started_at, payment_expires_at
+          AND status = 'need_pay'
+        RETURNING payment_expires_at
         "#,
     )
     .bind(chain.as_str())
-    .bind(now.to_rfc3339())
     .bind(expires_at.to_rfc3339())
     .bind(uuid_value(order_id))
     .fetch_optional(pool)
     .await?;
     let Some(row) = row else {
-        anyhow::bail!("order is not pending or does not exist");
+        anyhow::bail!("order is not in need_pay status or does not exist");
     };
     Ok(PaymentWindow {
-        started_at: parse_db_datetime(row.get::<&str, _>("payment_started_at"))?,
+        started_at: now,
         expires_at: parse_db_datetime(row.get::<&str, _>("payment_expires_at"))?,
     })
 }
 
+/// Mark order as paid and transition to paid_and_generating.
 pub async fn mark_order_paid(
     pool: &SqlitePool,
     order_id: Uuid,
     chain: PaymentChain,
     tx_hash: &str,
 ) -> anyhow::Result<()> {
+    let canonical = canonical_tx_hash(chain, tx_hash);
     let result = sqlx::query(
         r#"
         UPDATE orders
-        SET payment_status = 'paid',
-            site_status = CASE
-                WHEN order_type = 'site_fee' THEN 'queued'
-                ELSE site_status
-            END,
+        SET status = 'paid_and_generating',
             payment_chain = ?,
             tx_hash = ?,
             paid_at = datetime('now'),
             updated_at = datetime('now')
-        WHERE id = ? AND payment_status = 'pending'
+        WHERE id = ? AND status = 'need_pay'
         "#,
     )
     .bind(chain.as_str())
-    .bind(canonical_tx_hash(chain, tx_hash))
+    .bind(&canonical)
     .bind(uuid_value(order_id))
     .execute(pool)
     .await?;
     if result.rows_affected() != 1 {
-        anyhow::bail!("order is not pending or does not exist");
+        anyhow::bail!("order is not in need_pay status or does not exist");
     }
     Ok(())
 }
 
-pub async fn get_order_payment_info(
-    pool: &SqlitePool,
-    order_id: Uuid,
-) -> anyhow::Result<OrderPaymentInfo> {
-    let row = sqlx::query(
-        r#"
-        SELECT id, user_id, amount_usdt, created_at, payment_started_at, payment_expires_at, payment_status
-        FROM orders
-        WHERE id = ?
-        "#,
-    )
-    .bind(uuid_value(order_id))
-    .fetch_one(pool)
-    .await?;
-
-    Ok(OrderPaymentInfo {
-        id: uuid_from_row(&row, "id")?,
-        user_id: uuid_from_row(&row, "user_id")?,
-        amount_usdt: Decimal::from_str_exact(row.get::<&str, _>("amount_usdt"))?,
-        created_at: parse_db_datetime(row.get::<&str, _>("created_at"))?,
-        payment_started_at: row
-            .get::<Option<String>, _>("payment_started_at")
-            .as_deref()
-            .map(parse_db_datetime)
-            .transpose()?,
-        payment_expires_at: row
-            .get::<Option<String>, _>("payment_expires_at")
-            .as_deref()
-            .map(parse_db_datetime)
-            .transpose()?,
-        payment_status: row.get("payment_status"),
-    })
-}
-
+/// Check if a TX hash has already been used by any paid order.
 pub async fn tx_hash_already_used(
     pool: &SqlitePool,
     chain: PaymentChain,
     tx_hash: &str,
 ) -> anyhow::Result<bool> {
-    let canonical_tx_hash = canonical_tx_hash(chain, tx_hash);
+    let canonical = canonical_tx_hash(chain, tx_hash);
     let row = sqlx::query(
-        "SELECT COUNT(*) AS count FROM payment_transactions WHERE chain = ? AND tx_hash = ?",
+        "SELECT COUNT(*) AS count FROM orders WHERE tx_hash = ? AND status NOT IN ('cancelled')",
     )
-    .bind(chain.as_str())
-    .bind(&canonical_tx_hash)
+    .bind(&canonical)
     .fetch_one(pool)
     .await?;
     Ok(row.get::<i64, _>("count") > 0)
-}
-
-pub async fn record_payment_attempt(
-    pool: &SqlitePool,
-    order_id: Uuid,
-    user_id: Uuid,
-    chain: PaymentChain,
-    tx_hash: &str,
-    result: Result<&PaymentVerificationOutcome, &PaymentVerificationError>,
-) -> anyhow::Result<()> {
-    let id = Uuid::new_v4();
-    let (status, failure_reason, observed_amount, observed_to, confirmations) = match result {
-        Ok(outcome) => (
-            "valid",
-            None,
-            Some(outcome.observed_amount_usdt.to_string()),
-            Some(outcome.observed_to_address.clone()),
-            outcome.confirmations.map(|value| value as i64),
-        ),
-        Err(error) => (
-            match error {
-                PaymentVerificationError::InsufficientConfirmations => "insufficient_confirmations",
-                _ => "invalid",
-            },
-            Some(error.to_string()),
-            None,
-            None,
-            None,
-        ),
-    };
-
-    sqlx::query(
-        r#"
-        INSERT INTO payment_attempts (
-            id, order_id, user_id, chain, tx_hash, status, failure_reason,
-            observed_amount_usdt, observed_to_address, confirmations, checked_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        "#,
-    )
-    .bind(uuid_value(id))
-    .bind(uuid_value(order_id))
-    .bind(uuid_value(user_id))
-    .bind(chain.as_str())
-    .bind(canonical_tx_hash(chain, tx_hash))
-    .bind(status)
-    .bind(failure_reason)
-    .bind(observed_amount)
-    .bind(observed_to)
-    .bind(confirmations)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-pub async fn record_payment_transaction(
-    pool: &SqlitePool,
-    order_id: Uuid,
-    chain: PaymentChain,
-    tx_hash: &str,
-    outcome: &PaymentVerificationOutcome,
-) -> anyhow::Result<()> {
-    let canonical_tx_hash = canonical_tx_hash(chain, tx_hash);
-    sqlx::query(
-        r#"
-        INSERT INTO payment_transactions (
-            id, chain, tx_hash, order_id, amount_usdt, to_address, confirmed_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        "#,
-    )
-    .bind(uuid_value(Uuid::new_v4()))
-    .bind(chain.as_str())
-    .bind(&canonical_tx_hash)
-    .bind(uuid_value(order_id))
-    .bind(outcome.observed_amount_usdt.to_string())
-    .bind(&outcome.observed_to_address)
-    .bind(outcome.confirmed_at.to_rfc3339())
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-pub async fn confirm_payment_and_mark_paid(
-    pool: &SqlitePool,
-    order_id: Uuid,
-    chain: PaymentChain,
-    tx_hash: &str,
-    outcome: &PaymentVerificationOutcome,
-) -> anyhow::Result<()> {
-    let canonical_tx_hash = canonical_tx_hash(chain, tx_hash);
-    let mut tx = pool.begin().await?;
-
-    let existing = sqlx::query(
-        "SELECT COUNT(*) AS count FROM payment_transactions WHERE chain = ? AND tx_hash = ?",
-    )
-    .bind(chain.as_str())
-    .bind(&canonical_tx_hash)
-    .fetch_one(&mut *tx)
-    .await?
-    .get::<i64, _>("count");
-    if existing > 0 {
-        anyhow::bail!("payment transaction already used");
-    }
-
-    let update_result = sqlx::query(
-        r#"
-        UPDATE orders
-        SET payment_status = 'paid',
-            site_status = CASE
-                WHEN order_type = 'site_fee' THEN 'queued'
-                ELSE site_status
-            END,
-            tx_hash = ?,
-            paid_at = datetime('now'),
-            updated_at = datetime('now')
-        WHERE id = ?
-          AND payment_status = 'pending'
-          AND payment_chain = ?
-          AND payment_expires_at IS NOT NULL
-          AND datetime(payment_expires_at) >= datetime('now')
-        "#,
-    )
-    .bind(&canonical_tx_hash)
-    .bind(uuid_value(order_id))
-    .bind(chain.as_str())
-    .execute(&mut *tx)
-    .await?;
-    if update_result.rows_affected() != 1 {
-        anyhow::bail!("order is not pending or does not exist");
-    }
-
-    sqlx::query(
-        r#"
-        INSERT INTO payment_transactions (
-            id, chain, tx_hash, order_id, amount_usdt, to_address, confirmed_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        "#,
-    )
-    .bind(uuid_value(Uuid::new_v4()))
-    .bind(chain.as_str())
-    .bind(&canonical_tx_hash)
-    .bind(uuid_value(order_id))
-    .bind(outcome.observed_amount_usdt.to_string())
-    .bind(&outcome.observed_to_address)
-    .bind(outcome.confirmed_at.to_rfc3339())
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        "UPDATE domain_quotes SET status = 'paid', updated_at = datetime('now') WHERE id = (SELECT domain_quote_id FROM orders WHERE id = ?)",
-    )
-    .bind(uuid_value(order_id))
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-    Ok(())
 }
 
 fn canonical_tx_hash(chain: PaymentChain, tx_hash: &str) -> String {
@@ -753,61 +447,350 @@ fn canonical_tx_hash(chain: PaymentChain, tx_hash: &str) -> String {
     }
 }
 
+// ============================================================
+// Order status query (for /status)
+// ============================================================
+
+/// Get all active orders for a user (not done/cancelled).
+pub async fn get_active_orders(
+    pool: &SqlitePool,
+    telegram_user_id: i64,
+) -> anyhow::Result<Vec<Order>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT o.*
+        FROM orders o
+        JOIN users u ON o.user_id = u.id
+        WHERE u.telegram_user_id = ?
+          AND o.status NOT IN ('done', 'cancelled')
+        ORDER BY o.created_at DESC
+        "#,
+    )
+    .bind(telegram_user_id)
+    .fetch_all(pool)
+    .await?;
+
+    rows.iter().map(order_from_row).collect()
+}
+
+/// Get completed orders for /history.
+pub async fn get_completed_orders(
+    pool: &SqlitePool,
+    telegram_user_id: i64,
+    limit: i64,
+) -> anyhow::Result<Vec<OrderWithWebsite>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT o.id AS order_id, o.token_ticker, o.token_name, o.requested_domain,
+               o.total_usdt, o.payment_chain, o.paid_at,
+               w.cloudflare_pages_url, w.custom_domain, w.github_repo_url
+        FROM orders o
+        JOIN users u ON o.user_id = u.id
+        LEFT JOIN websites w ON w.order_id = o.id
+        WHERE u.telegram_user_id = ?
+          AND o.status = 'done'
+        ORDER BY o.paid_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(telegram_user_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    rows.iter()
+        .map(|row| {
+            Ok(OrderWithWebsite {
+                order_id: uuid_from_row(row, "order_id")?,
+                token_ticker: row.get("token_ticker"),
+                token_name: row.get("token_name"),
+                requested_domain: row.get("requested_domain"),
+                total_usdt: Decimal::from_str_exact(row.get::<&str, _>("total_usdt"))?,
+                payment_chain: row.get("payment_chain"),
+                paid_at: row
+                    .get::<Option<String>, _>("paid_at")
+                    .as_deref()
+                    .map(parse_db_datetime)
+                    .transpose()?,
+                cloudflare_pages_url: row.get("cloudflare_pages_url"),
+                custom_domain: row.get("custom_domain"),
+                github_repo_url: row.get("github_repo_url"),
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+pub struct OrderWithWebsite {
+    pub order_id: Uuid,
+    pub token_ticker: Option<String>,
+    pub token_name: Option<String>,
+    pub requested_domain: Option<String>,
+    pub total_usdt: Decimal,
+    pub payment_chain: Option<String>,
+    pub paid_at: Option<DateTime<Utc>>,
+    pub cloudflare_pages_url: Option<String>,
+    pub custom_domain: Option<String>,
+    pub github_repo_url: Option<String>,
+}
+
+// ============================================================
+// Generation queue (operates directly on orders table)
+// ============================================================
+
+/// Lock the next `paid_and_generating` order for generation processing.
+/// Returns the order with all fields needed for generation.
+pub async fn lock_next_generation_order(
+    pool: &SqlitePool,
+    worker_id: &str,
+    max_attempts: i64,
+) -> anyhow::Result<Option<Order>> {
+    let row = sqlx::query(
+        r#"
+        SELECT *
+        FROM orders
+        WHERE status = 'paid_and_generating'
+          AND (locked_by IS NULL OR locked_by = ?)
+          AND attempt_count < ?
+        ORDER BY created_at ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(worker_id)
+    .bind(max_attempts)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let order = order_from_row(&row)?;
+
+    let update = sqlx::query(
+        r#"
+        UPDATE orders
+        SET locked_by = ?,
+            locked_at = datetime('now'),
+            attempt_count = attempt_count + 1,
+            generation_started_at = COALESCE(generation_started_at, datetime('now')),
+            updated_at = datetime('now')
+        WHERE id = ?
+          AND status = 'paid_and_generating'
+          AND (locked_by IS NULL OR locked_by = ?)
+        "#,
+    )
+    .bind(worker_id)
+    .bind(uuid_value(order.id))
+    .bind(worker_id)
+    .execute(pool)
+    .await?;
+
+    if update.rows_affected() != 1 {
+        return Ok(None);
+    }
+
+    // Re-read to get updated attempt_count
+    get_order(pool, order.id).await
+}
+
+/// Reclaim stale running orders that have been locked too long.
+pub async fn reclaim_stale_locked_orders(
+    pool: &SqlitePool,
+    stale_minutes: i64,
+    max_attempts: i64,
+) -> anyhow::Result<Vec<(Uuid, bool)>> {
+    // Requeue orders that still have retries left
+    let requeue_rows = sqlx::query(
+        r#"
+        UPDATE orders
+        SET locked_by = NULL,
+            locked_at = NULL,
+            updated_at = datetime('now')
+        WHERE status = 'paid_and_generating'
+          AND locked_at IS NOT NULL
+          AND locked_at < datetime('now', ?)
+          AND attempt_count < ?
+        RETURNING id
+        "#,
+    )
+    .bind(format!("-{stale_minutes} minutes"))
+    .bind(max_attempts)
+    .fetch_all(pool)
+    .await?;
+
+    let mut results: Vec<(Uuid, bool)> = Vec::new();
+    for row in &requeue_rows {
+        results.push((uuid_from_row(row, "id")?, false));
+    }
+
+    // Mark as need_manual_review if max attempts reached
+    let review_rows = sqlx::query(
+        r#"
+        UPDATE orders
+        SET status = 'need_manual_review',
+            locked_by = NULL,
+            locked_at = NULL,
+            updated_at = datetime('now')
+        WHERE status = 'paid_and_generating'
+          AND locked_at IS NOT NULL
+          AND locked_at < datetime('now', ?)
+          AND attempt_count >= ?
+        RETURNING id
+        "#,
+    )
+    .bind(format!("-{stale_minutes} minutes"))
+    .bind(max_attempts)
+    .fetch_all(pool)
+    .await?;
+
+    for row in &review_rows {
+        results.push((uuid_from_row(row, "id")?, true));
+    }
+
+    Ok(results)
+}
+
+/// Mark order generation as succeeded — unlock and prepare for deployment.
+pub async fn mark_generation_succeeded(pool: &SqlitePool, order_id: Uuid) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE orders
+        SET locked_by = NULL,
+            locked_at = NULL,
+            updated_at = datetime('now')
+        WHERE id = ?
+        "#,
+    )
+    .bind(uuid_value(order_id))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Mark order as done (generation + deployment complete).
+pub async fn mark_order_done(pool: &SqlitePool, order_id: Uuid) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE orders
+        SET status = 'done',
+            locked_by = NULL,
+            locked_at = NULL,
+            updated_at = datetime('now')
+        WHERE id = ?
+        "#,
+    )
+    .bind(uuid_value(order_id))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Mark order as needing manual review (generation or deployment failed).
+pub async fn mark_order_manual_review(pool: &SqlitePool, order_id: Uuid) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE orders
+        SET status = 'need_manual_review',
+            locked_by = NULL,
+            locked_at = NULL,
+            updated_at = datetime('now')
+        WHERE id = ?
+        "#,
+    )
+    .bind(uuid_value(order_id))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Requeue a failed order for retry (unlock, keep status as paid_and_generating).
+pub async fn requeue_order_for_retry(pool: &SqlitePool, order_id: Uuid) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE orders
+        SET locked_by = NULL,
+            locked_at = NULL,
+            updated_at = datetime('now')
+        WHERE id = ? AND status = 'paid_and_generating'
+        "#,
+    )
+    .bind(uuid_value(order_id))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Reset stuck paid_and_generating orders on startup (clear locks so they get retried).
+pub async fn reset_generating_orders_on_startup(pool: &SqlitePool) -> anyhow::Result<u64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE orders
+        SET locked_by = NULL,
+            locked_at = NULL,
+            updated_at = datetime('now')
+        WHERE status = 'paid_and_generating'
+          AND locked_by IS NOT NULL
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Get queue position for a paid_and_generating order.
+pub async fn queue_position(pool: &SqlitePool, order_id: Uuid) -> anyhow::Result<i64> {
+    let current = sqlx::query(
+        "SELECT created_at FROM orders WHERE id = ? AND status = 'paid_and_generating'",
+    )
+    .bind(uuid_value(order_id))
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(current) = current else {
+        anyhow::bail!("order is not in paid_and_generating status");
+    };
+    let created_at: String = current.get("created_at");
+
+    let row = sqlx::query(
+        r#"
+        SELECT COUNT(*) AS ahead
+        FROM orders
+        WHERE status = 'paid_and_generating'
+          AND locked_by IS NULL
+          AND created_at < ?
+        "#,
+    )
+    .bind(created_at)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row.get::<i64, _>("ahead") + 1)
+}
+
+// ============================================================
+// Websites
+// ============================================================
+
+/// Create a website record when deployment succeeds.
 pub async fn create_website(
     pool: &SqlitePool,
     user_id: Uuid,
     order_id: Uuid,
     input: &WebsiteInput,
+    generation_provider: Option<&str>,
 ) -> anyhow::Result<Uuid> {
     let id = Uuid::new_v4();
     let row = sqlx::query(
         r#"
         INSERT INTO websites (
             id, user_id, order_id, token_ticker, token_name, contract_address,
-            x_url, telegram_url, logo_asset_path, requested_domain
+            x_url, telegram_url, logo_asset_path, requested_domain,
+            generation_provider_used
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        RETURNING id
-        "#,
-    )
-    .bind(uuid_value(id))
-    .bind(uuid_value(user_id))
-    .bind(uuid_value(order_id))
-    .bind(&input.token_ticker)
-    .bind(&input.token_name)
-    .bind(&input.contract_address)
-    .bind(&input.x_url)
-    .bind(&input.telegram_url)
-    .bind(&input.logo_asset_path)
-    .bind(&input.requested_domain)
-    .fetch_one(pool)
-    .await?;
-
-    uuid_from_row(&row, "id")
-}
-
-pub async fn upsert_website_for_order(
-    pool: &SqlitePool,
-    user_id: Uuid,
-    order_id: Uuid,
-    input: &WebsiteInput,
-) -> anyhow::Result<Uuid> {
-    let id = Uuid::new_v4();
-    let row = sqlx::query(
-        r#"
-        INSERT INTO websites (
-            id, user_id, order_id, token_ticker, token_name, contract_address,
-            x_url, telegram_url, logo_asset_path, requested_domain
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(order_id) DO UPDATE SET
-            token_ticker = EXCLUDED.token_ticker,
-            token_name = EXCLUDED.token_name,
-            contract_address = EXCLUDED.contract_address,
-            x_url = EXCLUDED.x_url,
-            telegram_url = EXCLUDED.telegram_url,
-            logo_asset_path = EXCLUDED.logo_asset_path,
-            requested_domain = EXCLUDED.requested_domain,
+            generation_provider_used = EXCLUDED.generation_provider_used,
             updated_at = datetime('now')
         RETURNING id
         "#,
@@ -822,221 +805,14 @@ pub async fn upsert_website_for_order(
     .bind(&input.telegram_url)
     .bind(&input.logo_asset_path)
     .bind(&input.requested_domain)
+    .bind(generation_provider)
     .fetch_one(pool)
     .await?;
 
     uuid_from_row(&row, "id")
 }
 
-pub async fn update_website_logo_path(
-    pool: &SqlitePool,
-    website_id: Uuid,
-    logo_asset_path: &str,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        "UPDATE websites SET logo_asset_path = ?, updated_at = datetime('now') WHERE id = ?",
-    )
-    .bind(logo_asset_path)
-    .bind(uuid_value(website_id))
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-pub async fn record_domain_quote(
-    pool: &SqlitePool,
-    user_id: Uuid,
-    quote: &DomainQuote,
-    quoted_amount_usdt: Decimal,
-) -> anyhow::Result<Uuid> {
-    let id = Uuid::new_v4();
-    let expires_at = (Utc::now() + Duration::minutes(30)).to_rfc3339();
-    sqlx::query(
-        r#"
-        INSERT INTO domain_quotes (
-            id, user_id, domain, tld, available, is_premium,
-            namecheap_price_usd, quoted_amount_usdt, expires_at, status
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'quoted')
-        "#,
-    )
-    .bind(uuid_value(id))
-    .bind(uuid_value(user_id))
-    .bind(&quote.domain)
-    .bind(&quote.tld)
-    .bind(quote.available)
-    .bind(quote.is_premium)
-    .bind(quote.price_usd.to_string())
-    .bind(quoted_amount_usdt.to_string())
-    .bind(expires_at)
-    .execute(pool)
-    .await?;
-    Ok(id)
-}
-
-pub async fn attach_quote_website(
-    pool: &SqlitePool,
-    quote_id: Uuid,
-    website_id: Uuid,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        "UPDATE domain_quotes SET website_id = ?, updated_at = datetime('now') WHERE id = ?",
-    )
-    .bind(uuid_value(website_id))
-    .bind(uuid_value(quote_id))
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-pub async fn record_domain_purchase_started(
-    pool: &SqlitePool,
-    quote_id: Uuid,
-) -> anyhow::Result<Uuid> {
-    let id = Uuid::new_v4();
-    let row = sqlx::query(
-        r#"
-        INSERT INTO domain_registrations (id, domain_quote_id, registration_status, nameserver_status)
-        VALUES (?, ?, 'pending', 'pending')
-        ON CONFLICT(domain_quote_id) DO UPDATE SET
-            registration_status = 'pending',
-            nameserver_status = 'pending',
-            updated_at = datetime('now')
-        RETURNING id
-        "#,
-    )
-    .bind(uuid_value(id))
-    .bind(uuid_value(quote_id))
-    .fetch_one(pool)
-    .await?;
-    uuid_from_row(&row, "id")
-}
-
-pub async fn record_domain_purchase_success(
-    pool: &SqlitePool,
-    quote_id: Uuid,
-    purchase: &DomainPurchaseResult,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE domain_registrations
-        SET namecheap_order_id = ?,
-            namecheap_transaction_id = ?,
-            charged_amount_usd = ?,
-            registration_status = 'registered',
-            updated_at = datetime('now')
-        WHERE domain_quote_id = ?
-        "#,
-    )
-    .bind(&purchase.namecheap_order_id)
-    .bind(&purchase.namecheap_transaction_id)
-    .bind(purchase.charged_amount_usd.to_string())
-    .bind(uuid_value(quote_id))
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "UPDATE domain_quotes SET status = 'purchased', updated_at = datetime('now') WHERE id = ?",
-    )
-    .bind(uuid_value(quote_id))
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-pub async fn record_domain_dns_result(
-    pool: &SqlitePool,
-    quote_id: Uuid,
-    result: Result<&CloudflareZoneResult, &str>,
-) -> anyhow::Result<()> {
-    match result {
-        Ok(zone) => {
-            sqlx::query(
-                r#"
-                UPDATE domain_registrations
-                SET cloudflare_zone_id = ?,
-                    nameserver_status = 'updated',
-                    updated_at = datetime('now')
-                WHERE domain_quote_id = ?
-                "#,
-            )
-            .bind(&zone.zone_id)
-            .bind(uuid_value(quote_id))
-            .execute(pool)
-            .await?;
-        }
-        Err(_) => {
-            sqlx::query(
-                r#"
-                UPDATE domain_registrations
-                SET nameserver_status = 'failed',
-                    registration_status = 'needs_manual_review',
-                    updated_at = datetime('now')
-                WHERE domain_quote_id = ?
-                "#,
-            )
-            .bind(uuid_value(quote_id))
-            .execute(pool)
-            .await?;
-        }
-    }
-    Ok(())
-}
-
-pub async fn mark_domain_purchase_failed(pool: &SqlitePool, quote_id: Uuid) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE domain_registrations
-        SET registration_status = 'failed', updated_at = datetime('now')
-        WHERE domain_quote_id = ?
-        "#,
-    )
-    .bind(uuid_value(quote_id))
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "UPDATE domain_quotes SET status = 'failed', updated_at = datetime('now') WHERE id = ?",
-    )
-    .bind(uuid_value(quote_id))
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-pub async fn mark_domain_purchase_manual_review(
-    pool: &SqlitePool,
-    quote_id: Uuid,
-    reason: &str,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE domain_registrations
-        SET registration_status = 'needs_manual_review', updated_at = datetime('now')
-        WHERE domain_quote_id = ?
-        "#,
-    )
-    .bind(uuid_value(quote_id))
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "UPDATE domain_quotes SET status = 'failed', updated_at = datetime('now') WHERE id = ?",
-    )
-    .bind(uuid_value(quote_id))
-    .execute(pool)
-    .await?;
-    tracing::warn!(%quote_id, %reason, "domain purchase requires manual review");
-    Ok(())
-}
-
-pub async fn mark_order_manual_review(pool: &SqlitePool, order_id: Uuid) -> anyhow::Result<()> {
-    sqlx::query(
-        "UPDATE orders SET site_status = 'needs_manual_review', updated_at = datetime('now') WHERE id = ?",
-    )
-    .bind(uuid_value(order_id))
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
+/// Update website with deployment results and mark order as done.
 pub async fn update_website_deployment_success(
     pool: &SqlitePool,
     order_id: Uuid,
@@ -1044,40 +820,29 @@ pub async fn update_website_deployment_success(
 ) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
 
-    let result = sqlx::query(
+    sqlx::query(
         r#"
         UPDATE websites
-        SET github_owner = ?,
-            github_repo_name = ?,
-            github_repo_url = ?,
-            github_commit_sha = ?,
-            cloudflare_project_name = ?,
+        SET github_repo_url = ?,
             cloudflare_pages_url = ?,
             custom_domain = ?,
-            deployment_status = 'live',
             updated_at = datetime('now')
         WHERE order_id = ?
         "#,
     )
-    .bind(&deployment.github_owner)
-    .bind(&deployment.github_repo_name)
     .bind(&deployment.github_repo_url)
-    .bind(&deployment.github_commit_sha)
-    .bind(&deployment.cloudflare_project_name)
     .bind(&deployment.cloudflare_pages_url)
     .bind(&deployment.custom_domain)
     .bind(uuid_value(order_id))
     .execute(&mut *tx)
     .await?;
 
-    if result.rows_affected() != 1 {
-        anyhow::bail!("website for order does not exist");
-    }
-
     sqlx::query(
         r#"
         UPDATE orders
-        SET site_status = 'live',
+        SET status = 'done',
+            locked_by = NULL,
+            locked_at = NULL,
             updated_at = datetime('now')
         WHERE id = ?
         "#,
@@ -1090,349 +855,55 @@ pub async fn update_website_deployment_success(
     Ok(())
 }
 
-pub async fn record_deployment_attempt(
-    pool: &SqlitePool,
-    website_id: Uuid,
-    stage: &str,
-    status: &str,
-    error_message: Option<&str>,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO deployment_attempts (
-            id, website_id, stage, status, error_message, finished_at
-        )
-        VALUES (?, ?, ?, ?, ?, CASE WHEN ? <> 'running' THEN datetime('now') ELSE NULL END)
-        "#,
-    )
-    .bind(uuid_value(Uuid::new_v4()))
-    .bind(uuid_value(website_id))
-    .bind(stage)
-    .bind(status)
-    .bind(error_message)
-    .bind(status)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
+// ============================================================
+// Helpers
+// ============================================================
 
-pub async fn enqueue_generation_job(
-    pool: &SqlitePool,
-    order_id: Uuid,
-    website_id: Uuid,
-) -> anyhow::Result<Uuid> {
-    let id = Uuid::new_v4();
-    let row = sqlx::query(
-        r#"
-        INSERT INTO generation_jobs (id, order_id, website_id, status)
-        VALUES (?, ?, ?, 'queued')
-        ON CONFLICT (order_id) DO UPDATE SET order_id = EXCLUDED.order_id
-        RETURNING id
-        "#,
-    )
-    .bind(uuid_value(id))
-    .bind(uuid_value(order_id))
-    .bind(uuid_value(website_id))
-    .fetch_one(pool)
-    .await?;
+fn order_from_row(row: &SqliteRow) -> anyhow::Result<Order> {
+    let status_str: String = row.get("status");
+    let status = OrderStatus::from_db(&status_str)
+        .ok_or_else(|| anyhow::anyhow!("unknown order status: {status_str}"))?;
 
-    uuid_from_row(&row, "id")
-}
+    let build_mode = row
+        .get::<Option<String>, _>("build_mode")
+        .as_deref()
+        .and_then(BuildMode::from_db);
 
-pub async fn queue_position(pool: &SqlitePool, job_id: Uuid) -> anyhow::Result<i64> {
-    let current = sqlx::query(
-        r#"
-        SELECT queued_at
-        FROM generation_jobs
-        WHERE id = ?
-          AND status = 'queued'
-        "#,
-    )
-    .bind(uuid_value(job_id))
-    .fetch_optional(pool)
-    .await?;
-
-    let Some(current) = current else {
-        anyhow::bail!("queued job does not exist");
-    };
-
-    let queued_at: String = current.get("queued_at");
-
-    let row = sqlx::query(
-        r#"
-        SELECT COUNT(*) AS ahead
-        FROM generation_jobs
-        WHERE status = 'queued'
-          AND queued_at < ?
-        "#,
-    )
-    .bind(queued_at)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(row.get::<i64, _>("ahead") + 1)
-}
-
-pub async fn get_user_order(
-    pool: &SqlitePool,
-    telegram_user_id: i64,
-) -> anyhow::Result<Option<UserOrderStatus>> {
-    let row = sqlx::query(
-        r#"
-        SELECT o.payment_status, o.site_status, o.amount_usdt, o.payment_chain,
-               w.requested_domain
-        FROM orders o
-        JOIN users u ON o.user_id = u.id
-        LEFT JOIN websites w ON w.order_id = o.id
-        WHERE u.telegram_user_id = ?
-          AND o.payment_status IN ('pending', 'paid')
-          AND o.site_status <> 'failed'
-        ORDER BY o.created_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(telegram_user_id)
-    .fetch_optional(pool)
-    .await?;
-
-    let Some(r) = row else {
-        return Ok(None);
-    };
-
-    Ok(Some(UserOrderStatus {
-        payment_status: r.get("payment_status"),
-        site_status: r.get("site_status"),
-        amount_usdt: Decimal::from_str_exact(r.get::<&str, _>("amount_usdt"))?,
-        payment_chain: r.get("payment_chain"),
-        requested_domain: r.get("requested_domain"),
-    }))
-}
-
-pub async fn get_user_paid_order_history(
-    pool: &SqlitePool,
-    telegram_user_id: i64,
-    limit: i64,
-) -> anyhow::Result<Vec<UserOrderHistoryItem>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT o.id, o.amount_usdt, o.payment_chain, o.site_status, o.paid_at,
-               w.requested_domain, w.custom_domain, w.cloudflare_pages_url
-        FROM orders o
-        JOIN users u ON o.user_id = u.id
-        LEFT JOIN websites w ON w.order_id = o.id
-        WHERE u.telegram_user_id = ?
-          AND o.payment_status = 'paid'
-        ORDER BY COALESCE(o.paid_at, o.updated_at, o.created_at) DESC
-        LIMIT ?
-        "#,
-    )
-    .bind(telegram_user_id)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(UserOrderHistoryItem {
-                order_id: uuid_from_row(&row, "id")?,
-                amount_usdt: Decimal::from_str_exact(row.get::<&str, _>("amount_usdt"))?,
-                payment_chain: row.get("payment_chain"),
-                site_status: row.get("site_status"),
-                paid_at: row
-                    .get::<Option<String>, _>("paid_at")
-                    .as_deref()
-                    .map(parse_db_datetime)
-                    .transpose()?,
-                requested_domain: row.get("requested_domain"),
-                custom_domain: row.get("custom_domain"),
-                cloudflare_pages_url: row.get("cloudflare_pages_url"),
-            })
-        })
-        .collect()
-}
-
-pub async fn get_payment_context_by_order(
-    pool: &SqlitePool,
-    order_id: Uuid,
-) -> anyhow::Result<PaymentOrderContext> {
-    let sql = payment_context_select_sql("o.id = ?");
-    let row = sqlx::query(&sql)
-        .bind(uuid_value(order_id))
-        .fetch_one(pool)
-        .await?;
-    payment_context_from_row(&row)
-}
-
-pub async fn get_latest_pending_payment_context_for_user(
-    pool: &SqlitePool,
-    telegram_user_id: i64,
-) -> anyhow::Result<Option<PaymentOrderContext>> {
-    let row = sqlx::query(
-        r#"
-        SELECT o.id AS order_id, o.user_id, o.amount_usdt, o.created_at,
-               o.payment_started_at, o.payment_expires_at, o.payment_status,
-               o.payment_chain, o.domain_quote_id,
-               w.id AS website_id, w.token_ticker, w.token_name, w.contract_address,
-               w.x_url, w.telegram_url, w.logo_asset_path, w.requested_domain
-        FROM orders o
-        JOIN users u ON u.id = o.user_id
-        LEFT JOIN websites w ON w.order_id = o.id
-        WHERE u.telegram_user_id = ?
-          AND o.payment_status = 'pending'
-          AND o.payment_chain IS NOT NULL
-          AND o.payment_started_at IS NOT NULL
-        ORDER BY o.payment_started_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(telegram_user_id)
-    .fetch_optional(pool)
-    .await?;
-
-    row.as_ref().map(payment_context_from_row).transpose()
-}
-
-pub async fn get_domain_quote_for_purchase(
-    pool: &SqlitePool,
-    quote_id: Uuid,
-) -> anyhow::Result<DomainQuoteForPurchase> {
-    let row = sqlx::query(
-        r#"
-        SELECT domain, namecheap_price_usd, quoted_amount_usdt
-        FROM domain_quotes
-        WHERE id = ?
-        "#,
-    )
-    .bind(uuid_value(quote_id))
-    .fetch_one(pool)
-    .await?;
-
-    let namecheap_price_usd = row
-        .get::<Option<String>, _>("namecheap_price_usd")
-        .ok_or_else(|| anyhow::anyhow!("domain quote missing Namecheap price"))?;
-    let quoted_amount_usdt = row
-        .get::<Option<String>, _>("quoted_amount_usdt")
-        .ok_or_else(|| anyhow::anyhow!("domain quote missing quoted amount"))?;
-
-    Ok(DomainQuoteForPurchase {
-        domain: row.get("domain"),
-        namecheap_price_usd: Decimal::from_str_exact(&namecheap_price_usd)?,
-        quoted_amount_usdt: Decimal::from_str_exact(&quoted_amount_usdt)?,
-    })
-}
-
-fn payment_context_select_sql(where_clause: &str) -> String {
-    format!(
-        r#"
-        SELECT o.id AS order_id, o.user_id, o.amount_usdt, o.created_at,
-               o.payment_started_at, o.payment_expires_at, o.payment_status,
-               o.payment_chain, o.domain_quote_id,
-               w.id AS website_id, w.token_ticker, w.token_name, w.contract_address,
-               w.x_url, w.telegram_url, w.logo_asset_path, w.requested_domain
-        FROM orders o
-        LEFT JOIN websites w ON w.order_id = o.id
-        WHERE {where_clause}
-        LIMIT 1
-        "#
-    )
-}
-
-fn payment_context_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<PaymentOrderContext> {
-    let chain_value = row
-        .get::<Option<String>, _>("payment_chain")
-        .ok_or_else(|| anyhow::anyhow!("order payment chain is not set"))?;
-    let payment_chain = PaymentChain::from_db(&chain_value)
-        .ok_or_else(|| anyhow::anyhow!("unsupported payment chain: {chain_value}"))?;
-    let website_id = optional_uuid_from_row(row, "website_id")?;
-    let website_input = if website_id.is_some() {
-        Some(WebsiteInput {
-            token_ticker: row.get("token_ticker"),
-            token_name: row.get("token_name"),
-            contract_address: row.get("contract_address"),
-            x_url: row.get("x_url"),
-            telegram_url: row.get("telegram_url"),
-            logo_asset_path: row.get("logo_asset_path"),
-            requested_domain: row.get("requested_domain"),
-        })
-    } else {
-        None
-    };
-
-    Ok(PaymentOrderContext {
-        order_id: uuid_from_row(row, "order_id")?,
+    Ok(Order {
+        id: uuid_from_row(row, "id")?,
         user_id: uuid_from_row(row, "user_id")?,
-        amount_usdt: Decimal::from_str_exact(row.get::<&str, _>("amount_usdt"))?,
-        created_at: parse_db_datetime(row.get::<&str, _>("created_at"))?,
-        payment_started_at: row
-            .get::<Option<String>, _>("payment_started_at")
+        status,
+        build_mode,
+        template_id: row.get("template_id"),
+        token_ticker: row.get("token_ticker"),
+        token_name: row.get("token_name"),
+        contract_address: row.get("contract_address"),
+        x_url: row.get("x_url"),
+        telegram_url: row.get("telegram_url"),
+        logo_asset_path: row.get("logo_asset_path"),
+        requested_domain: row.get("requested_domain"),
+        site_price_usdt: parse_decimal_or_zero(row.get::<&str, _>("site_price_usdt")),
+        domain_price_usdt: parse_decimal_or_zero(row.get::<&str, _>("domain_price_usdt")),
+        total_usdt: parse_decimal_or_zero(row.get::<&str, _>("total_usdt")),
+        payment_chain: row
+            .get::<Option<String>, _>("payment_chain")
             .as_deref()
-            .map(parse_db_datetime)
-            .transpose()?,
+            .and_then(PaymentChain::from_db),
+        tx_hash: row.get("tx_hash"),
         payment_expires_at: row
             .get::<Option<String>, _>("payment_expires_at")
             .as_deref()
             .map(parse_db_datetime)
             .transpose()?,
-        payment_status: row.get("payment_status"),
-        payment_chain,
-        domain_quote_id: optional_uuid_from_row(row, "domain_quote_id")?,
-        website_id,
-        website_input,
+        paid_at: row
+            .get::<Option<String>, _>("paid_at")
+            .as_deref()
+            .map(parse_db_datetime)
+            .transpose()?,
+        attempt_count: row.get("attempt_count"),
+        created_at: parse_db_datetime(row.get::<&str, _>("created_at"))?,
+        updated_at: parse_db_datetime(row.get::<&str, _>("updated_at"))?,
     })
-}
-
-#[derive(Debug, Clone)]
-pub struct UserOrderStatus {
-    pub payment_status: String,
-    pub site_status: String,
-    pub amount_usdt: rust_decimal::Decimal,
-    pub payment_chain: Option<String>,
-    pub requested_domain: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct UserOrderHistoryItem {
-    pub order_id: Uuid,
-    pub amount_usdt: Decimal,
-    pub payment_chain: Option<String>,
-    pub site_status: String,
-    pub paid_at: Option<DateTime<Utc>>,
-    pub requested_domain: Option<String>,
-    pub custom_domain: Option<String>,
-    pub cloudflare_pages_url: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PaymentOrderContext {
-    pub order_id: Uuid,
-    pub user_id: Uuid,
-    pub amount_usdt: Decimal,
-    pub created_at: DateTime<Utc>,
-    pub payment_started_at: Option<DateTime<Utc>>,
-    pub payment_expires_at: Option<DateTime<Utc>>,
-    pub payment_status: String,
-    pub payment_chain: PaymentChain,
-    pub domain_quote_id: Option<Uuid>,
-    pub website_id: Option<Uuid>,
-    pub website_input: Option<WebsiteInput>,
-}
-
-#[derive(Debug, Clone)]
-pub struct DomainQuoteForPurchase {
-    pub domain: String,
-    pub namecheap_price_usd: Decimal,
-    pub quoted_amount_usdt: Decimal,
-}
-
-#[derive(Debug, Clone)]
-pub struct OrderPaymentInfo {
-    pub id: Uuid,
-    pub user_id: Uuid,
-    pub amount_usdt: Decimal,
-    pub created_at: DateTime<Utc>,
-    pub payment_started_at: Option<DateTime<Utc>>,
-    pub payment_expires_at: Option<DateTime<Utc>>,
-    pub payment_status: String,
 }
 
 fn parse_db_datetime(value: &str) -> anyhow::Result<DateTime<Utc>> {
@@ -1443,50 +914,29 @@ fn parse_db_datetime(value: &str) -> anyhow::Result<DateTime<Utc>> {
     Ok(DateTime::from_naive_utc_and_offset(naive, Utc))
 }
 
-/// Reset generation jobs stuck in `running` back to `queued` so they are
-/// retried after a restart. Jobs in `needs_manual_review` are left for the
-/// admin. Returns the number of jobs reset.
-pub async fn reset_stuck_generation_jobs(pool: &SqlitePool) -> anyhow::Result<u64> {
-    let result = sqlx::query(
-        r#"
-        UPDATE generation_jobs
-        SET status = 'queued',
-            started_at = NULL,
-            finished_at = NULL,
-            locked_by = NULL,
-            locked_at = NULL
-        WHERE status = 'running'
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    let count = result.rows_affected();
-    if count > 0 {
-        sqlx::query(
-            r#"
-            UPDATE orders
-            SET site_status = 'queued', updated_at = datetime('now')
-            WHERE site_status = 'generating'
-              AND payment_status = 'paid'
-              AND id IN (
-                  SELECT order_id FROM generation_jobs WHERE status = 'queued'
-              )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-    }
-
-    Ok(count)
+fn parse_decimal_or_zero(value: &str) -> Decimal {
+    Decimal::from_str_exact(value).unwrap_or_default()
 }
+
+// ============================================================
+// Tests
+// ============================================================
 
 #[cfg(test)]
 mod tests {
-    use crate::domain::DomainQuote;
     use sqlx::sqlite::SqlitePoolOptions;
 
     use super::*;
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
 
     #[tokio::test]
     async fn normalizes_legacy_blob_user_ids_before_upsert() {
@@ -1527,152 +977,103 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancels_pending_order_and_expires_attached_quote() {
+    async fn create_and_cancel_order() {
         let pool = test_pool().await;
-        let user_id = upsert_user(&pool, 101, Some("ma"), None, None, true)
+        let user_id = upsert_user(&pool, 101, Some("alice"), None, None, true)
             .await
             .unwrap();
-        let quote_id = record_domain_quote(
-            &pool,
-            user_id,
-            &DomainQuote {
-                domain: "aaabbb.com".to_string(),
-                tld: "com".to_string(),
-                available: true,
-                is_premium: false,
-                price_usd: Decimal::new(12, 0),
-                years: 1,
-            },
-            Decimal::new(12, 0),
-        )
-        .await
-        .unwrap();
-        let order_id = create_site_order(
-            &pool,
-            user_id,
-            BuildMode::AiFree,
-            None,
-            Decimal::new(62, 0),
-            Some(quote_id),
-        )
-        .await
-        .unwrap();
+        let order_id = create_order(&pool, user_id, BuildMode::AiFree, None, Decimal::new(50, 0))
+            .await
+            .unwrap();
+
+        assert!(has_unpaid_order(&pool, 101).await.unwrap());
 
         let cancelled = cancel_order_for_user(&pool, 101, Some(order_id))
             .await
             .unwrap();
-
-        let order = sqlx::query("SELECT payment_status, site_status FROM orders WHERE id = ?")
-            .bind(uuid_value(order_id))
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        let quote = sqlx::query("SELECT status FROM domain_quotes WHERE id = ?")
-            .bind(uuid_value(quote_id))
-            .fetch_one(&pool)
-            .await
-            .unwrap();
         assert_eq!(cancelled, 1);
-        assert_eq!(order.get::<String, _>("payment_status"), "expired");
-        assert_eq!(order.get::<String, _>("site_status"), "failed");
-        assert_eq!(quote.get::<String, _>("status"), "expired");
-        assert!(get_user_order(&pool, 101).await.unwrap().is_none());
+        assert!(!has_unpaid_order(&pool, 101).await.unwrap());
+
+        let active = get_active_orders(&pool, 101).await.unwrap();
+        assert!(active.is_empty());
     }
 
     #[tokio::test]
-    async fn expires_stale_asset_collection_orders() {
+    async fn order_wizard_flow() {
         let pool = test_pool().await;
-        let user_id = upsert_user(&pool, 202, Some("ma"), None, None, true)
+        let user_id = upsert_user(&pool, 201, Some("bob"), None, None, true)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO templates (id, template_id, name, local_path, price_tier) VALUES (?, 'template_01', 'Test', './test', '30')")
-            .bind(uuid_value(Uuid::new_v4()))
-            .execute(&pool)
-            .await
-            .unwrap();
-        let order_id = create_site_order(
-            &pool,
-            user_id,
-            BuildMode::Template,
-            Some("template_01"),
-            Decimal::new(30, 0),
-            None,
-        )
-        .await
-        .unwrap();
-        sqlx::query("UPDATE orders SET updated_at = datetime('now', '-90 minutes') WHERE id = ?")
-            .bind(uuid_value(order_id))
-            .execute(&pool)
+        let order_id = create_order(&pool, user_id, BuildMode::AiFree, None, Decimal::new(50, 0))
             .await
             .unwrap();
 
-        let expired = expire_stale_pending_orders_for_user(&pool, 202)
+        // Simulate wizard steps
+        update_order_field(&pool, order_id, "logo_asset_path", "/tmp/logo.png")
+            .await
+            .unwrap();
+        update_order_status(&pool, order_id, OrderStatus::NeedTicker)
+            .await
+            .unwrap();
+        update_order_field(&pool, order_id, "token_ticker", "PEPE")
+            .await
+            .unwrap();
+        update_order_status(&pool, order_id, OrderStatus::NeedPay)
             .await
             .unwrap();
 
-        let order = sqlx::query("SELECT payment_status, site_status FROM orders WHERE id = ?")
-            .bind(uuid_value(order_id))
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(expired, 1);
-        assert_eq!(order.get::<String, _>("payment_status"), "expired");
-        assert_eq!(order.get::<String, _>("site_status"), "failed");
+        let order = get_order(&pool, order_id).await.unwrap().unwrap();
+        assert_eq!(order.status, OrderStatus::NeedPay);
+        assert_eq!(order.logo_asset_path.as_deref(), Some("/tmp/logo.png"));
+        assert_eq!(order.token_ticker.as_deref(), Some("PEPE"));
     }
 
     #[tokio::test]
-    async fn paid_order_history_only_returns_paid_orders() {
+    async fn paid_order_becomes_generating() {
         let pool = test_pool().await;
-        let user_id = upsert_user(&pool, 303, Some("ma"), None, None, true)
+        let user_id = upsert_user(&pool, 301, Some("charlie"), None, None, true)
             .await
             .unwrap();
-        let paid_order_id = create_site_order(
-            &pool,
-            user_id,
-            BuildMode::AiFree,
-            None,
-            Decimal::new(50, 0),
-            None,
-        )
-        .await
-        .unwrap();
-        mark_order_paid(&pool, paid_order_id, PaymentChain::Tron, "tx303")
+        let order_id = create_order(&pool, user_id, BuildMode::AiFree, None, Decimal::new(50, 0))
+            .await
+            .unwrap();
+        update_order_status(&pool, order_id, OrderStatus::NeedPay)
             .await
             .unwrap();
 
-        sqlx::query("INSERT INTO templates (id, template_id, name, local_path, price_tier) VALUES (?, 'template_01', 'Test', './test', '30')")
-            .bind(uuid_value(Uuid::new_v4()))
-            .execute(&pool)
-            .await
-            .unwrap();
-        let unpaid_order_id = create_site_order(
-            &pool,
-            user_id,
-            BuildMode::Template,
-            Some("template_01"),
-            Decimal::new(30, 0),
-            None,
-        )
-        .await
-        .unwrap();
-        cancel_order_for_user(&pool, 303, Some(unpaid_order_id))
+        mark_order_paid(&pool, order_id, PaymentChain::Tron, "tx301")
             .await
             .unwrap();
 
-        let history = get_user_paid_order_history(&pool, 303, 10).await.unwrap();
+        let order = get_order(&pool, order_id).await.unwrap().unwrap();
+        assert_eq!(order.status, OrderStatus::PaidAndGenerating);
 
+        // User can now create a new order
+        assert!(!has_unpaid_order(&pool, 301).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn completed_orders_show_in_history() {
+        let pool = test_pool().await;
+        let user_id = upsert_user(&pool, 401, Some("dave"), None, None, true)
+            .await
+            .unwrap();
+        let order_id = create_order(&pool, user_id, BuildMode::AiFree, None, Decimal::new(50, 0))
+            .await
+            .unwrap();
+        update_order_status(&pool, order_id, OrderStatus::NeedPay)
+            .await
+            .unwrap();
+        mark_order_paid(&pool, order_id, PaymentChain::Erc20, "tx401")
+            .await
+            .unwrap();
+        mark_order_done(&pool, order_id).await.unwrap();
+
+        let active = get_active_orders(&pool, 401).await.unwrap();
+        assert!(active.is_empty());
+
+        let history = get_completed_orders(&pool, 401, 10).await.unwrap();
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].order_id, paid_order_id);
-        assert_eq!(history[0].payment_chain.as_deref(), Some("tron"));
-    }
-
-    async fn test_pool() -> SqlitePool {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-        pool
+        assert_eq!(history[0].order_id, order_id);
     }
 }
