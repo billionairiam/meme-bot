@@ -55,6 +55,7 @@ pub struct Config {
     pub api_service_base_url: Option<String>,
     pub api_service_api_key: Option<String>,
     pub auto_purchase_after_tx: bool,
+    pub skip_payment_verification: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -189,6 +190,7 @@ impl Config {
                 .ok()
                 .filter(|v| !v.is_empty()),
             auto_purchase_after_tx: env_bool("AUTO_PURCHASE_AFTER_TX", false),
+            skip_payment_verification: env_bool("SKIP_PAYMENT_VERIFICATION", false),
         })
     }
 }

@@ -22,6 +22,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let config = Config::from_env()?;
+    if config.skip_payment_verification {
+        warn!("⚠️  SKIP_PAYMENT_VERIFICATION is enabled — all TX hashes will be accepted without on-chain verification");
+    }
 
     let database_url = config
         .database_url

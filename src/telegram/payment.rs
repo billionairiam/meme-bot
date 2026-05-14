@@ -97,93 +97,107 @@ pub(crate) async fn process_payment_tx_context(
         Err(error) => warn!(?error, "failed to check tx reuse"),
     }
 
-    let expected_to_address = payment_address_for_chain(config, chain).trim().to_string();
-    if expected_to_address.is_empty() {
-        return bot
-            .send_message(chat_id, "<b>Payment address missing.</b>\nContact admin.")
-            .parse_mode(ParseMode::Html)
-            .await
-            .map(|_| ());
-    }
-
-    let verifier = ChainPaymentVerifier::new(
-        config.usdt_erc20_rpc_url.clone(),
-        config.usdt_erc20_contract.clone(),
-        config.usdt_erc20_min_confirmations,
-        config.tron_grid_base_url.clone(),
-        config.tron_grid_api_key.clone(),
-        config.usdt_tron_contract.clone(),
-        config.usdt_tron_min_confirmations,
-        config.solana_rpc_url.clone(),
-        config.usdt_sol_mint.clone(),
-        config.usdt_sol_min_confirmations,
-    );
-    let service = PaymentService::new(verifier);
-    let tx_submitted_at = chrono::Utc::now();
-    let payment_expires_at = context.payment_expires_at.unwrap_or_else(|| {
-        warn!(order_id = %order_id, "payment_expires_at is NULL, falling back to created_at + payment window");
-        context.created_at + chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES)
-    });
-    let payment_started_at = context.payment_started_at.unwrap_or_else(|| {
-        warn!(order_id = %order_id, "payment_started_at is NULL, falling back from payment_expires_at");
-        payment_expires_at - chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES)
-    });
-    let verify_request = PaymentVerificationRequest {
-        order_id,
-        chain,
-        tx_hash: tx_hash.to_string(),
-        expected_to_address,
-        required_amount_usdt: context.amount_usdt,
-        payment_started_at,
-        submitted_at: tx_submitted_at,
-        expires_at: payment_expires_at,
-    };
-    let verification = verify_payment_with_retries(&service, verify_request).await;
-    if let Err(error) = db::record_payment_attempt(
-        pool,
-        order_id,
-        context.user_id,
-        chain,
-        tx_hash,
-        verification.as_ref(),
-    )
-    .await
-    {
-        warn!(?error, order_id = %order_id, "failed to record payment attempt");
-    }
-
-    let outcome = match verification {
-        Ok(outcome) => {
-            info!(
-                user_id = user_id.0 as i64,
-                order_id = %order_id,
-                chain = chain.as_str(),
-                observed_amount_usdt = %outcome.observed_amount_usdt,
-                confirmations = outcome.confirmations.map(|value| value as i64),
-                confirmed_at = %outcome.confirmed_at,
-                "payment verified on chain"
-            );
-            outcome
+    let outcome = if config.skip_payment_verification {
+        warn!(
+            order_id = %order_id,
+            chain = chain.as_str(),
+            "SKIP_PAYMENT_VERIFICATION is enabled — accepting tx without on-chain check"
+        );
+        PaymentVerificationOutcome {
+            observed_amount_usdt: context.amount_usdt,
+            observed_to_address: payment_address_for_chain(config, chain).trim().to_string(),
+            confirmations: Some(999),
+            confirmed_at: chrono::Utc::now(),
         }
-        Err(error) => {
-            warn!(
-                user_id = user_id.0 as i64,
-                order_id = %order_id,
-                chain = chain.as_str(),
-                error = %error,
-                "payment verification failed"
-            );
+    } else {
+        let expected_to_address = payment_address_for_chain(config, chain).trim().to_string();
+        if expected_to_address.is_empty() {
             return bot
-                .send_message(
-                    chat_id,
-                    format!(
-                        "❌ <b>Payment not confirmed.</b>\n{}",
-                        html_escape(&payment_error_for_user(&error))
-                    ),
-                )
+                .send_message(chat_id, "<b>Payment address missing.</b>\nContact admin.")
                 .parse_mode(ParseMode::Html)
                 .await
                 .map(|_| ());
+        }
+
+        let verifier = ChainPaymentVerifier::new(
+            config.usdt_erc20_rpc_url.clone(),
+            config.usdt_erc20_contract.clone(),
+            config.usdt_erc20_min_confirmations,
+            config.tron_grid_base_url.clone(),
+            config.tron_grid_api_key.clone(),
+            config.usdt_tron_contract.clone(),
+            config.usdt_tron_min_confirmations,
+            config.solana_rpc_url.clone(),
+            config.usdt_sol_mint.clone(),
+            config.usdt_sol_min_confirmations,
+        );
+        let service = PaymentService::new(verifier);
+        let tx_submitted_at = chrono::Utc::now();
+        let payment_expires_at = context.payment_expires_at.unwrap_or_else(|| {
+            warn!(order_id = %order_id, "payment_expires_at is NULL, falling back to created_at + payment window");
+            context.created_at + chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES)
+        });
+        let payment_started_at = context.payment_started_at.unwrap_or_else(|| {
+            warn!(order_id = %order_id, "payment_started_at is NULL, falling back from payment_expires_at");
+            payment_expires_at - chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES)
+        });
+        let verify_request = PaymentVerificationRequest {
+            order_id,
+            chain,
+            tx_hash: tx_hash.to_string(),
+            expected_to_address,
+            required_amount_usdt: context.amount_usdt,
+            payment_started_at,
+            submitted_at: tx_submitted_at,
+            expires_at: payment_expires_at,
+        };
+        let verification = verify_payment_with_retries(&service, verify_request).await;
+        if let Err(error) = db::record_payment_attempt(
+            pool,
+            order_id,
+            context.user_id,
+            chain,
+            tx_hash,
+            verification.as_ref(),
+        )
+        .await
+        {
+            warn!(?error, order_id = %order_id, "failed to record payment attempt");
+        }
+
+        match verification {
+            Ok(outcome) => {
+                info!(
+                    user_id = user_id.0 as i64,
+                    order_id = %order_id,
+                    chain = chain.as_str(),
+                    observed_amount_usdt = %outcome.observed_amount_usdt,
+                    confirmations = outcome.confirmations.map(|value| value as i64),
+                    confirmed_at = %outcome.confirmed_at,
+                    "payment verified on chain"
+                );
+                outcome
+            }
+            Err(error) => {
+                warn!(
+                    user_id = user_id.0 as i64,
+                    order_id = %order_id,
+                    chain = chain.as_str(),
+                    error = %error,
+                    "payment verification failed"
+                );
+                return bot
+                    .send_message(
+                        chat_id,
+                        format!(
+                            "❌ <b>Payment not confirmed.</b>\n{}",
+                            html_escape(&payment_error_for_user(&error))
+                        ),
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map(|_| ());
+            }
         }
     };
 
