@@ -270,8 +270,12 @@ pub struct CloudflarePagesClient {
 
 impl CloudflarePagesClient {
     pub fn new(account_id: String, api_token: String) -> Self {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .expect("build reqwest client");
         Self {
-            client: Client::new(),
+            client,
             account_id,
             api_token,
         }
@@ -326,19 +330,28 @@ impl CloudflarePagesClient {
         Ok(Some((zone_id, zone_status)))
     }
 
-    /// Poll Cloudflare until the domain zone is visible, up to ~20 min.
-    pub async fn ensure_zone_exists(&self, domain: &str) -> Result<String, DeploymentError> {
+    /// Poll until the domain's zone status becomes "active", or timeout.
+    /// Returns the zone_id on success.
+    pub async fn wait_zone_active(&self, domain: &str) -> Result<String, DeploymentError> {
         for attempt in 0..ZONE_POLL_ATTEMPTS {
-            if let Some((zone_id, _status)) = self.get_zone_info(domain).await? {
-                return Ok(zone_id);
-            }
-            if attempt == 0 {
-                info!(domain = %domain, "zone not found yet, waiting for Cloudflare zone provisioning (up to 20 min)");
+            match self.get_zone_info(domain).await? {
+                Some((zone_id, ref status)) if status == "active" => return Ok(zone_id),
+                Some((_, ref status)) => {
+                    if attempt == 0 {
+                        info!(domain = %domain, status = %status, "zone exists but not active yet, waiting");
+                    }
+                    ensure_domain_status_not_failed(domain, status)?;
+                }
+                None => {
+                    if attempt == 0 {
+                        info!(domain = %domain, "zone not found yet, waiting");
+                    }
+                }
             }
             sleep(ZONE_POLL_INTERVAL).await;
         }
         Err(DeploymentError::CloudflarePages(format!(
-            "domain {domain} zone still not visible in Cloudflare after waiting for zone provisioning"
+            "domain {domain} zone did not become active before timeout"
         )))
     }
 
@@ -538,16 +551,13 @@ impl CloudflarePagesClient {
         domain: &str,
     ) -> Result<(), DeploymentError> {
         // Step 1: ensure the domain's Cloudflare zone exists.
-        let _zone_id = self.ensure_zone_exists(domain).await?;
+        let _zone_id = self.wait_zone_active(domain).await?;
 
-        // If Pages domain is already bound, verify both Pages and zone status.
+        // If Pages domain is already bound, verify both Pages status.
         if let Some(pages_status) =
             self.get_pages_domain_status(project_name, domain).await?
         {
             ensure_domain_status_not_failed(domain, &pages_status)?;
-            if let Some((_, zone_status)) = self.get_zone_info(domain).await? {
-                ensure_domain_status_not_failed(domain, &zone_status)?;
-            }
             return Ok(());
         }
 
@@ -585,15 +595,15 @@ impl CloudflarePagesClient {
         // Step 3: poll until both Pages domain status and zone status are active.
         for _ in 0..PAGES_DOMAIN_POLL_ATTEMPTS {
             let pages = self.get_pages_domain_status(project_name, domain).await?;
-            let zone = self.get_zone_info(domain).await?;
-            match (pages.as_deref(), zone.as_ref().map(|z| z.1.as_str())) {
-                (Some("active"), Some("active")) => return Ok(()),
-                (Some(pages_status), Some(zone_status)) => {
+            match pages.as_deref() {
+                Some("active") => return Ok(()),
+                Some(pages_status) => {
                     ensure_domain_status_not_failed(domain, pages_status)?;
-                    ensure_domain_status_not_failed(domain, zone_status)?;
-                }
-                (Some(pages_status), None) => {
-                    ensure_domain_status_not_failed(domain, pages_status)?;
+                    info!(
+                        domain = %domain,
+                        pages_status = %pages_status,
+                        "custom domain not active yet, waiting"
+                    );
                 }
                 _ => {}
             }
