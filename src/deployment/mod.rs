@@ -5,6 +5,7 @@ use thiserror::Error;
 use crate::domain::DomainError;
 
 pub mod cloudflare;
+pub use cloudflare::{CloudflarePagesClient, PagesDeployRequest};
 pub(crate) mod github;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

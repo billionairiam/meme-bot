@@ -1,4 +1,4 @@
-use std::{env, net::SocketAddr, sync::Arc, time::Duration};
+use std::{env, net::SocketAddr, sync::Arc};
 
 use axum::{
     Router,
@@ -11,12 +11,7 @@ use axum::{
 use meme_bot::{
     config::{NamecheapConfig, NamecheapContactConfig, load_env_file},
     deployment::{
-        DeploymentError,
-        cloudflare::{
-            PagesDeploymentStatus, ensure_domain_status_not_failed, ensure_zone_exists,
-            get_zone_info, parse_existing_zone, parse_pages_deployment_response, response_success,
-            verify_deployment_commit, verify_existing_pages_project,
-        },
+        CloudflarePagesClient, DeploymentError, PagesDeployRequest,
     },
     domain::{
         ApiErrorResponse, CloudflareZoneResult, DomainError, DomainPurchaseRequest,
@@ -26,20 +21,12 @@ use meme_bot::{
     logging::init_logging,
 };
 use serde::Deserialize;
-use tokio::time::sleep;
 use tracing::{error, info, warn};
-
-const PAGES_DEPLOYMENT_POLL_ATTEMPTS: usize = 36;
-const PAGES_DEPLOYMENT_POLL_INTERVAL: Duration = Duration::from_secs(5);
-const PAGES_DOMAIN_POLL_ATTEMPTS: usize = 120;
-const PAGES_DOMAIN_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 struct AppState {
     registrar: NamecheapRegistrar,
     nc_dns: NamecheapDnsProvisioner,
-    cf_account_id: String,
-    cf_api_token: String,
-    cf_client: reqwest::Client,
+    cf: CloudflarePagesClient,
     api_key: String,
 }
 
@@ -80,9 +67,7 @@ async fn main() {
     let state = Arc::new(AppState {
         registrar: NamecheapRegistrar::new(nc_config.clone()),
         nc_dns: NamecheapDnsProvisioner::new(nc_config),
-        cf_account_id,
-        cf_api_token,
-        cf_client: reqwest::Client::new(),
+        cf: CloudflarePagesClient::new(cf_account_id, cf_api_token),
         api_key,
     });
 
@@ -196,108 +181,15 @@ async fn dns_create_zone(
     Json(request): Json<CreateZoneRequest>,
 ) -> Result<Json<CloudflareZoneResult>, ApiError> {
     info!(domain = %request.domain, "create zone");
-
-    if state.cf_account_id.is_empty() || state.cf_api_token.is_empty() {
-        let err = DomainError::MissingConfig(
-            "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN".to_string(),
-        );
-        error!(domain = %request.domain, error = %err, "create zone failed");
-        return Err(ApiError(err));
-    }
-
-    // Check if zone already exists (from a previous create-zone call)
-    let zones_url = format!(
-        "https://api.cloudflare.com/client/v4/zones?name={}",
-        request.domain
-    );
-    let existing = state
-        .cf_client
-        .get(&zones_url)
-        .bearer_auth(&state.cf_api_token)
-        .send()
+    state
+        .cf
+        .create_zone(&request.domain)
         .await
-        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-    if existing.status().is_success() {
-        let body = existing
-            .text()
-            .await
-            .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-        if let Some(existing_zone) = parse_existing_zone(&body) {
-            info!(domain = %request.domain, zone_id = %existing_zone.zone_id, "zone already exists");
-            return Ok(Json(existing_zone));
-        }
-    }
-
-    let response = state
-        .cf_client
-        .post("https://api.cloudflare.com/client/v4/zones")
-        .bearer_auth(&state.cf_api_token)
-        .json(&serde_json::json!({
-            "name": request.domain,
-            "account": { "id": state.cf_account_id },
-            "jump_start": true,
-        }))
-        .send()
-        .await
+        .map(Json)
         .map_err(|e| {
-            let err = DomainError::Cloudflare(e.to_string());
-            error!(domain = %request.domain, error = %err, "create zone http request failed");
-            err
-        })?;
-
-    let status = response.status();
-    let body = response.text().await.map_err(|e| {
-        let err = DomainError::Cloudflare(e.to_string());
-        error!(domain = %request.domain, error = %err, "create zone read response body failed");
-        err
-    })?;
-
-    if !status.is_success() {
-        let err = DomainError::Cloudflare(format!("{status}: {body}"));
-        error!(domain = %request.domain, error = %err, "create zone upstream error");
-        return Err(err)?;
-    }
-
-    let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-        let err = DomainError::Cloudflare(format!("parse response: {e}"));
-        error!(domain = %request.domain, error = %err, "create zone parse failed");
-        err
-    })?;
-
-    if json.get("success").and_then(|v| v.as_bool()) != Some(true) {
-        let errors = json
-            .get("errors")
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "unknown error".to_string());
-        let err = DomainError::Cloudflare(format!("zone creation failed: {errors}"));
-        error!(domain = %request.domain, error = %err, "create zone cloudflare rejected");
-        return Err(err)?;
-    }
-
-    let result = json
-        .get("result")
-        .ok_or_else(|| DomainError::Cloudflare("missing result".to_string()))?;
-
-    let zone_id = result
-        .get("id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| DomainError::Cloudflare("missing zone id".to_string()))?
-        .to_string();
-
-    let nameservers: Vec<String> = result
-        .get("name_servers")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|ns| ns.as_str().map(String::from))
-                .collect()
+            error!(domain = %request.domain, error = %e, "create zone failed");
+            ApiError(e)
         })
-        .unwrap_or_default();
-
-    Ok(Json(CloudflareZoneResult {
-        zone_id,
-        nameservers,
-    }))
 }
 
 async fn dns_set_nameservers(
@@ -318,24 +210,6 @@ async fn dns_set_nameservers(
 
 // ---- Cloudflare Pages (Git integration) ----
 
-#[derive(Deserialize)]
-struct PagesDeployRequest {
-    project_name: String,
-    github_owner: String,
-    github_repo: String,
-    production_branch: String,
-    #[serde(default = "default_pages_publish_dir")]
-    publish_dir: String,
-    #[serde(default)]
-    custom_domain: Option<String>,
-    #[serde(default)]
-    expected_commit_sha: Option<String>,
-}
-
-fn default_pages_publish_dir() -> String {
-    "/".to_string()
-}
-
 async fn pages_deploy(
     State(state): State<Arc<AppState>>,
     Json(request): Json<PagesDeployRequest>,
@@ -345,322 +219,15 @@ async fn pages_deploy(
         repo = format!("{}/{}", request.github_owner, request.github_repo),
         "pages deploy"
     );
-
-    if state.cf_account_id.is_empty() || state.cf_api_token.is_empty() {
-        let err = DomainError::MissingConfig(
-            "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN".to_string(),
-        );
-        error!(project = %request.project_name, error = %err, "pages deploy failed");
-        return Err(ApiError(err));
-    }
-
-    let cf_url = format!(
-        "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects",
-        state.cf_account_id
-    );
-
-    let project_url = format!("{cf_url}/{}", request.project_name);
-    let existing = state
-        .cf_client
-        .get(&project_url)
-        .bearer_auth(&state.cf_api_token)
-        .send()
+    state
+        .cf
+        .deploy(&request)
         .await
-        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-    let project_exists = existing.status().is_success();
-    if project_exists {
-        let body = existing
-            .text()
-            .await
-            .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-        verify_existing_pages_project(
-            &body,
-            &request.github_owner,
-            &request.github_repo,
-            &request.production_branch,
-            &request.publish_dir,
-        )?;
-    } else if existing.status() != StatusCode::NOT_FOUND {
-        let status = existing.status();
-        let body = existing
-            .text()
-            .await
-            .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-        error!(project = %request.project_name, status = %status, body = %body, "get existing pages project failed");
-        return Err(DomainError::Cloudflare(format!(
-            "get project failed: {status}: {body}"
-        )))?;
-    }
-
-    if !project_exists {
-        // Create Git-connected Pages project
-        let response = state
-            .cf_client
-            .post(&cf_url)
-            .bearer_auth(&state.cf_api_token)
-            .json(&serde_json::json!({
-                "name": request.project_name,
-                "production_branch": request.production_branch,
-                "source": {
-                    "type": "github",
-                    "config": {
-                        "owner": request.github_owner,
-                        "repo_name": request.github_repo,
-                        "production_branch": request.production_branch,
-                        "production_deployments_enabled": true,
-                        "preview_deployment_setting": "none",
-                        "pr_comments_enabled": false,
-                        "deployments_enabled": true,
-                    }
-                },
-                "build_config": {
-                    "build_command": "",
-                    "destination_dir": request.publish_dir,
-                    "root_dir": ""
-                }
-            }))
-            .send()
-            .await
-            .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-
-        if !status.is_success() {
-            error!(status = %status, body = %body, "cloudflare pages project creation failed");
-            return Err(DomainError::Cloudflare(format!(
-                "create pages project failed: {status}: {body}"
-            )))?;
-        }
-
-        let json: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|e| DomainError::Cloudflare(format!("parse response: {e}")))?;
-
-        if json.get("success").and_then(|v| v.as_bool()) != Some(true) {
-            let errors = json
-                .get("errors")
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "unknown error".to_string());
-            error!(project = %request.project_name, errors = %errors, "cloudflare pages project creation rejected");
-            return Err(DomainError::Cloudflare(format!(
-                "pages project creation failed: {errors}"
-            )))?;
-        }
-    }
-
-    let deployment = trigger_pages_deployment(&state, &request.project_name).await?;
-    let deployment = wait_pages_deployment_success(
-        &state,
-        &request.project_name,
-        &deployment.id,
-        request.expected_commit_sha.as_deref(),
-    )
-    .await?;
-
-    // Bind custom domain if requested
-    if let Some(domain) = &request.custom_domain {
-        info!(domain = %domain, project = %request.project_name, "binding custom domain");
-        bind_pages_custom_domain(&state, &request.project_name, domain).await?;
-    }
-
-    let pages_url = deployment
-        .url
-        .unwrap_or_else(|| format!("https://{}.pages.dev", request.project_name));
-    info!(url = %pages_url, "pages project created successfully");
-
-    Ok(Json(serde_json::json!({
-        "cloudflare_pages_url": pages_url,
-        "custom_domain": request.custom_domain,
-    })))
-}
-
-async fn trigger_pages_deployment(
-    state: &AppState,
-    project_name: &str,
-) -> Result<PagesDeploymentStatus, ApiError> {
-    let url = format!(
-        "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects/{}/deployments",
-        state.cf_account_id, project_name
-    );
-    let response = state
-        .cf_client
-        .post(url)
-        .bearer_auth(&state.cf_api_token)
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-    let deployment = parse_pages_deployment_response(response).await?;
-    Ok(deployment)
-}
-
-async fn wait_pages_deployment_success(
-    state: &AppState,
-    project_name: &str,
-    deployment_id: &str,
-    expected_commit_sha: Option<&str>,
-) -> Result<PagesDeploymentStatus, ApiError> {
-    for _ in 0..PAGES_DEPLOYMENT_POLL_ATTEMPTS {
-        let url = format!(
-            "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects/{}/deployments/{}",
-            state.cf_account_id, project_name, deployment_id
-        );
-        let response = state
-            .cf_client
-            .get(url)
-            .bearer_auth(&state.cf_api_token)
-            .send()
-            .await
-            .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-        let deployment = parse_pages_deployment_response(response).await?;
-        match deployment.stage_status.as_deref() {
-            Some("success") => {
-                verify_deployment_commit(&deployment, expected_commit_sha)?;
-                return Ok(deployment);
-            }
-            Some("failure") | Some("canceled") => {
-                return Err(DomainError::Cloudflare(format!(
-                    "deployment {} ended with status {}",
-                    deployment.id,
-                    deployment.stage_status.unwrap_or_default()
-                ))
-                .into());
-            }
-            _ => sleep(PAGES_DEPLOYMENT_POLL_INTERVAL).await,
-        }
-    }
-
-    Err(DomainError::Cloudflare(format!(
-        "deployment {deployment_id} did not complete before timeout"
-    ))
-    .into())
-}
-
-/// Check zone exists. Does not require the zone to be "active" yet — that
-/// check happens during Pages domain polling (step 3).
-async fn bind_pages_custom_domain(
-    state: &AppState,
-    project_name: &str,
-    domain: &str,
-) -> Result<(), ApiError> {
-    // Step 1: ensure the domain's Cloudflare zone exists.
-    let _zone_id = ensure_zone_exists(&state.cf_client, &state.cf_api_token, domain)
-        .await
-        .map_err(|e| ApiError(DomainError::from(e)))?;
-
-    // If Pages domain is already bound, verify both Pages and zone status.
-    if let Some(pages_status) = get_pages_domain_status(state, project_name, domain).await? {
-        ensure_domain_status_not_failed(domain, &pages_status)?;
-        if let Some((_, zone_status)) = get_zone_info(&state.cf_client, &state.cf_api_token, domain)
-            .await
-            .map_err(|e| ApiError(DomainError::from(e)))?
-        {
-            ensure_domain_status_not_failed(domain, &zone_status)?;
-        }
-        return Ok(());
-    }
-
-    // Step 2: bind custom domain to Pages project.
-    let bind_url = format!(
-        "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects/{}/domains",
-        state.cf_account_id, project_name
-    );
-    let bind_response = state
-        .cf_client
-        .post(&bind_url)
-        .bearer_auth(&state.cf_api_token)
-        .json(&serde_json::json!({"name": domain}))
-        .send()
-        .await
-        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-
-    let bind_status = bind_response.status();
-    let bind_body = bind_response
-        .text()
-        .await
-        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-
-    if !bind_status.is_success()
-        || response_success(&bind_body)
-            .map(|success| !success)
-            .unwrap_or(false)
-    {
-        warn!(?bind_status, %bind_body, "custom domain bind failed");
-        return Err(DomainError::Cloudflare(format!(
-            "custom domain bind failed: {bind_status}: {bind_body}"
-        )))?;
-    }
-
-    // Step 3: poll until both Pages domain status and zone status are active.
-    for _ in 0..PAGES_DOMAIN_POLL_ATTEMPTS {
-        let pages = get_pages_domain_status(state, project_name, domain).await?;
-        let zone = get_zone_info(&state.cf_client, &state.cf_api_token, domain)
-            .await
-            .map_err(|e| ApiError(DomainError::from(e)))?;
-        match (pages.as_deref(), zone.as_ref().map(|z| z.1.as_str())) {
-            // Pages domain active + zone active → done
-            (Some("active"), Some("active")) => return Ok(()),
-            // Pages domain active but zone not yet active → keep waiting
-            (Some(pages_status), Some(zone_status)) => {
-                ensure_domain_status_not_failed(domain, pages_status)?;
-                ensure_domain_status_not_failed(domain, zone_status)?;
-            }
-            (Some(pages_status), None) => {
-                ensure_domain_status_not_failed(domain, pages_status)?;
-            }
-            _ => {}
-        }
-        sleep(PAGES_DOMAIN_POLL_INTERVAL).await;
-    }
-
-    Err(DomainError::Cloudflare(format!(
-        "custom domain {domain} did not become active before timeout"
-    )))?
-}
-
-async fn get_pages_domain_status(
-    state: &AppState,
-    project_name: &str,
-    domain: &str,
-) -> Result<Option<String>, ApiError> {
-    let url = format!(
-        "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects/{}/domains/{}",
-        state.cf_account_id, project_name, domain
-    );
-    let response = state
-        .cf_client
-        .get(url)
-        .bearer_auth(&state.cf_api_token)
-        .send()
-        .await
-        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-    if response.status() == StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| DomainError::Cloudflare(e.to_string()))?;
-    if !status.is_success()
-        || response_success(&body)
-            .map(|success| !success)
-            .unwrap_or(false)
-    {
-        return Err(DomainError::Cloudflare(format!("{status}: {body}")))?;
-    }
-    let value: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| DomainError::Cloudflare(format!("parse domain response: {e}: {body}")))?;
-    let domain_status = value
-        .get("result")
-        .and_then(|result| result.get("status"))
-        .and_then(|status| status.as_str())
-        .filter(|status| !status.trim().is_empty())
-        .ok_or_else(|| DomainError::Cloudflare("domain response missing status".to_string()))?;
-    Ok(Some(domain_status.to_string()))
+        .map(Json)
+        .map_err(|e| {
+            error!(project = %request.project_name, error = %e, "pages deploy failed");
+            ApiError(DomainError::from(e))
+        })
 }
 
 // ---- ApiError ----
