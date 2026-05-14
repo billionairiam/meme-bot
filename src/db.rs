@@ -573,7 +573,6 @@ pub async fn lock_next_generation_order(
         SET locked_by = ?,
             locked_at = datetime('now'),
             attempt_count = attempt_count + 1,
-            generation_started_at = COALESCE(generation_started_at, datetime('now')),
             updated_at = datetime('now')
         WHERE id = ?
           AND status = 'paid_and_generating'

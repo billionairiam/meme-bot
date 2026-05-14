@@ -166,7 +166,7 @@ impl Config {
             gemini_agent_command: env::var("GEMINI_AGENT_COMMAND")
                 .unwrap_or_else(|_| "gemini".to_string()),
             gemini_agent_args: env::var("GEMINI_AGENT_ARGS")
-                .unwrap_or_else(|_| "--yolo --prompt-file {prompt_file}".to_string()),
+                .unwrap_or_else(|_| "--yolo --skip-trust -p {prompt}".to_string()),
             codex_agent_command: env::var("CODEX_AGENT_COMMAND")
                 .unwrap_or_else(|_| "codex".to_string()),
             codex_agent_args: env::var("CODEX_AGENT_ARGS").unwrap_or_else(|_| {
