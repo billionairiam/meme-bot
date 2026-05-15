@@ -52,64 +52,6 @@ pub fn response_success(body: &str) -> Option<bool> {
         .and_then(|value| value.get("success").and_then(|success| success.as_bool()))
 }
 
-pub fn verify_existing_pages_project(
-    body: &str,
-    github_owner: &str,
-    github_repo: &str,
-    branch: &str,
-    publish_dir: &str,
-) -> Result<(), DeploymentError> {
-    let value: serde_json::Value = serde_json::from_str(body)
-        .map_err(|error| DeploymentError::CloudflarePages(format!("parse project: {error}")))?;
-    if value.get("success").and_then(|success| success.as_bool()) != Some(true) {
-        return Err(DeploymentError::CloudflarePages(format!(
-            "get project returned unsuccessful response: {body}"
-        )));
-    }
-    let result = value.get("result").ok_or_else(|| {
-        DeploymentError::CloudflarePages("project response missing result".to_string())
-    })?;
-    let config = result
-        .get("source")
-        .and_then(|source| source.get("config"))
-        .ok_or_else(|| {
-            DeploymentError::CloudflarePages(
-                "existing Pages project is not connected to a Git source".to_string(),
-            )
-        })?;
-    let owner = config.get("owner").and_then(|item| item.as_str());
-    let repo = config.get("repo_name").and_then(|item| item.as_str());
-    let production_branch = config
-        .get("production_branch")
-        .and_then(|item| item.as_str());
-    if owner != Some(github_owner) || repo != Some(github_repo) || production_branch != Some(branch)
-    {
-        return Err(DeploymentError::CloudflarePages(format!(
-            "existing Pages project points to {}/{}:{}, expected {}/{}:{}",
-            owner.unwrap_or("<missing>"),
-            repo.unwrap_or("<missing>"),
-            production_branch.unwrap_or("<missing>"),
-            github_owner,
-            github_repo,
-            branch
-        )));
-    }
-
-    if let Some(existing_dir) = result
-        .get("build_config")
-        .and_then(|config| config.get("destination_dir"))
-        .and_then(|item| item.as_str())
-        && !existing_dir.is_empty()
-        && existing_dir != publish_dir
-    {
-        return Err(DeploymentError::CloudflarePages(format!(
-            "existing Pages project publish directory is {existing_dir}, expected {publish_dir}"
-        )));
-    }
-
-    Ok(())
-}
-
 fn parse_pages_deployment_response(
     status: reqwest::StatusCode,
     body: &str,
@@ -718,95 +660,60 @@ impl CloudflarePagesClient {
             self.account_id
         );
 
-        let project_url = format!("{cf_url}/{}", request.project_name);
-        let existing = self
+        let response = self
             .client
-            .get(&project_url)
+            .post(&cf_url)
             .bearer_auth(&self.api_token)
+            .json(&serde_json::json!({
+                "name": request.project_name,
+                "production_branch": request.production_branch,
+                "source": {
+                    "type": "github",
+                    "config": {
+                        "owner": request.github_owner,
+                        "repo_name": request.github_repo,
+                        "production_branch": request.production_branch,
+                        "production_deployments_enabled": true,
+                        "preview_deployment_setting": "none",
+                        "pr_comments_enabled": false,
+                        "deployments_enabled": true,
+                    }
+                },
+                "build_config": {
+                    "build_command": "",
+                    "destination_dir": request.publish_dir,
+                    "root_dir": ""
+                }
+            }))
             .send()
             .await
             .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
-        let project_exists = existing.status().is_success();
-        if project_exists {
-            let body = existing
-                .text()
-                .await
-                .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
-            verify_existing_pages_project(
-                &body,
-                &request.github_owner,
-                &request.github_repo,
-                &request.production_branch,
-                &request.publish_dir,
-            )?;
-        } else if existing.status() != reqwest::StatusCode::NOT_FOUND {
-            let status = existing.status();
-            let body = existing
-                .text()
-                .await
-                .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
-            error!(project = %request.project_name, status = %status, body = %body, "get existing pages project failed");
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
+
+        if !status.is_success() {
+            error!(status = %status, body = %body, "cloudflare pages project creation failed");
             return Err(DeploymentError::CloudflarePages(format!(
-                "get project failed: {status}: {body}"
+                "create pages project failed: {status}: {body}"
             )));
         }
 
-        if !project_exists {
-            let response = self
-                .client
-                .post(&cf_url)
-                .bearer_auth(&self.api_token)
-                .json(&serde_json::json!({
-                    "name": request.project_name,
-                    "production_branch": request.production_branch,
-                    "source": {
-                        "type": "github",
-                        "config": {
-                            "owner": request.github_owner,
-                            "repo_name": request.github_repo,
-                            "production_branch": request.production_branch,
-                            "production_deployments_enabled": true,
-                            "preview_deployment_setting": "none",
-                            "pr_comments_enabled": false,
-                            "deployments_enabled": true,
-                        }
-                    },
-                    "build_config": {
-                        "build_command": "",
-                        "destination_dir": request.publish_dir,
-                        "root_dir": ""
-                    }
-                }))
-                .send()
-                .await
-                .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
+        let json: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| DeploymentError::CloudflarePages(format!("parse response: {e}")))?;
 
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
-
-            if !status.is_success() {
-                error!(status = %status, body = %body, "cloudflare pages project creation failed");
-                return Err(DeploymentError::CloudflarePages(format!(
-                    "create pages project failed: {status}: {body}"
-                )));
-            }
-
-            let json: serde_json::Value = serde_json::from_str(&body)
-                .map_err(|e| DeploymentError::CloudflarePages(format!("parse response: {e}")))?;
-
-            if json.get("success").and_then(|v| v.as_bool()) != Some(true) {
-                let errors = json
-                    .get("errors")
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| "unknown error".to_string());
-                error!(project = %request.project_name, errors = %errors, "cloudflare pages project creation rejected");
-                return Err(DeploymentError::CloudflarePages(format!(
-                    "pages project creation failed: {errors}"
-                )));
-            }
+        if json.get("success").and_then(|v| v.as_bool()) != Some(true) {
+            let errors = json
+                .get("errors")
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown error".to_string());
+            error!(project = %request.project_name, errors = %errors, "cloudflare pages project creation rejected");
+            return Err(DeploymentError::CloudflarePages(format!(
+                "pages project creation failed: {errors}"
+            )));
         }
 
         let deployment = self.trigger_deployment(&request.project_name).await?;

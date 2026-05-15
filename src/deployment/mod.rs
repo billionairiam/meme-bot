@@ -85,28 +85,6 @@ mod tests {
     }
 
     #[test]
-    fn verifies_existing_pages_project_source() {
-        let body = r#"{
-            "success": true,
-            "result": {
-                "source": {
-                    "config": {
-                        "owner": "memebot",
-                        "repo_name": "example.com",
-                        "production_branch": "main"
-                    }
-                },
-                "build_config": {
-                    "destination_dir": "/"
-                }
-            }
-        }"#;
-
-        assert!(verify_existing_pages_project(body, "memebot", "example.com", "main", "/").is_ok());
-        assert!(verify_existing_pages_project(body, "memebot", "wrong.com", "main", "/").is_err());
-    }
-
-    #[test]
     fn rejects_failed_pages_domain_statuses() {
         assert!(ensure_domain_status_not_failed("example.com", "active").is_ok());
         assert!(ensure_domain_status_not_failed("example.com", "pending").is_ok());
