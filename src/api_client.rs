@@ -151,6 +151,7 @@ impl SiteDeployer for HttpClientPagesDeployer {
             match push_site_to_github(request).await {
                 Ok(()) => {
                     last_push_err = None;
+                    info!(repo_name = %request.repo_name, "git push success!");
                     break;
                 }
                 Err(e) => {
