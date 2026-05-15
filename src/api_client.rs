@@ -6,7 +6,7 @@ use serde::Deserialize;
 use tokio::time::sleep;
 use tracing::{error, info};
 
-use crate::deployment::cloudflare::{publish_dir_from_site_dir, ZONE_POLL_ATTEMPTS, ZONE_POLL_INTERVAL};
+use crate::deployment::cloudflare::{publish_dir_from_site_dir, ZONE_POLL_INTERVAL};
 use crate::deployment::github::{ensure_github_repo, git_output, push_site_to_github};
 use crate::deployment::{DeploymentError, DeploymentRequest, DeploymentResult, SiteDeployer};
 use crate::domain::{
@@ -173,29 +173,10 @@ impl SiteDeployer for HttpClientPagesDeployer {
 
         let commit_sha: String = git_output(&request.site_dir, &["rev-parse", "HEAD"]).await?;
 
-        // Step 3: If custom domain is set, create Cloudflare zone, set nameservers,
-        // and wait for zone to become active before deploying.
+        // Step 3: If custom domain is set, wait for zone to become active
+        // (zone creation + nameserver setup happens at payment time)
         if let Some(domain) = &request.custom_domain {
-            info!(domain = %domain, "creating cloudflare zone via api-server");
-            match self.create_zone(domain).await {
-                Ok(zone) => {
-                    info!(
-                        domain = %domain,
-                        zone_id = %zone.zone_id,
-                        nameservers = ?zone.nameservers,
-                        "cloudflare zone created/found, setting nameservers on registrar"
-                    );
-                    if let Err(e) = self.set_nameservers(domain, &zone.nameservers).await {
-                        error!(domain = %domain, error = %e, "failed to set nameservers on registrar");
-                    }
-                }
-                Err(e) => {
-                    error!(domain = %domain, error = %e, "failed to create cloudflare zone");
-                }
-            }
-
-            // Poll until zone status is "active" (nameserver delegation propagated)
-            info!(domain = %domain, "waiting for zone to become active");
+            info!(domain = %domain, "waiting for zone to become active before deploy");
             self.wait_zone_active(domain).await?;
             info!(domain = %domain, "zone is active, proceeding to deploy");
         }
@@ -277,15 +258,15 @@ impl HttpClientPagesDeployer {
         Ok(Some((zone_id, status)))
     }
 
-    /// Poll until zone becomes active, or timeout.
+    /// Check that the zone is active. Polls twice (30s interval = 1 min max).
+    /// If not active after 1 min, fail — zone should have been set up at payment time.
     async fn wait_zone_active(&self, domain: &str) -> Result<(), DeploymentError> {
-        for attempt in 0..ZONE_POLL_ATTEMPTS {
+        const MAX_ATTEMPTS: usize = 2;
+        for attempt in 0..MAX_ATTEMPTS {
             match self.get_zone_status(domain).await? {
                 Some((_, ref status)) if status == "active" => return Ok(()),
                 Some((_, ref status)) => {
-                    if attempt == 0 {
-                        info!(domain = %domain, status = %status, "zone not active yet, polling");
-                    }
+                    info!(domain = %domain, status = %status, attempt, "zone not active yet");
                     if status == "moved" || status == "deactivated" || status == "banned" {
                         return Err(DeploymentError::DomainBind(format!(
                             "zone {domain} has terminal status: {status}"
@@ -293,21 +274,20 @@ impl HttpClientPagesDeployer {
                     }
                 }
                 None => {
-                    if attempt == 0 {
-                        info!(domain = %domain, "zone not found yet, polling");
-                    }
+                    info!(domain = %domain, attempt, "zone not found");
                 }
             }
-            sleep(ZONE_POLL_INTERVAL).await;
+            if attempt < MAX_ATTEMPTS - 1 {
+                sleep(ZONE_POLL_INTERVAL).await;
+            }
         }
         Err(DeploymentError::DomainBind(format!(
-            "zone {domain} did not become active within {} seconds",
-            ZONE_POLL_ATTEMPTS as u64 * ZONE_POLL_INTERVAL.as_secs()
+            "zone {domain} is not active — contact admin to check domain/nameserver setup"
         )))
     }
 
     /// Create a Cloudflare DNS zone via the api-server.
-    async fn create_zone(&self, domain: &str) -> Result<CloudflareZoneResult, DeploymentError> {
+    pub async fn create_zone(&self, domain: &str) -> Result<CloudflareZoneResult, DeploymentError> {
         let response = self
             .client
             .post(format!("{}/api/v1/dns/create-zone", self.base_url))
@@ -333,7 +313,7 @@ impl HttpClientPagesDeployer {
     }
 
     /// Set nameservers on the domain registrar via the api-server.
-    async fn set_nameservers(
+    pub async fn set_nameservers(
         &self,
         domain: &str,
         nameservers: &[String],
