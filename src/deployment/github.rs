@@ -178,10 +178,17 @@ pub(crate) async fn ensure_github_repo(
 pub(crate) async fn push_site_to_github(
     request: &DeploymentRequest,
 ) -> Result<(), DeploymentError> {
-    let repo_url = format!(
-        "https://github.com/{}/{}.git",
-        request.repo_owner, request.repo_name
+    // Use token-in-URL auth (x-access-token) — works with both classic and fine-grained PATs
+    let auth_url = format!(
+        "https://x-access-token:{}@github.com/{}/{}.git",
+        request.github_token, request.repo_owner, request.repo_name
     );
+
+    // Disable any credential helpers (e.g. VS Code) that might interfere
+    let no_credential_envs: &[(&str, String)] = &[
+        ("GIT_ASKPASS", String::new()),
+        ("GIT_TERMINAL_PROMPT", "0".to_string()),
+    ];
 
     run_git(&request.site_dir, &["init"], &[]).await?;
     run_git(
@@ -191,6 +198,13 @@ pub(crate) async fn push_site_to_github(
     )
     .await?;
     run_git(&request.site_dir, &["config", "user.name", "Meme Bot"], &[]).await?;
+    // Disable credential helper for this repo to avoid VS Code socket interference
+    run_git(
+        &request.site_dir,
+        &["config", "credential.helper", ""],
+        &[],
+    )
+    .await?;
     run_git(
         &request.site_dir,
         &["checkout", "-B", &request.production_branch],
@@ -215,20 +229,11 @@ pub(crate) async fn push_site_to_github(
         )
         .await?;
     }
-    let _ = run_git(&request.site_dir, &["remote", "remove", "origin"], &[]).await;
-    let auth_header = format!("AUTHORIZATION: bearer {}", request.github_token);
     let refspec = format!("HEAD:{}", request.production_branch);
     run_git(
         &request.site_dir,
-        &["push", "--force", &repo_url, &refspec],
-        &[
-            ("GIT_CONFIG_COUNT", "1".to_string()),
-            (
-                "GIT_CONFIG_KEY_0",
-                "http.https://github.com/.extraheader".to_string(),
-            ),
-            ("GIT_CONFIG_VALUE_0", auth_header),
-        ],
+        &["push", "--force", &auth_url, &refspec],
+        no_credential_envs,
     )
     .await
 }
