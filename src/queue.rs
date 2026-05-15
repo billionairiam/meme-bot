@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use sqlx::SqlitePool;
 use tokio::sync::{Mutex, Semaphore, mpsc};
-use tokio::time::{Duration, sleep};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -141,10 +140,7 @@ impl GenerationQueue {
                         custom_domain = deployment_request.custom_domain.as_deref().unwrap_or("<none>"),
                         "starting site deployment"
                     );
-                    match self
-                        .deploy_with_retries(deployer.as_ref(), &deployment_request)
-                        .await
-                    {
+                    match deployer.deploy(&deployment_request).await {
                         Ok(deployment) => {
                             info!(
                                 order_id = %order_id,
@@ -177,16 +173,17 @@ impl GenerationQueue {
                                 order_id = %order_id,
                                 stage = error.stage(),
                                 error = %error,
-                                "deployment failed"
+                                "deployment failed after retries"
                             );
-                            let went_to_review =
-                                self.retry_or_manual_review(order_id, attempt_count).await?;
-                            if went_to_review {
-                                self.notify_user(
-                                    order_id,
-                                    "⚠️ <b>Website deployment failed after retries.</b>\n\nYour order needs manual review. Contact admin.",
-                                ).await;
-                            }
+                            self.mark_manual_review(order_id).await?;
+                            self.notify_user(
+                                order_id,
+                                &format!(
+                                    "⚠️ <b>Website generated successfully but deployment failed.</b>\n\nStage: {}\nError: {}\n\nYour order needs manual review. Contact admin.",
+                                    error.stage(),
+                                    error
+                                ),
+                            ).await;
                         }
                     }
                 } else {
@@ -254,43 +251,6 @@ impl GenerationQueue {
             }
         }
         Ok(())
-    }
-
-    async fn deploy_with_retries(
-        &self,
-        deployer: &dyn SiteDeployer,
-        request: &DeploymentRequest,
-    ) -> Result<crate::deployment::DeploymentResult, crate::deployment::DeploymentError> {
-        let mut last_error = None;
-        for attempt in 1..=MAX_JOB_ATTEMPTS {
-            info!(
-                repo_name = %request.repo_name,
-                project_name = %request.cloudflare_project_name,
-                attempt,
-                "deployment attempt started"
-            );
-            match deployer.deploy(request).await {
-                Ok(result) => return Ok(result),
-                Err(error) => {
-                    error!(
-                        repo_name = %request.repo_name,
-                        attempt,
-                        error = %error,
-                        "deployment attempt failed"
-                    );
-                    if attempt >= MAX_JOB_ATTEMPTS {
-                        return Err(error);
-                    }
-                    last_error = Some(error);
-                    sleep(Duration::from_secs(attempt as u64 * 5)).await;
-                }
-            }
-        }
-        Err(last_error.unwrap_or_else(|| {
-            crate::deployment::DeploymentError::CloudflarePages(
-                "deployment failed after retries".to_string(),
-            )
-        }))
     }
 
     async fn mark_manual_review(&self, order_id: Uuid) -> anyhow::Result<()> {

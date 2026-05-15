@@ -199,18 +199,28 @@ pub(crate) async fn push_site_to_github(
     .await?;
     ensure_site_gitignore(&request.site_dir).await?;
     run_git(&request.site_dir, &["add", "."], &[]).await?;
-    run_git(
-        &request.site_dir,
-        &["commit", "-m", "Deploy generated website"],
-        &[],
-    )
-    .await?;
+    // Allow retries: if nothing changed since last commit, skip commit
+    let status_output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&request.site_dir)
+        .output()
+        .await
+        .map_err(|e| DeploymentError::GitPush(e.to_string()))?;
+    let has_changes = !status_output.stdout.is_empty();
+    if has_changes {
+        run_git(
+            &request.site_dir,
+            &["commit", "-m", "Deploy generated website"],
+            &[],
+        )
+        .await?;
+    }
     let _ = run_git(&request.site_dir, &["remote", "remove", "origin"], &[]).await;
     let auth_header = format!("AUTHORIZATION: bearer {}", request.github_token);
     let refspec = format!("HEAD:{}", request.production_branch);
     run_git(
         &request.site_dir,
-        &["push", &repo_url, &refspec],
+        &["push", "--force", &repo_url, &refspec],
         &[
             ("GIT_CONFIG_COUNT", "1".to_string()),
             (

@@ -3,6 +3,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
+use tokio::time::sleep;
+use tracing::{error, info};
 
 use crate::deployment::cloudflare::publish_dir_from_site_dir;
 use crate::deployment::github::{ensure_github_repo, git_output, push_site_to_github};
@@ -13,6 +15,7 @@ use crate::domain::{
 };
 
 const PAGES_DEPLOY_TIMEOUT: Duration = Duration::from_secs(300);
+const MAX_DEPLOY_RETRIES: u32 = 3;
 
 // ---- Shared helpers ----
 
@@ -206,6 +209,7 @@ impl SiteDeployer for HttpClientPagesDeployer {
         &self,
         request: &DeploymentRequest,
     ) -> Result<DeploymentResult, DeploymentError> {
+        // Step 1: Ensure GitHub repo exists (no retry needed — idempotent)
         ensure_github_repo(
             &self.client,
             &request.repo_owner,
@@ -213,9 +217,72 @@ impl SiteDeployer for HttpClientPagesDeployer {
             &request.github_token,
         )
         .await?;
-        push_site_to_github(request).await?;
+
+        // Step 2: Push to GitHub with retries
+        let mut last_push_err = None;
+        for attempt in 1..=MAX_DEPLOY_RETRIES {
+            match push_site_to_github(request).await {
+                Ok(()) => {
+                    last_push_err = None;
+                    break;
+                }
+                Err(e) => {
+                    error!(
+                        repo_name = %request.repo_name,
+                        attempt,
+                        error = %e,
+                        "git push attempt failed"
+                    );
+                    last_push_err = Some(e);
+                    if attempt < MAX_DEPLOY_RETRIES {
+                        sleep(Duration::from_secs(attempt as u64 * 5)).await;
+                    }
+                }
+            }
+        }
+        if let Some(e) = last_push_err {
+            return Err(e);
+        }
+
         let commit_sha: String = git_output(&request.site_dir, &["rev-parse", "HEAD"]).await?;
 
+        // Step 3: Deploy to Cloudflare Pages with retries
+        let mut last_cf_err = None;
+        for attempt in 1..=MAX_DEPLOY_RETRIES {
+            info!(
+                repo_name = %request.repo_name,
+                project_name = %request.cloudflare_project_name,
+                attempt,
+                "cloudflare pages deploy attempt"
+            );
+            match self.call_pages_deploy(request, commit_sha.trim()).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    error!(
+                        repo_name = %request.repo_name,
+                        attempt,
+                        error = %e,
+                        "cloudflare pages deploy attempt failed"
+                    );
+                    last_cf_err = Some(e);
+                    if attempt < MAX_DEPLOY_RETRIES {
+                        sleep(Duration::from_secs(attempt as u64 * 5)).await;
+                    }
+                }
+            }
+        }
+        Err(last_cf_err.unwrap_or_else(|| {
+            DeploymentError::CloudflarePages("deploy failed after retries".to_string())
+        }))
+    }
+}
+
+impl HttpClientPagesDeployer {
+    async fn call_pages_deploy(
+        &self,
+        request: &DeploymentRequest,
+        commit_sha: &str,
+    ) -> Result<DeploymentResult, DeploymentError> {
         let response = self
             .client
             .post(format!("{}/api/v1/pages/deploy", self.base_url))
@@ -227,7 +294,7 @@ impl SiteDeployer for HttpClientPagesDeployer {
                 "production_branch": request.production_branch,
                 "publish_dir": publish_dir_from_site_dir(&request.site_dir),
                 "custom_domain": request.custom_domain,
-                "expected_commit_sha": commit_sha.trim(),
+                "expected_commit_sha": commit_sha,
             }))
             .timeout(PAGES_DEPLOY_TIMEOUT)
             .send()
@@ -250,7 +317,7 @@ impl SiteDeployer for HttpClientPagesDeployer {
                     "https://github.com/{}/{}",
                     request.repo_owner, request.repo_name
                 ),
-                github_commit_sha: commit_sha.trim().to_string(),
+                github_commit_sha: commit_sha.to_string(),
                 cloudflare_project_name: request.cloudflare_project_name.clone(),
                 cloudflare_pages_url: deploy_response.cloudflare_pages_url,
                 custom_domain: deploy_response.custom_domain,
