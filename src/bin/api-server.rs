@@ -74,6 +74,7 @@ async fn main() {
         .route("/api/v1/domain/quote", post(domain_quote))
         .route("/api/v1/domain/purchase", post(domain_purchase))
         .route("/api/v1/dns/create-zone", post(dns_create_zone))
+        .route("/api/v1/dns/zone-status", post(dns_zone_status))
         .route("/api/v1/dns/set-nameservers", post(dns_set_nameservers))
         .route("/api/v1/pages/deploy", post(pages_deploy))
         .layer(middleware::from_fn_with_state(
@@ -188,6 +189,32 @@ async fn dns_create_zone(
             error!(domain = %request.domain, error = %e, "create zone failed");
             ApiError(e)
         })
+}
+
+#[derive(Deserialize)]
+struct ZoneStatusRequest {
+    domain: String,
+}
+
+async fn dns_zone_status(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ZoneStatusRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let info = state
+        .cf
+        .get_zone_info(&request.domain)
+        .await
+        .map_err(|e| ApiError(DomainError::from(e)))?;
+    match info {
+        Some((zone_id, status)) => Ok(Json(serde_json::json!({
+            "found": true,
+            "zone_id": zone_id,
+            "status": status,
+        }))),
+        None => Ok(Json(serde_json::json!({
+            "found": false,
+        }))),
+    }
 }
 
 async fn dns_set_nameservers(

@@ -6,15 +6,16 @@ use serde::Deserialize;
 use tokio::time::sleep;
 use tracing::{error, info};
 
-use crate::deployment::cloudflare::publish_dir_from_site_dir;
+use crate::deployment::cloudflare::{publish_dir_from_site_dir, ZONE_POLL_ATTEMPTS, ZONE_POLL_INTERVAL};
 use crate::deployment::github::{ensure_github_repo, git_output, push_site_to_github};
 use crate::deployment::{DeploymentError, DeploymentRequest, DeploymentResult, SiteDeployer};
 use crate::domain::{
-    ApiErrorResponse, CloudflareZoneResult, DnsProvisioner, DomainError, DomainPurchaseRequest,
+    ApiErrorResponse, CloudflareZoneResult, DomainError, DomainPurchaseRequest,
     DomainPurchaseResult, DomainQuote, DomainQuoteRequest, DomainRegistrar,
 };
 
-const PAGES_DEPLOY_TIMEOUT: Duration = Duration::from_secs(300);
+// Domain binding can take up to 20 min (zone activation polling), so allow 30 min total
+const PAGES_DEPLOY_TIMEOUT: Duration = Duration::from_secs(1800);
 const MAX_DEPLOY_RETRIES: u32 = 3;
 
 // ---- Shared helpers ----
@@ -104,80 +105,6 @@ impl DomainRegistrar for HttpClientDomainRegistrar {
     }
 }
 
-// ---- HttpClientDnsProvisioner ----
-
-pub struct HttpClientDnsProvisioner {
-    base_url: String,
-    api_key: String,
-    client: Client,
-}
-
-impl HttpClientDnsProvisioner {
-    pub fn new(base_url: String, api_key: String) -> Self {
-        Self {
-            base_url,
-            api_key,
-            client: Client::new(),
-        }
-    }
-}
-
-impl HttpClientDnsProvisioner {
-    pub async fn create_zone(&self, domain: &str) -> Result<CloudflareZoneResult, DomainError> {
-        let response = self
-            .client
-            .post(format!("{}/api/v1/dns/create-zone", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(&serde_json::json!({"domain": domain}))
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| DomainError::Http(e.to_string()))?;
-
-        if response.status().is_success() {
-            response
-                .json()
-                .await
-                .map_err(|e| DomainError::Parse(e.to_string()))
-        } else {
-            Err(map_http_error(response).await)
-        }
-    }
-
-    pub async fn set_namecheap_nameservers(
-        &self,
-        domain: &str,
-        nameservers: &[String],
-    ) -> Result<(), DomainError> {
-        let response = self
-            .client
-            .post(format!("{}/api/v1/dns/set-nameservers", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(&serde_json::json!({"domain": domain, "nameservers": nameservers}))
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| DomainError::Http(e.to_string()))?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(map_http_error(response).await)
-        }
-    }
-}
-
-#[async_trait]
-impl DnsProvisioner for HttpClientDnsProvisioner {
-    async fn set_namecheap_nameservers(
-        &self,
-        domain: &str,
-        nameservers: &[String],
-    ) -> Result<(), DomainError> {
-        self.set_namecheap_nameservers(domain, nameservers).await
-    }
-}
-
 // ---- HttpClientPagesDeployer ----
 
 #[derive(Debug, Deserialize)]
@@ -246,7 +173,34 @@ impl SiteDeployer for HttpClientPagesDeployer {
 
         let commit_sha: String = git_output(&request.site_dir, &["rev-parse", "HEAD"]).await?;
 
-        // Step 3: Deploy to Cloudflare Pages with retries
+        // Step 3: If custom domain is set, create Cloudflare zone, set nameservers,
+        // and wait for zone to become active before deploying.
+        if let Some(domain) = &request.custom_domain {
+            info!(domain = %domain, "creating cloudflare zone via api-server");
+            match self.create_zone(domain).await {
+                Ok(zone) => {
+                    info!(
+                        domain = %domain,
+                        zone_id = %zone.zone_id,
+                        nameservers = ?zone.nameservers,
+                        "cloudflare zone created/found, setting nameservers on registrar"
+                    );
+                    if let Err(e) = self.set_nameservers(domain, &zone.nameservers).await {
+                        error!(domain = %domain, error = %e, "failed to set nameservers on registrar");
+                    }
+                }
+                Err(e) => {
+                    error!(domain = %domain, error = %e, "failed to create cloudflare zone");
+                }
+            }
+
+            // Poll until zone status is "active" (nameserver delegation propagated)
+            info!(domain = %domain, "waiting for zone to become active");
+            self.wait_zone_active(domain).await?;
+            info!(domain = %domain, "zone is active, proceeding to deploy");
+        }
+
+        // Step 4: Deploy to Cloudflare Pages with retries
         let mut last_cf_err = None;
         for attempt in 1..=MAX_DEPLOY_RETRIES {
             info!(
@@ -278,6 +232,132 @@ impl SiteDeployer for HttpClientPagesDeployer {
 }
 
 impl HttpClientPagesDeployer {
+    /// Check zone status via the api-server.
+    async fn get_zone_status(
+        &self,
+        domain: &str,
+    ) -> Result<Option<(String, String)>, DeploymentError> {
+        let response = self
+            .client
+            .post(format!("{}/api/v1/dns/zone-status", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .json(&serde_json::json!({"domain": domain}))
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| DeploymentError::DomainBind(format!("zone status request: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(DeploymentError::DomainBind(format!(
+                "zone status failed: {status}: {body}"
+            )));
+        }
+
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| DeploymentError::DomainBind(format!("parse zone status: {e}")))?;
+
+        let found = json.get("found").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !found {
+            return Ok(None);
+        }
+        let zone_id = json
+            .get("zone_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let status = json
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        Ok(Some((zone_id, status)))
+    }
+
+    /// Poll until zone becomes active, or timeout.
+    async fn wait_zone_active(&self, domain: &str) -> Result<(), DeploymentError> {
+        for attempt in 0..ZONE_POLL_ATTEMPTS {
+            match self.get_zone_status(domain).await? {
+                Some((_, ref status)) if status == "active" => return Ok(()),
+                Some((_, ref status)) => {
+                    if attempt == 0 {
+                        info!(domain = %domain, status = %status, "zone not active yet, polling");
+                    }
+                    if status == "moved" || status == "deactivated" || status == "banned" {
+                        return Err(DeploymentError::DomainBind(format!(
+                            "zone {domain} has terminal status: {status}"
+                        )));
+                    }
+                }
+                None => {
+                    if attempt == 0 {
+                        info!(domain = %domain, "zone not found yet, polling");
+                    }
+                }
+            }
+            sleep(ZONE_POLL_INTERVAL).await;
+        }
+        Err(DeploymentError::DomainBind(format!(
+            "zone {domain} did not become active within {} seconds",
+            ZONE_POLL_ATTEMPTS as u64 * ZONE_POLL_INTERVAL.as_secs()
+        )))
+    }
+
+    /// Create a Cloudflare DNS zone via the api-server.
+    async fn create_zone(&self, domain: &str) -> Result<CloudflareZoneResult, DeploymentError> {
+        let response = self
+            .client
+            .post(format!("{}/api/v1/dns/create-zone", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .json(&serde_json::json!({"domain": domain}))
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| DeploymentError::DomainBind(format!("create zone request: {e}")))?;
+
+        if response.status().is_success() {
+            response
+                .json()
+                .await
+                .map_err(|e| DeploymentError::DomainBind(format!("parse zone response: {e}")))
+        } else {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            Err(DeploymentError::DomainBind(format!(
+                "create zone failed: {status}: {body}"
+            )))
+        }
+    }
+
+    /// Set nameservers on the domain registrar via the api-server.
+    async fn set_nameservers(
+        &self,
+        domain: &str,
+        nameservers: &[String],
+    ) -> Result<(), DeploymentError> {
+        let response = self
+            .client
+            .post(format!("{}/api/v1/dns/set-nameservers", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .json(&serde_json::json!({"domain": domain, "nameservers": nameservers}))
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| DeploymentError::DomainBind(format!("set nameservers request: {e}")))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            Err(DeploymentError::DomainBind(format!(
+                "set nameservers failed: {status}: {body}"
+            )))
+        }
+    }
     async fn call_pages_deploy(
         &self,
         request: &DeploymentRequest,

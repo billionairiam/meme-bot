@@ -543,54 +543,148 @@ impl CloudflarePagesClient {
         Ok(Some(domain_status.to_string()))
     }
 
-    /// Bind a custom domain to a Pages project, waiting for both zone and
-    /// domain status to become active.
+    /// Create a CNAME DNS record pointing the custom domain to the Pages
+    /// project's `*.pages.dev` subdomain. Idempotent: skips if a matching
+    /// record already exists.
+    async fn ensure_pages_cname(
+        &self,
+        zone_id: &str,
+        domain: &str,
+        project_name: &str,
+    ) -> Result<(), DeploymentError> {
+        let pages_target = format!("{project_name}.pages.dev");
+
+        // Check if record already exists
+        let list_url = format!(
+            "https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?type=CNAME&name={domain}"
+        );
+        let list_resp = self
+            .client
+            .get(&list_url)
+            .bearer_auth(&self.api_token)
+            .send()
+            .await
+            .map_err(|e| DeploymentError::DomainBind(format!("list dns records: {e}")))?;
+
+        if list_resp.status().is_success() {
+            let body: serde_json::Value = list_resp
+                .json()
+                .await
+                .map_err(|e| DeploymentError::DomainBind(format!("parse dns list: {e}")))?;
+            let records = body.get("result").and_then(|r| r.as_array());
+            if let Some(records) = records {
+                if records.iter().any(|r| {
+                    r.get("content")
+                        .and_then(|c| c.as_str())
+                        .is_some_and(|c| c == pages_target)
+                }) {
+                    info!(domain = %domain, target = %pages_target, "CNAME record already exists");
+                    return Ok(());
+                }
+            }
+        }
+
+        // Create the CNAME record
+        let create_url = format!(
+            "https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
+        );
+        let resp = self
+            .client
+            .post(&create_url)
+            .bearer_auth(&self.api_token)
+            .json(&serde_json::json!({
+                "type": "CNAME",
+                "name": domain,
+                "content": pages_target,
+                "proxied": true,
+                "ttl": 1
+            }))
+            .send()
+            .await
+            .map_err(|e| DeploymentError::DomainBind(format!("create CNAME record: {e}")))?;
+
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| DeploymentError::DomainBind(format!("read CNAME response: {e}")))?;
+
+        if status.is_success() {
+            info!(domain = %domain, target = %pages_target, "CNAME DNS record created");
+            Ok(())
+        } else {
+            // 81057 = "Record already exists" — treat as success
+            if body.contains("81057") {
+                info!(domain = %domain, "CNAME record already exists (code 81057)");
+                return Ok(());
+            }
+            Err(DeploymentError::DomainBind(format!(
+                "create CNAME record failed: {status}: {body}"
+            )))
+        }
+    }
+
+    /// Bind a custom domain to a Pages project: create CNAME record, register
+    /// the domain with Pages, and poll until active.
     pub async fn bind_custom_domain(
         &self,
         project_name: &str,
         domain: &str,
     ) -> Result<(), DeploymentError> {
-        // Step 1: ensure the domain's Cloudflare zone exists.
-        let _zone_id = self.wait_zone_active(domain).await?;
+        // Step 1: Get zone_id (zone should already be active — meme-bot waits for this)
+        let zone_id = match self.get_zone_info(domain).await? {
+            Some((zone_id, _)) => zone_id,
+            None => {
+                return Err(DeploymentError::DomainBind(format!(
+                    "zone for {domain} not found in Cloudflare"
+                )));
+            }
+        };
 
-        // If Pages domain is already bound, verify both Pages status.
+        // Step 2: Ensure CNAME record exists (domain → project.pages.dev)
+        self.ensure_pages_cname(&zone_id, domain, project_name)
+            .await?;
+
+        // Step 3: If Pages domain is already bound, verify status.
         if let Some(pages_status) = self.get_pages_domain_status(project_name, domain).await? {
             ensure_domain_status_not_failed(domain, &pages_status)?;
-            return Ok(());
+            if pages_status == "active" {
+                return Ok(());
+            }
+        } else {
+            // Bind custom domain to Pages project.
+            let bind_url = format!(
+                "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects/{}/domains",
+                self.account_id, project_name
+            );
+            let bind_response = self
+                .client
+                .post(&bind_url)
+                .bearer_auth(&self.api_token)
+                .json(&serde_json::json!({"name": domain}))
+                .send()
+                .await
+                .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
+
+            let bind_status = bind_response.status();
+            let bind_body = bind_response
+                .text()
+                .await
+                .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
+
+            if !bind_status.is_success()
+                || response_success(&bind_body)
+                    .map(|success| !success)
+                    .unwrap_or(false)
+            {
+                warn!(?bind_status, %bind_body, "custom domain bind failed");
+                return Err(DeploymentError::DomainBind(format!(
+                    "custom domain bind failed: {bind_status}: {bind_body}"
+                )));
+            }
         }
 
-        // Step 2: bind custom domain to Pages project.
-        let bind_url = format!(
-            "https://api.cloudflare.com/client/v4/accounts/{}/pages/projects/{}/domains",
-            self.account_id, project_name
-        );
-        let bind_response = self
-            .client
-            .post(&bind_url)
-            .bearer_auth(&self.api_token)
-            .json(&serde_json::json!({"name": domain}))
-            .send()
-            .await
-            .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
-
-        let bind_status = bind_response.status();
-        let bind_body = bind_response
-            .text()
-            .await
-            .map_err(|e| DeploymentError::CloudflarePages(e.to_string()))?;
-
-        if !bind_status.is_success()
-            || response_success(&bind_body)
-                .map(|success| !success)
-                .unwrap_or(false)
-        {
-            warn!(?bind_status, %bind_body, "custom domain bind failed");
-            return Err(DeploymentError::DomainBind(format!(
-                "custom domain bind failed: {bind_status}: {bind_body}"
-            )));
-        }
-
-        // Step 3: poll until both Pages domain status and zone status are active.
+        // Step 4: Poll until Pages domain status becomes active.
         for _ in 0..PAGES_DOMAIN_POLL_ATTEMPTS {
             let pages = self.get_pages_domain_status(project_name, domain).await?;
             match pages.as_deref() {
@@ -725,9 +819,16 @@ impl CloudflarePagesClient {
             .await?;
 
         if let Some(domain) = &request.custom_domain {
-            info!(domain = %domain, project = %request.project_name, "binding custom domain");
-            self.bind_custom_domain(&request.project_name, domain)
-                .await?;
+            info!(domain = %domain, project = %request.project_name, "binding custom domain to pages project");
+            match self.bind_custom_domain(&request.project_name, domain).await {
+                Ok(()) => {
+                    info!(domain = %domain, project = %request.project_name, "custom domain bound successfully");
+                }
+                Err(e) => {
+                    error!(domain = %domain, project = %request.project_name, error = %e, "custom domain binding failed");
+                    return Err(e);
+                }
+            }
         }
 
         let pages_url = deployment

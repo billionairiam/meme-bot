@@ -163,6 +163,11 @@ impl GenerationQueue {
                                 .as_deref()
                                 .map(|d| format!("https://{d}"))
                                 .unwrap_or_else(|| deployment.cloudflare_pages_url.clone());
+                            info!(
+                                order_id = %order_id,
+                                site_url = %site_url,
+                                "notifying user of successful deployment"
+                            );
                             self.notify_user(
                                 order_id,
                                 &format!(
