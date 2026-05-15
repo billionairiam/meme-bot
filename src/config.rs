@@ -170,13 +170,13 @@ impl Config {
             codex_agent_command: env::var("CODEX_AGENT_COMMAND")
                 .unwrap_or_else(|_| "codex".to_string()),
             codex_agent_args: env::var("CODEX_AGENT_ARGS").unwrap_or_else(|_| {
-                "exec --dangerously-bypass-approvals-and-sandbox --cd {output_dir} --file {prompt_file}"
+                "exec --dangerously-bypass-approvals-and-sandbox --cd {output_dir} {prompt}"
                     .to_string()
             }),
             claude_agent_command: env::var("CLAUDE_AGENT_COMMAND")
                 .unwrap_or_else(|_| "claude".to_string()),
             claude_agent_args: env::var("CLAUDE_AGENT_ARGS").unwrap_or_else(|_| {
-                "-p --output-format stream-json --verbose --allowedTools Read Edit Write Bash(gh:*) --permission-mode plan --allow-dangerously-bypass-sandbox --no-sandbox {prompt}".to_string()
+                "-p {prompt} --output-format stream-json --verbose --allowedTools Read Edit Write Bash --dangerously-skip-permissions".to_string()
             }),
             generated_sites_dir: env::var("GENERATED_SITES_DIR")
                 .unwrap_or_else(|_| "./generated-sites".to_string()),

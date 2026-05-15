@@ -93,16 +93,50 @@ impl GenerationRouter {
         request: &SiteGenerationRequest,
     ) -> Result<SiteGenerationResult, GenerationError> {
         let mut last_error = None;
-        for provider in &self.providers {
+        let total = self.providers.len();
+        for (i, provider) in self.providers.iter().enumerate() {
+            let name = provider.name();
+            tracing::info!(
+                provider = name,
+                index = i + 1,
+                total,
+                order_id = %request.order_id,
+                "starting generation with provider"
+            );
             match provider.generate(request).await {
-                Ok(result) => return Ok(result),
+                Ok(result) => {
+                    tracing::info!(
+                        provider = name,
+                        order_id = %request.order_id,
+                        "generation succeeded"
+                    );
+                    return Ok(result);
+                }
                 Err(error) if error.is_provider_recoverable() => {
+                    tracing::warn!(
+                        provider = name,
+                        order_id = %request.order_id,
+                        error = %error,
+                        "provider failed (recoverable), switching to next provider"
+                    );
                     last_error = Some(error);
                     continue;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    tracing::error!(
+                        provider = name,
+                        order_id = %request.order_id,
+                        error = %error,
+                        "provider failed (non-recoverable)"
+                    );
+                    return Err(error);
+                }
             }
         }
+        tracing::error!(
+            order_id = %request.order_id,
+            "all {} providers exhausted", total
+        );
         Err(last_error.unwrap_or(GenerationError::ProviderUnavailable))
     }
 }
@@ -170,6 +204,14 @@ impl SiteGenerationProvider for CliGenerationProvider {
             &request.output_dir,
             &done_file,
         )?;
+
+        tracing::info!(
+            provider = self.name,
+            command = %self.command,
+            output_dir = %request.output_dir.display(),
+            timeout_secs = self.timeout.as_secs(),
+            "launching CLI agent"
+        );
 
         let mut command = Command::new(&self.command);
         command

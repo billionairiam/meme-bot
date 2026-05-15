@@ -49,14 +49,16 @@ Generate custom inline SVG icons or local `.svg` files for all social/action lin
 
 The icons must be original SVG artwork adapted to match the logo's visual style. If the logo is pixel art, make pixel-styled icons; if the logo is hand-drawn, make sketchy icons; etc. Do not use external icon CDNs, icon fonts, or remote SVGs. The icon colors, stroke weight, corner radius, shadows, texture, and decorative details must harmonize with the logo and overall design. Place each icon next to its label in the hero/action buttons and repeat them in the footer links.
 
-## Generated Images
+## Visual Assets (SVG only — do NOT generate PNG/JPG images)
 
-You MUST generate image assets and place them in the output directory:
-- `og-image.png` — 1200x630 social preview featuring the logo image, token name, ticker, and meme-themed graphics
-- `hero-bg.png` — a background image/gradient for the hero section that complements the logo's color palette and style
-- At least 2 decorative/meme images used in sections (e.g., `meme-1.png`, `meme-2.png`) that match the logo's art style
+You cannot generate raster images. Use inline SVG and CSS for all decorative visuals:
 
-Create these images programmatically (SVG converted to PNG, CSS gradients rendered to canvas, or any technique you have). Every `<img>` tag must reference a file that actually exists.
+- **Hero background**: use CSS gradients, patterns, or an inline SVG background that complements the logo's color palette
+- **Section decorations**: create inline SVG illustrations or CSS-based decorative elements (shapes, patterns, animated gradients) for each section
+- **OG image**: create `og-image.svg` (1200x630) featuring the token name "${ticker}" and logo-themed graphics, then reference it in `<meta property="og:image">`. Alternatively use CSS to render social preview info in the hero section
+- **Meme/mascot visuals**: create at least 2 inline SVG illustrations that match the token theme — e.g., a rocket, moon, diamond hands, or stylized characters using SVG paths
+
+Every `<img>` or `<svg>` element must reference a file or inline content that actually exists. Do NOT reference external images or generate PNG/JPG files — use only SVG and CSS.
 
 ## Technical Rules
 
