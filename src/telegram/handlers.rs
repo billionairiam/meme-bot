@@ -491,22 +491,43 @@ async fn handle_order_step(
                     .await
                     .map(|_| ());
             };
-            draft.logo_file_id = Some(photo.file.id.0.clone());
-            draft.step = DraftStep::WaitingTicker;
-            info!(
-                user_id = user_id.0 as i64,
-                chat_id = %msg.chat.id,
-                next_step = DraftStep::WaitingTicker.as_str(),
-                "logo received; advancing order wizard"
-            );
-            set_session(user_id, draft, &sessions);
-            bot.send_message(
-                msg.chat.id,
-                "✅ Logo saved.\n🔤 <b>2/7 Ticker</b>\nExample: <code>PEPE</code>",
-            )
-            .parse_mode(ParseMode::Html)
-            .await
-            .map(|_| ())
+            let file_id = photo.file.id.0.clone();
+            let temp_id = uuid::Uuid::new_v4().to_string();
+            match download_telegram_logo(&bot, &file_id, &temp_id).await {
+                Ok(local_path) => {
+                    draft.logo_file_id = Some(local_path.clone());
+                    draft.step = DraftStep::WaitingTicker;
+                    info!(
+                        user_id = user_id.0 as i64,
+                        chat_id = %msg.chat.id,
+                        logo_path = %local_path,
+                        next_step = DraftStep::WaitingTicker.as_str(),
+                        "logo downloaded; advancing order wizard"
+                    );
+                    set_session(user_id, draft, &sessions);
+                    bot.send_message(
+                        msg.chat.id,
+                        "✅ Logo saved.\n🔤 <b>2/7 Ticker</b>\nExample: <code>PEPE</code>",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map(|_| ())
+                }
+                Err(e) => {
+                    warn!(
+                        user_id = user_id.0 as i64,
+                        error = %e,
+                        "failed to download logo from Telegram"
+                    );
+                    bot.send_message(
+                        msg.chat.id,
+                        "❌ Failed to download logo. Please try uploading again.",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map(|_| ())
+                }
+            }
         }
         DraftStep::WaitingTicker => {
             let Some(text) = msg.text().map(str::trim) else {

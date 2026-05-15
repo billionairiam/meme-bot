@@ -154,8 +154,9 @@ impl SiteGenerationProvider for CliGenerationProvider {
         request: &SiteGenerationRequest,
     ) -> Result<SiteGenerationResult, GenerationError> {
         prepare_output_dir(&request.output_dir)?;
+        copy_logo_to_output_dir(request)?;
 
-        let prompt = agent_prompt(request, self.name);
+        let prompt = agent_prompt(request, self.name)?;
         let prompt_file = request.output_dir.join(AGENT_PROMPT_FILE_NAME);
         fs::write(&prompt_file, &prompt).map_err(|error| {
             GenerationError::Failed(format!("write agent prompt failed: {error}"))
@@ -201,7 +202,7 @@ impl SiteGenerationProvider for CliGenerationProvider {
     }
 }
 
-fn agent_prompt(request: &SiteGenerationRequest, provider_name: &str) -> String {
+fn agent_prompt(request: &SiteGenerationRequest, provider_name: &str) -> Result<String, GenerationError> {
     let spec = serde_json::json!({
         "order_id": request.order_id,
         "provider": provider_name,
@@ -221,12 +222,15 @@ fn agent_prompt(request: &SiteGenerationRequest, provider_name: &str) -> String 
     });
 
     let token_name = &request.input.token_name;
-    let has_logo = !request.input.logo_asset_path.is_empty()
-        && request.input.logo_asset_path.starts_with("./logos/");
+    let logo_src = Path::new(&request.input.logo_asset_path);
+    let has_logo = !request.input.logo_asset_path.is_empty() && logo_src.exists();
     let logo_note = if has_logo {
+        let ext = logo_src
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy()))
+            .unwrap_or_else(|| ".png".to_string());
         format!(
-            "A logo image is provided at `{logo_path}`. Use it as the primary visual anchor — place it prominently in the hero section and favicon. Inspect the logo's visual style, including colors, shape language, line weight, texture, mood, and meme character energy. Build the entire website identity around that style.",
-            logo_path = request.input.logo_asset_path
+            "A logo image is provided at `./logo{ext}`. Use it as the primary visual anchor — place it prominently in the hero section and favicon. Inspect the logo's visual style, including colors, shape language, line weight, texture, mood, and meme character energy. Build the entire website identity around that style.",
         )
     } else {
         "No logo image is available. Create a text-based or emoji-based logo/token icon that fits the meme theme.".to_string()
@@ -236,9 +240,9 @@ fn agent_prompt(request: &SiteGenerationRequest, provider_name: &str) -> String 
         request.input.contract_address
     );
 
-    let template = load_prompt_template(provider_name);
+    let template = load_prompt_template(provider_name)?;
 
-    template
+    Ok(template
         .replace("{token_name}", token_name)
         .replace("{ticker}", &request.input.token_ticker)
         .replace("{contract}", &request.input.contract_address)
@@ -252,18 +256,14 @@ fn agent_prompt(request: &SiteGenerationRequest, provider_name: &str) -> String 
             "Pick colors that match the token theme — bold, high-contrast, crypto-native. Use gradients and glow effects. Avoid muted corporate palettes."
         })
         .replace("{provider_name}", provider_name)
-        .replace("{spec}", &serde_json::to_string_pretty(&spec).unwrap_or_else(|_| "{}".to_string()))
+        .replace("{spec}", &serde_json::to_string_pretty(&spec).unwrap_or_else(|_| "{}".to_string())))
 }
 
-fn load_prompt_template(provider_name: &str) -> String {
+fn load_prompt_template(provider_name: &str) -> Result<String, GenerationError> {
     let path = format!("prompts/agent-{provider_name}.md");
-    match std::fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(_) => {
-            tracing::warn!("prompt file {path} not found, using built-in default");
-            include_str!("../prompts/agent-gemini.md").to_string()
-        }
-    }
+    std::fs::read_to_string(&path).map_err(|error| {
+        GenerationError::Failed(format!("failed to read prompt template {path}: {error}"))
+    })
 }
 
 fn render_agent_args(
@@ -298,6 +298,26 @@ fn prepare_output_dir(output_dir: &Path) -> Result<(), GenerationError> {
     }
     fs::create_dir_all(output_dir)
         .map_err(|error| GenerationError::Failed(format!("create output dir failed: {error}")))
+}
+
+/// Copy the user's logo into the generation output directory so the AI agent
+/// can reference it. The prompt tells the agent the logo lives at `./logo.*`.
+fn copy_logo_to_output_dir(request: &SiteGenerationRequest) -> Result<(), GenerationError> {
+    let src = Path::new(&request.input.logo_asset_path);
+    if !src.exists() {
+        tracing::warn!(path = %request.input.logo_asset_path, "logo file not found, skipping copy");
+        return Ok(());
+    }
+    let ext = src
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_else(|| ".png".to_string());
+    let dest = request.output_dir.join(format!("logo{ext}"));
+    fs::copy(src, &dest).map_err(|error| {
+        GenerationError::Failed(format!("copy logo to output dir failed: {error}"))
+    })?;
+    tracing::info!(src = %src.display(), dest = %dest.display(), "copied logo to output dir");
+    Ok(())
 }
 
 fn validate_agent_output(

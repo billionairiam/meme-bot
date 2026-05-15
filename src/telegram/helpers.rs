@@ -197,7 +197,6 @@ pub(crate) fn website_input_from_draft(draft: &OrderDraft) -> Option<crate::mode
     })
 }
 
-#[allow(dead_code)]
 pub(crate) async fn download_telegram_logo(
     bot: &Bot,
     file_id: &str,
