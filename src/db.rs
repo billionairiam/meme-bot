@@ -265,6 +265,7 @@ pub async fn update_order_field(
         "telegram_url",
         "logo_asset_path",
         "requested_domain",
+        "alternative_domains_json",
     ];
     if !allowed.contains(&field) {
         anyhow::bail!("disallowed field: {field}");
@@ -272,6 +273,57 @@ pub async fn update_order_field(
     let sql = format!("UPDATE orders SET {field} = ?, updated_at = datetime('now') WHERE id = ?");
     sqlx::query(&sql)
         .bind(value)
+        .bind(uuid_value(order_id))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Update a wizard field and advance order status in one query.
+pub async fn update_order_field_and_status(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    field: &str,
+    value: &str,
+    next_status: OrderStatus,
+) -> anyhow::Result<()> {
+    let allowed = [
+        "token_ticker",
+        "token_name",
+        "contract_address",
+        "x_url",
+        "telegram_url",
+        "logo_asset_path",
+        "requested_domain",
+        "alternative_domains_json",
+    ];
+    if !allowed.contains(&field) {
+        anyhow::bail!("disallowed field: {field}");
+    }
+    let sql = format!(
+        "UPDATE orders SET {field} = ?, status = ?, updated_at = datetime('now') WHERE id = ?"
+    );
+    sqlx::query(&sql)
+        .bind(value)
+        .bind(next_status.as_str())
+        .bind(uuid_value(order_id))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Clear a nullable field on an order (set to NULL).
+pub async fn clear_order_field(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    field: &str,
+) -> anyhow::Result<()> {
+    let allowed = ["alternative_domains_json"];
+    if !allowed.contains(&field) {
+        anyhow::bail!("disallowed clear field: {field}");
+    }
+    let sql = format!("UPDATE orders SET {field} = NULL, updated_at = datetime('now') WHERE id = ?");
+    sqlx::query(&sql)
         .bind(uuid_value(order_id))
         .execute(pool)
         .await?;
@@ -881,6 +933,7 @@ fn order_from_row(row: &SqliteRow) -> anyhow::Result<Order> {
         telegram_url: row.get("telegram_url"),
         logo_asset_path: row.get("logo_asset_path"),
         requested_domain: row.get("requested_domain"),
+        alternative_domains_json: row.get("alternative_domains_json"),
         site_price_usdt: parse_decimal_or_zero(row.get::<&str, _>("site_price_usdt")),
         domain_price_usdt: parse_decimal_or_zero(row.get::<&str, _>("domain_price_usdt")),
         total_usdt: parse_decimal_or_zero(row.get::<&str, _>("total_usdt")),

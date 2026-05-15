@@ -43,6 +43,7 @@ CREATE TABLE orders (
     telegram_url TEXT,
     logo_asset_path TEXT,
     requested_domain TEXT,
+    alternative_domains_json TEXT,
 
     -- pricing
     site_price_usdt TEXT NOT NULL DEFAULT '0',

@@ -14,18 +14,15 @@ use crate::{
     },
 };
 
-use super::helpers::{
-    get_session, html_escape, payment_address_for_chain, payment_error_for_user, set_session,
-};
+use super::helpers::{html_escape, payment_address_for_chain, payment_error_for_user};
 use super::keyboards::status_keyboard;
-use super::types::{DraftStep, EXTERNAL_STEP_MAX_ATTEMPTS, Sessions, TelegramUiConfig};
+use super::types::{EXTERNAL_STEP_MAX_ATTEMPTS, TelegramUiConfig};
 
 pub(crate) struct PaymentTxProcess<'a> {
     pub bot: &'a Bot,
     pub chat_id: ChatId,
     pub user_id: UserId,
     pub config: &'a TelegramUiConfig,
-    pub sessions: &'a Sessions,
     pub pool: &'a SqlitePool,
     pub order_id: Uuid,
     pub chain: PaymentChain,
@@ -41,7 +38,6 @@ pub(crate) async fn process_payment_tx_context(
         chat_id,
         user_id,
         config,
-        sessions,
         pool,
         order_id,
         chain,
@@ -213,11 +209,6 @@ pub(crate) async fn process_payment_tx_context(
         observed_amount_usdt = %outcome.observed_amount_usdt,
         "payment recorded and order marked paid"
     );
-
-    if let Some(mut draft) = get_session(user_id, sessions) {
-        draft.step = DraftStep::PaymentConfirmed;
-        set_session(user_id, draft, sessions);
-    }
 
     bot.send_message(
         chat_id,

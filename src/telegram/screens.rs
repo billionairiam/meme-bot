@@ -5,11 +5,11 @@ use teloxide::types::{ChatId, InlineKeyboardMarkup, ParseMode, UserId};
 use tracing::warn;
 
 use crate::db;
-use crate::models::PaymentChain;
+use crate::models::{Order, OrderStatus, PaymentChain};
 
-use super::helpers::{build_mode_label, html_escape, is_message_not_modified};
+use super::helpers::{html_escape, is_message_not_modified};
 use super::keyboards::*;
-use super::types::{DraftStep, OrderDraft, Sessions, TelegramUiConfig, UiMessage};
+use super::types::{TelegramUiConfig, UiMessage};
 
 pub(crate) async fn send_screen(
     bot: &Bot,
@@ -84,15 +84,7 @@ fn ask_logo_text() -> &'static str {
     "🖼 <b>1/7 Logo</b>\nUpload token logo."
 }
 
-async fn status_text(user_id: UserId, sessions: &Sessions, pool: &SqlitePool) -> String {
-    if let Some(draft) = super::helpers::get_session(user_id, sessions) {
-        return format!(
-            "📊 <b>Current Order</b>\nStatus: <code>{:?}</code>\nMode: <b>{}</b>\nPrice: <b>{}</b> USDT",
-            draft.step,
-            build_mode_label(&draft.build_mode),
-            draft.site_price_usdt
-        );
-    }
+async fn status_text(user_id: UserId, pool: &SqlitePool) -> String {
     match db::get_active_orders(pool, user_id.0 as i64).await {
         Ok(orders) if orders.is_empty() => {
             "📊 <b>Order Status</b>\nNo active order. Use /create.".to_string()
@@ -302,13 +294,12 @@ pub(crate) async fn show_status(
     bot: &Bot,
     chat_id: ChatId,
     user_id: UserId,
-    sessions: &Sessions,
     pool: &SqlitePool,
 ) -> ResponseResult<()> {
     send_screen(
         bot,
         chat_id,
-        status_text(user_id, sessions, pool).await,
+        status_text(user_id, pool).await,
         main_menu_keyboard(),
     )
     .await
@@ -333,13 +324,12 @@ pub(crate) async fn edit_status(
     bot: &Bot,
     target: UiMessage,
     user_id: UserId,
-    sessions: &Sessions,
     pool: &SqlitePool,
 ) -> ResponseResult<()> {
     edit_screen(
         bot,
         target,
-        status_text(user_id, sessions, pool).await,
+        status_text(user_id, pool).await,
         main_menu_keyboard(),
     )
     .await
@@ -381,25 +371,26 @@ pub(crate) async fn edit_contact_admin(
     .await
 }
 
-pub(crate) async fn continue_step_screen(
+/// Show the appropriate prompt for the order's current wizard step.
+pub(crate) async fn continue_order_screen(
     bot: &Bot,
     chat_id: ChatId,
-    draft: &OrderDraft,
+    order: &Order,
 ) -> ResponseResult<()> {
-    match draft.step {
-        DraftStep::WaitingLogo => bot
+    match order.status {
+        OrderStatus::NeedLogo => bot
             .send_message(chat_id, ask_logo_text())
             .parse_mode(ParseMode::Html)
             .reply_markup(cancel_keyboard())
             .await
             .map(|_| ()),
-        DraftStep::WaitingTicker => bot
+        OrderStatus::NeedTicker => bot
             .send_message(chat_id, "🔤 <b>2/7 Ticker</b>\nSend token ticker. Eg: PEPE")
             .parse_mode(ParseMode::Html)
             .reply_markup(cancel_keyboard())
             .await
             .map(|_| ()),
-        DraftStep::WaitingTokenName => bot
+        OrderStatus::NeedName => bot
             .send_message(
                 chat_id,
                 "🏷 <b>3/7 Token Name</b>\nSend token name. Eg: Pepe Coin",
@@ -408,7 +399,7 @@ pub(crate) async fn continue_step_screen(
             .reply_markup(cancel_keyboard())
             .await
             .map(|_| ()),
-        DraftStep::WaitingContractAddress => bot
+        OrderStatus::NeedContract => bot
             .send_message(
                 chat_id,
                 "📝 <b>4/7 Contract Address</b>\nPaste contract address.",
@@ -417,7 +408,7 @@ pub(crate) async fn continue_step_screen(
             .reply_markup(cancel_keyboard())
             .await
             .map(|_| ()),
-        DraftStep::WaitingXLink => bot
+        OrderStatus::NeedXLink => bot
             .send_message(
                 chat_id,
                 "🐦 <b>5/7 X (Twitter) Link</b>\nPaste X link or send '-' to skip.",
@@ -426,7 +417,7 @@ pub(crate) async fn continue_step_screen(
             .reply_markup(cancel_keyboard())
             .await
             .map(|_| ()),
-        DraftStep::WaitingTelegramLink => bot
+        OrderStatus::NeedTme => bot
             .send_message(
                 chat_id,
                 "📱 <b>6/7 Telegram Link</b>\nPaste TG link or send '-' to skip.",
@@ -435,7 +426,7 @@ pub(crate) async fn continue_step_screen(
             .reply_markup(cancel_keyboard())
             .await
             .map(|_| ()),
-        DraftStep::WaitingWebsiteUrl => bot
+        OrderStatus::NeedDomain => bot
             .send_message(
                 chat_id,
                 "🌐 <b>7/7 Domain</b>\nSend domain name.\nEg: mytoken.xyz",
@@ -444,22 +435,28 @@ pub(crate) async fn continue_step_screen(
             .reply_markup(cancel_keyboard())
             .await
             .map(|_| ()),
-        DraftStep::ReadyToPay => bot
+        OrderStatus::NeedPay => bot
             .send_message(chat_id, payment_chain_text())
             .parse_mode(ParseMode::Html)
             .reply_markup(payment_chain_keyboard())
             .await
             .map(|_| ()),
-        DraftStep::WaitingTx => bot
-            .send_message(chat_id, "💳 <b>Payment</b>\nPaste TX hash.")
-            .parse_mode(ParseMode::Html)
-            .reply_markup(cancel_keyboard())
-            .await
-            .map(|_| ()),
-        DraftStep::PaymentConfirmed => bot
-            .send_message(chat_id, "<b>Payment confirmed.</b>\nWebsite is queued.")
+        OrderStatus::PaidAndGenerating => bot
+            .send_message(chat_id, "⚙️ <b>Generating...</b>\nYour website is being created.")
             .parse_mode(ParseMode::Html)
             .reply_markup(status_keyboard())
+            .await
+            .map(|_| ()),
+        OrderStatus::Done => bot
+            .send_message(chat_id, "✅ <b>Done!</b>\nYour website is live. Check /history.")
+            .parse_mode(ParseMode::Html)
+            .reply_markup(main_menu_keyboard())
+            .await
+            .map(|_| ()),
+        _ => bot
+            .send_message(chat_id, format!("📊 Order status: {}", order.status.display_label()))
+            .parse_mode(ParseMode::Html)
+            .reply_markup(main_menu_keyboard())
             .await
             .map(|_| ()),
     }

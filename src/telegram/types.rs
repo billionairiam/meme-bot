@@ -1,18 +1,7 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
-
 use rust_decimal::Decimal;
-use teloxide::types::{ChatId, MessageId, UserId};
-use uuid::Uuid;
-
-use crate::{config::GenerationProviderName, models::PaymentChain};
-
-pub(crate) type Sessions = Arc<Mutex<HashMap<UserId, OrderDraft>>>;
+use teloxide::types::{ChatId, MessageId};
 
 pub(crate) const EXTERNAL_STEP_MAX_ATTEMPTS: usize = 3;
-pub(crate) const DRAFT_SESSION_TIMEOUT_MINUTES: i64 = crate::db::ASSET_COLLECTION_TIMEOUT_MINUTES;
 
 #[derive(Clone, Debug)]
 pub struct TemplateOption {
@@ -44,7 +33,7 @@ pub(crate) struct UiMessage {
 #[derive(Clone)]
 pub struct TelegramUiConfig {
     pub required_group: Option<RequiredGroup>,
-    pub generation_primary_provider: GenerationProviderName,
+    pub generation_primary_provider: crate::config::GenerationProviderName,
     pub agent_timeout_seconds: u64,
     pub gemini_agent_command: String,
     pub gemini_agent_args: String,
@@ -145,114 +134,5 @@ fn parse_required_group(value: &str) -> Option<RequiredGroup> {
             .trim_start_matches("t.me/")
             .trim_start_matches('@');
         Some(RequiredGroup::Username(format!("@{username}")))
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct OrderDraft {
-    pub build_mode: BuildModeDraft,
-    pub step: DraftStep,
-    pub site_price_usdt: Decimal,
-    pub template_id: Option<String>,
-    pub logo_file_id: Option<String>,
-    pub ticker: Option<String>,
-    pub token_name: Option<String>,
-    pub contract_address: Option<String>,
-    pub x_link: Option<String>,
-    pub telegram_link: Option<String>,
-    pub website_url: Option<String>,
-    pub domain_price_usdt: Option<Decimal>,
-    pub alternative_domains: Option<Vec<crate::domain::DomainQuote>>,
-    pub total_usdt: Option<Decimal>,
-    pub payment_chain: Option<PaymentChain>,
-    pub order_id: Option<Uuid>,
-    pub db_user_id: Option<Uuid>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) enum BuildModeDraft {
-    Template,
-    AiFree,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum DraftStep {
-    WaitingLogo,
-    WaitingTicker,
-    WaitingTokenName,
-    WaitingContractAddress,
-    WaitingXLink,
-    WaitingTelegramLink,
-    WaitingWebsiteUrl,
-    ReadyToPay,
-    WaitingTx,
-    PaymentConfirmed,
-}
-
-impl DraftStep {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::WaitingLogo => "waiting_logo",
-            Self::WaitingTicker => "waiting_ticker",
-            Self::WaitingTokenName => "waiting_token_name",
-            Self::WaitingContractAddress => "waiting_contract_address",
-            Self::WaitingXLink => "waiting_x_link",
-            Self::WaitingTelegramLink => "waiting_telegram_link",
-            Self::WaitingWebsiteUrl => "waiting_website_url",
-            Self::ReadyToPay => "ready_to_pay",
-            Self::WaitingTx => "waiting_tx",
-            Self::PaymentConfirmed => "payment_confirmed",
-        }
-    }
-}
-
-impl OrderDraft {
-    pub fn new_ai(price_usdt: Decimal) -> Self {
-        Self::new(BuildModeDraft::AiFree, price_usdt, None)
-    }
-
-    pub fn new_template(template: TemplateOption, price_usdt: Decimal) -> Self {
-        Self::new(
-            BuildModeDraft::Template,
-            price_usdt,
-            Some(template.id.to_string()),
-        )
-    }
-
-    fn new(
-        build_mode: BuildModeDraft,
-        site_price_usdt: Decimal,
-        template_id: Option<String>,
-    ) -> Self {
-        Self {
-            build_mode,
-            step: DraftStep::WaitingLogo,
-            site_price_usdt,
-            template_id,
-            logo_file_id: None,
-            ticker: None,
-            token_name: None,
-            contract_address: None,
-            x_link: None,
-            telegram_link: None,
-            website_url: None,
-            domain_price_usdt: None,
-            alternative_domains: None,
-            total_usdt: None,
-            payment_chain: None,
-            order_id: None,
-            db_user_id: None,
-            updated_at: chrono::Utc::now(),
-        }
-    }
-
-    pub fn touch(&mut self) {
-        self.updated_at = chrono::Utc::now();
-    }
-
-    pub fn is_expired(&self) -> bool {
-        chrono::Utc::now() - self.updated_at
-            > chrono::Duration::minutes(DRAFT_SESSION_TIMEOUT_MINUTES)
     }
 }

@@ -200,6 +200,7 @@ pub struct Order {
     pub telegram_url: Option<String>,
     pub logo_asset_path: Option<String>,
     pub requested_domain: Option<String>,
+    pub alternative_domains_json: Option<String>,
     // pricing
     pub site_price_usdt: Decimal,
     pub domain_price_usdt: Decimal,

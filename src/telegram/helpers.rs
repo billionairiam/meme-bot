@@ -1,41 +1,8 @@
 use std::path::Path;
 
 use teloxide::prelude::*;
-use teloxide::types::{Message, UserId};
+use teloxide::types::Message;
 use tracing::info;
-
-use super::types::{OrderDraft, Sessions};
-
-pub(crate) fn set_session(user_id: UserId, mut draft: OrderDraft, sessions: &Sessions) {
-    draft.touch();
-    sessions
-        .lock()
-        .expect("sessions lock")
-        .insert(user_id, draft);
-}
-
-pub(crate) fn get_session(user_id: UserId, sessions: &Sessions) -> Option<OrderDraft> {
-    sessions
-        .lock()
-        .expect("sessions lock")
-        .get(&user_id)
-        .cloned()
-}
-
-pub(crate) async fn session_step_name(
-    user_id: UserId,
-    sessions: &Sessions,
-) -> Option<&'static str> {
-    sessions
-        .lock()
-        .expect("sessions lock")
-        .get(&user_id)
-        .map(|draft| draft.step.as_str())
-}
-
-pub(crate) fn remove_session(user_id: UserId, sessions: &Sessions) {
-    sessions.lock().expect("sessions lock").remove(&user_id);
-}
 
 pub(crate) fn message_kind(msg: &Message) -> &'static str {
     if msg.text().is_some() {
@@ -119,13 +86,6 @@ pub(crate) fn template_price(
         .unwrap_or(rust_decimal::Decimal::ZERO)
 }
 
-pub(crate) fn build_mode_label(build_mode: &super::types::BuildModeDraft) -> &'static str {
-    match build_mode {
-        super::types::BuildModeDraft::Template => "Template Mode",
-        super::types::BuildModeDraft::AiFree => "Free Creation",
-    }
-}
-
 pub(crate) fn payment_address_for_chain(
     config: &super::types::TelegramUiConfig,
     chain: crate::models::PaymentChain,
@@ -185,18 +145,6 @@ pub(crate) fn domain_error_for_user(error: &crate::domain::DomainError) -> Strin
     }
 }
 
-pub(crate) fn website_input_from_draft(draft: &OrderDraft) -> Option<crate::models::WebsiteInput> {
-    Some(crate::models::WebsiteInput {
-        token_ticker: draft.ticker.clone()?,
-        token_name: draft.token_name.clone()?,
-        contract_address: draft.contract_address.clone()?,
-        x_url: draft.x_link.clone()?,
-        telegram_url: draft.telegram_link.clone()?,
-        logo_asset_path: draft.logo_file_id.clone()?,
-        requested_domain: draft.website_url.clone(),
-    })
-}
-
 pub(crate) async fn download_telegram_logo(
     bot: &Bot,
     file_id: &str,
@@ -229,4 +177,11 @@ pub(crate) fn is_message_not_modified(error: &teloxide::RequestError) -> bool {
         .to_string()
         .to_ascii_lowercase()
         .contains("message is not modified")
+}
+
+/// Deserialize alternative domains JSON stored on an order.
+pub(crate) fn parse_alternative_domains(
+    json: Option<&str>,
+) -> Option<Vec<crate::domain::DomainQuote>> {
+    json.and_then(|s| serde_json::from_str(s).ok())
 }

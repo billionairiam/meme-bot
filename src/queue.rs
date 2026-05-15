@@ -9,7 +9,7 @@ use crate::{
     db,
     deployment::{DeploymentRequest, SiteDeployer},
     generation::{GenerationError, GenerationRouter, SiteGenerationRequest},
-    models::{Order, WebsiteInput},
+    models::{Order, WebsiteInput, OrderStatus},
 };
 
 const MAX_JOB_ATTEMPTS: i64 = 3;
@@ -108,6 +108,8 @@ impl GenerationQueue {
             domain = input.requested_domain.as_deref().unwrap_or("<none>"),
             "starting site generation"
         );
+
+        db::update_order_status(&self.pool, order_id, OrderStatus::PaidAndGenerating).await?;
 
         match self.router.generate(&request).await {
             Ok(result) => {
@@ -406,6 +408,7 @@ mod tests {
             attempt_count: 0,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            alternative_domains_json: None,
         };
         let input = order.website_input().unwrap();
 

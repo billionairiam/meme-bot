@@ -9,7 +9,7 @@ use crate::{
     api_client::HttpClientDomainRegistrar,
     db,
     domain::DomainRegistrar,
-    models::{OrderStatus, PaymentChain},
+    models::{BuildMode, Order, OrderStatus, PaymentChain},
     validation::{
         validate_contract_address, validate_domain, validate_telegram_url, validate_x_url,
     },
@@ -26,7 +26,6 @@ pub(crate) async fn handle_message(
     bot: Bot,
     msg: Message,
     config: Arc<TelegramUiConfig>,
-    sessions: Sessions,
     pool: SqlitePool,
 ) -> ResponseResult<()> {
     if !ensure_group_member(&bot, &msg, &config).await? {
@@ -42,7 +41,8 @@ pub(crate) async fn handle_message(
         return show_main_menu(&bot, msg.chat.id, &config).await;
     };
     let user_id = user.id;
-    let current_step = session_step_name(user_id, &sessions).await;
+    let current_order = db::get_unpaid_order(&pool, user_id.0 as i64).await.ok().flatten();
+    let current_step = current_order.as_ref().map(|o| o.status.as_str());
     info!(
         user_id = user_id.0 as i64,
         chat_id = %msg.chat.id,
@@ -68,21 +68,20 @@ pub(crate) async fn handle_message(
                 )
                 .await;
             }
-            "/status" => return show_status(&bot, msg.chat.id, user_id, &sessions, &pool).await,
+            "/status" => return show_status(&bot, msg.chat.id, user_id, &pool).await,
             "/history" => return show_history(&bot, msg.chat.id, user_id, &pool).await,
             "/continue" => {
                 return handle_continue_command(
                     &bot,
                     msg.chat.id,
                     user_id,
-                    &sessions,
                     &pool,
                     &config,
                 )
                 .await;
             }
             "/cancel" => {
-                cancel_user_order(&pool, user_id, &sessions).await;
+                cancel_user_order(&pool, user_id).await;
                 return bot
                     .send_message(msg.chat.id, "<b>Order cancelled.</b>")
                     .parse_mode(ParseMode::Html)
@@ -94,14 +93,13 @@ pub(crate) async fn handle_message(
         }
     }
 
-    handle_order_step(bot, msg, user_id, config, sessions, &pool).await
+    handle_order_step(bot, msg, user_id, config, &pool).await
 }
 
 pub(crate) async fn handle_callback(
     bot: Bot,
     query: CallbackQuery,
     config: Arc<TelegramUiConfig>,
-    sessions: Sessions,
     pool: SqlitePool,
 ) -> ResponseResult<()> {
     bot.answer_callback_query(query.id.clone()).await?;
@@ -114,12 +112,15 @@ pub(crate) async fn handle_callback(
         chat_id,
         message_id: message.id(),
     };
-    let current_step = session_step_name(query.from.id, &sessions).await;
+    let current_step = {
+        let order = db::get_unpaid_order(&pool, query.from.id.0 as i64).await.ok().flatten();
+        order.map(|o| o.status.as_str().to_string())
+    };
     info!(
         user_id = query.from.id.0 as i64,
         chat_id = %chat_id,
         callback = query.data.as_deref().unwrap_or("<none>"),
-        session_step = current_step.unwrap_or("none"),
+        session_step = current_step.as_deref().unwrap_or("none"),
         "telegram callback received"
     );
 
@@ -142,17 +143,27 @@ pub(crate) async fn handle_callback(
         Some("template_mode") => edit_template_mode(&bot, target, &config).await,
         Some("ai_mode") => {
             clear_screen_keyboard(&bot, target).await?;
-            let draft = match start_new_order_session(
+            match start_new_order(
                 &pool,
                 query.from.id,
                 query.from.username.as_deref(),
                 Some(query.from.first_name.as_str()),
                 query.from.last_name.as_deref(),
-                OrderDraft::new_ai(config.ai_creation_price_usdt),
+                BuildMode::AiFree,
+                None,
+                config.ai_creation_price_usdt,
             )
             .await
             {
-                Ok(draft) => draft,
+                Ok(order_id) => {
+                    info!(
+                        user_id = query.from.id.0 as i64,
+                        order_id = %order_id,
+                        build_mode = "ai_free",
+                        "new order created"
+                    );
+                    edit_ask_logo(&bot, target).await
+                }
                 Err(error) => {
                     let msg = if format!("{error:#}").contains("pending order") {
                         warn!(
@@ -165,24 +176,16 @@ pub(crate) async fn handle_callback(
                         warn!(
                             ?error,
                             user_id = query.from.id.0 as i64,
-                            "failed to start ai order session"
+                            "failed to start ai order"
                         );
                         "<b>Start failed.</b>\nPlease try again."
                     };
-                    return edit_screen(&bot, target, msg, main_menu_keyboard()).await;
+                    edit_screen(&bot, target, msg, main_menu_keyboard()).await
                 }
-            };
-            set_session(query.from.id, draft, &sessions);
-            info!(
-                user_id = query.from.id.0 as i64,
-                build_mode = "ai_free",
-                next_step = DraftStep::WaitingLogo.as_str(),
-                "new order session started"
-            );
-            edit_ask_logo(&bot, target).await
+            }
         }
         Some("pay_menu") => edit_payment_chain_menu(&bot, target).await,
-        Some("status") => edit_status(&bot, target, query.from.id, &sessions, &pool).await,
+        Some("status") => edit_status(&bot, target, query.from.id, &pool).await,
         Some("history") => edit_history(&bot, target, query.from.id, &pool).await,
         Some("contact_admin") => edit_contact_admin(&bot, target, &config).await,
         Some("pay_erc20") => {
@@ -192,7 +195,6 @@ pub(crate) async fn handle_callback(
                 query.from.id,
                 PaymentChain::Erc20,
                 &config.usdt_erc20_address,
-                &sessions,
                 &pool,
             )
             .await
@@ -204,7 +206,6 @@ pub(crate) async fn handle_callback(
                 query.from.id,
                 PaymentChain::Tron,
                 &config.usdt_tron_address,
-                &sessions,
                 &pool,
             )
             .await
@@ -216,7 +217,6 @@ pub(crate) async fn handle_callback(
                 query.from.id,
                 PaymentChain::Sol,
                 &config.usdt_sol_address,
-                &sessions,
                 &pool,
             )
             .await
@@ -232,24 +232,33 @@ pub(crate) async fn handle_callback(
             ) {
                 Some(template) => {
                     clear_screen_keyboard(&bot, target).await?;
-                    let draft = match start_new_order_session(
+                    let price = template_price(
+                        &config.template_options,
+                        &template.id,
+                        &config.template_prices_usdt,
+                    );
+                    match start_new_order(
                         &pool,
                         query.from.id,
                         query.from.username.as_deref(),
                         Some(query.from.first_name.as_str()),
                         query.from.last_name.as_deref(),
-                        OrderDraft::new_template(
-                            template.clone(),
-                            template_price(
-                                &config.template_options,
-                                &template.id,
-                                &config.template_prices_usdt,
-                            ),
-                        ),
+                        BuildMode::Template,
+                        Some(&template.id),
+                        price,
                     )
                     .await
                     {
-                        Ok(draft) => draft,
+                        Ok(order_id) => {
+                            info!(
+                                user_id = query.from.id.0 as i64,
+                                order_id = %order_id,
+                                template_id = template.id,
+                                build_mode = "template",
+                                "new template order created"
+                            );
+                            edit_ask_logo(&bot, target).await
+                        }
                         Err(error) => {
                             let msg = if format!("{error:#}").contains("pending order") {
                                 warn!(
@@ -264,22 +273,13 @@ pub(crate) async fn handle_callback(
                                     ?error,
                                     user_id = query.from.id.0 as i64,
                                     template_id = template.id,
-                                    "failed to start template order session"
+                                    "failed to start template order"
                                 );
                                 "<b>Start failed.</b>\nPlease try again."
                             };
-                            return edit_screen(&bot, target, msg, main_menu_keyboard()).await;
+                            edit_screen(&bot, target, msg, main_menu_keyboard()).await
                         }
-                    };
-                    set_session(query.from.id, draft, &sessions);
-                    info!(
-                        user_id = query.from.id.0 as i64,
-                        build_mode = "template",
-                        template_id = template.id,
-                        next_step = DraftStep::WaitingLogo.as_str(),
-                        "new order session started"
-                    );
-                    edit_ask_logo(&bot, target).await
+                    }
                 }
                 None => {
                     edit_screen(
@@ -300,7 +300,6 @@ pub(crate) async fn handle_callback(
                 query.from.id,
                 domain,
                 &config,
-                &sessions,
                 &pool,
             )
             .await
@@ -315,7 +314,7 @@ pub(crate) async fn handle_callback(
             .await
         }
         Some("cancel") => {
-            cancel_user_order(&pool, query.from.id, &sessions).await;
+            cancel_user_order(&pool, query.from.id).await;
             edit_screen(
                 &bot,
                 target,
@@ -328,14 +327,16 @@ pub(crate) async fn handle_callback(
     }
 }
 
-async fn start_new_order_session(
+async fn start_new_order(
     pool: &SqlitePool,
     telegram_user_id: UserId,
     username: Option<&str>,
     first_name: Option<&str>,
     last_name: Option<&str>,
-    mut draft: OrderDraft,
-) -> anyhow::Result<OrderDraft> {
+    build_mode: BuildMode,
+    template_id: Option<&str>,
+    site_price_usdt: rust_decimal::Decimal,
+) -> anyhow::Result<uuid::Uuid> {
     let db_user_id = db::upsert_user(
         pool,
         telegram_user_id.0 as i64,
@@ -350,27 +351,21 @@ async fn start_new_order_session(
         anyhow::bail!("has pending order");
     }
 
-    let build_mode = match draft.build_mode {
-        BuildModeDraft::Template => crate::models::BuildMode::Template,
-        BuildModeDraft::AiFree => crate::models::BuildMode::AiFree,
-    };
     let order_id = db::create_order(
         pool,
         db_user_id,
         build_mode,
-        draft.template_id.as_deref(),
-        draft.site_price_usdt,
+        template_id,
+        site_price_usdt,
     )
     .await?;
     info!(
         user_id = telegram_user_id.0 as i64,
         order_id = %order_id,
-        site_price_usdt = %draft.site_price_usdt,
-        "draft order persisted before asset collection"
+        site_price_usdt = %site_price_usdt,
+        "order created"
     );
-    draft.db_user_id = Some(db_user_id);
-    draft.order_id = Some(order_id);
-    Ok(draft)
+    Ok(order_id)
 }
 
 async fn expire_stale_orders_for_user(pool: &SqlitePool, user_id: UserId) {
@@ -391,14 +386,11 @@ async fn expire_stale_orders_for_user(pool: &SqlitePool, user_id: UserId) {
     }
 }
 
-async fn cancel_user_order(pool: &SqlitePool, user_id: UserId, sessions: &Sessions) {
-    let order_id = get_session(user_id, sessions).and_then(|draft| draft.order_id);
-    remove_session(user_id, sessions);
-    match db::cancel_order_for_user(pool, user_id.0 as i64, order_id).await {
+async fn cancel_user_order(pool: &SqlitePool, user_id: UserId) {
+    match db::cancel_order_for_user(pool, user_id.0 as i64, None).await {
         Ok(cancelled) => {
             info!(
                 user_id = user_id.0 as i64,
-                order_id = %order_id.map(|id| id.to_string()).unwrap_or_else(|| "<latest>".to_string()),
                 cancelled_orders = cancelled,
                 "cancelled pending order"
             );
@@ -406,7 +398,6 @@ async fn cancel_user_order(pool: &SqlitePool, user_id: UserId, sessions: &Sessio
         Err(error) => warn!(
             ?error,
             user_id = user_id.0 as i64,
-            order_id = %order_id.map(|id| id.to_string()).unwrap_or_else(|| "<latest>".to_string()),
             "failed to cancel pending order"
         ),
     }
@@ -417,73 +408,28 @@ async fn handle_order_step(
     msg: Message,
     user_id: UserId,
     config: Arc<TelegramUiConfig>,
-    sessions: Sessions,
     pool: &SqlitePool,
 ) -> ResponseResult<()> {
-    let Some(mut draft) = get_session(user_id, &sessions) else {
-        if let Some(text) = msg.text().map(str::trim)
-            && looks_like_tx_hash(text)
-        {
-            match db::get_unpaid_order(pool, user_id.0 as i64).await {
-                Ok(Some(order))
-                    if order.status == crate::models::OrderStatus::NeedPay
-                        && order.payment_chain.is_some() =>
-                {
-                    return process_payment_tx_context(PaymentTxProcess {
-                        bot: &bot,
-                        chat_id: msg.chat.id,
-                        user_id,
-                        config: &config,
-                        sessions: &sessions,
-                        pool,
-                        order_id: order.id,
-                        chain: order.payment_chain.unwrap(),
-                        amount_usdt: order.total_usdt,
-                        tx_hash: text,
-                    })
-                    .await;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    warn!(
-                        ?error,
-                        user_id = user_id.0 as i64,
-                        "failed to recover unpaid order for tx hash"
-                    );
-                    return bot
-                        .send_message(
-                            msg.chat.id,
-                            "⚠️ <b>Payment check failed.</b>\nContact admin.",
-                        )
-                        .parse_mode(ParseMode::Html)
-                        .await
-                        .map(|_| ());
-                }
+    let order = match db::get_unpaid_order(pool, user_id.0 as i64).await {
+        Ok(Some(order)) => order,
+        Ok(None) => {
+            // No active order — check if it's a TX hash for NeedPay order
+            if let Some(text) = msg.text().map(str::trim)
+                && looks_like_tx_hash(text)
+            {
+                // Already checked above via get_unpaid_order, no match
             }
+            return show_main_menu(&bot, msg.chat.id, &config).await;
         }
-        return show_main_menu(&bot, msg.chat.id, &config).await;
+        Err(error) => {
+            warn!(?error, user_id = user_id.0 as i64, "failed to load order");
+            return show_main_menu(&bot, msg.chat.id, &config).await;
+        }
     };
-    if draft.is_expired() {
-        warn!(
-            user_id = user_id.0 as i64,
-            order_id = %draft.order_id.map(|id| id.to_string()).unwrap_or_else(|| "<none>".to_string()),
-            last_step = draft.step.as_str(),
-            "order session expired while collecting input"
-        );
-        cancel_user_order(pool, user_id, &sessions).await;
-        return bot
-            .send_message(
-                msg.chat.id,
-                "<b>Order expired.</b>\nStart again with /create.",
-            )
-            .parse_mode(ParseMode::Html)
-            .reply_markup(main_menu_keyboard())
-            .await
-            .map(|_| ());
-    }
+    let order_id = order.id;
 
-    match draft.step {
-        DraftStep::WaitingLogo => {
+    match order.status {
+        OrderStatus::NeedLogo => {
             let Some(photo) = msg.photo().and_then(|photos| photos.last()) else {
                 return bot
                     .send_message(msg.chat.id, "🖼 <b>1/7 Logo</b>\nUpload token logo.")
@@ -495,500 +441,131 @@ async fn handle_order_step(
             let temp_id = uuid::Uuid::new_v4().to_string();
             match download_telegram_logo(&bot, &file_id, &temp_id).await {
                 Ok(local_path) => {
-                    draft.logo_file_id = Some(local_path.clone());
-                    draft.step = DraftStep::WaitingTicker;
-                    info!(
-                        user_id = user_id.0 as i64,
-                        chat_id = %msg.chat.id,
-                        logo_path = %local_path,
-                        next_step = DraftStep::WaitingTicker.as_str(),
-                        "logo downloaded; advancing order wizard"
-                    );
-                    set_session(user_id, draft, &sessions);
-                    bot.send_message(
-                        msg.chat.id,
-                        "✅ Logo saved.\n🔤 <b>2/7 Ticker</b>\nExample: <code>PEPE</code>",
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ())
+                    if let Err(e) = db::update_order_field_and_status(
+                        pool, order_id, "logo_asset_path", &local_path, OrderStatus::NeedTicker,
+                    ).await {
+                        warn!(?e, %order_id, "failed to save logo");
+                        return bot.send_message(msg.chat.id, "❌ Save failed. Try again.")
+                            .parse_mode(ParseMode::Html).await.map(|_| ());
+                    }
+                    info!(user_id = user_id.0 as i64, %order_id, logo_path = %local_path, "logo saved");
+                    bot.send_message(msg.chat.id, "✅ Logo saved.\n🔤 <b>2/7 Ticker</b>\nExample: <code>PEPE</code>")
+                        .parse_mode(ParseMode::Html).await.map(|_| ())
                 }
                 Err(e) => {
-                    warn!(
-                        user_id = user_id.0 as i64,
-                        error = %e,
-                        "failed to download logo from Telegram"
-                    );
-                    bot.send_message(
-                        msg.chat.id,
-                        "❌ Failed to download logo. Please try uploading again.",
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ())
+                    warn!(user_id = user_id.0 as i64, error = %e, "failed to download logo");
+                    bot.send_message(msg.chat.id, "❌ Failed to download logo. Please try uploading again.")
+                        .parse_mode(ParseMode::Html).await.map(|_| ())
                 }
             }
         }
-        DraftStep::WaitingTicker => {
+        OrderStatus::NeedTicker => {
             let Some(text) = msg.text().map(str::trim) else {
-                return bot
-                    .send_message(msg.chat.id, "🔤 <b>2/7 Ticker</b>\nSend ticker.")
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ());
+                return bot.send_message(msg.chat.id, "🔤 <b>2/7 Ticker</b>\nSend ticker.")
+                    .parse_mode(ParseMode::Html).await.map(|_| ());
             };
             let ticker = text.to_ascii_uppercase();
-            if ticker.len() < 2
-                || ticker.len() > 12
-                || !ticker.chars().all(|ch| ch.is_ascii_alphanumeric())
-            {
-                return bot
-                    .send_message(
-                        msg.chat.id,
-                        "<b>Invalid ticker.</b>\nUse 2-12 letters/numbers.",
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ());
+            if ticker.len() < 2 || ticker.len() > 12 || !ticker.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+                return bot.send_message(msg.chat.id, "<b>Invalid ticker.</b>\nUse 2-12 letters/numbers.")
+                    .parse_mode(ParseMode::Html).await.map(|_| ());
             }
-            draft.ticker = Some(ticker);
-            draft.step = DraftStep::WaitingTokenName;
-            info!(
-                user_id = user_id.0 as i64,
-                chat_id = %msg.chat.id,
-                next_step = DraftStep::WaitingTokenName.as_str(),
-                "ticker accepted; advancing order wizard"
-            );
-            set_session(user_id, draft, &sessions);
-            bot.send_message(
-                msg.chat.id,
-                "✅ Ticker saved.\n🏷 <b>3/7 Name</b>\nExample: <code>Pepe Coin</code>",
-            )
-            .parse_mode(ParseMode::Html)
-            .await
-            .map(|_| ())
+            if let Err(e) = db::update_order_field_and_status(pool, order_id, "token_ticker", &ticker, OrderStatus::NeedName).await {
+                warn!(?e, %order_id, "failed to save ticker");
+            }
+            bot.send_message(msg.chat.id, "✅ Ticker saved.\n🏷 <b>3/7 Name</b>\nExample: <code>Pepe Coin</code>")
+                .parse_mode(ParseMode::Html).await.map(|_| ())
         }
-        DraftStep::WaitingTokenName => {
+        OrderStatus::NeedName => {
             let Some(text) = msg.text().map(str::trim) else {
-                return bot
-                    .send_message(msg.chat.id, "🏷 <b>3/7 Name</b>\nSend token name.")
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ());
+                return bot.send_message(msg.chat.id, "🏷 <b>3/7 Name</b>\nSend token name.")
+                    .parse_mode(ParseMode::Html).await.map(|_| ());
             };
             if text.len() < 2 || text.len() > 48 {
-                return bot
-                    .send_message(msg.chat.id, "<b>Invalid name.</b>\nUse 2-48 characters.")
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ());
+                return bot.send_message(msg.chat.id, "<b>Invalid name.</b>\nUse 2-48 characters.")
+                    .parse_mode(ParseMode::Html).await.map(|_| ());
             }
-            draft.token_name = Some(text.to_string());
-            draft.step = DraftStep::WaitingContractAddress;
-            info!(
-                user_id = user_id.0 as i64,
-                chat_id = %msg.chat.id,
-                next_step = DraftStep::WaitingContractAddress.as_str(),
-                "token name accepted; advancing order wizard"
-            );
-            set_session(user_id, draft, &sessions);
-            bot.send_message(
-                msg.chat.id,
-                "✅ Name saved.\n🔗 <b>4/7 Contract</b>\nSend contract address.",
-            )
-            .parse_mode(ParseMode::Html)
-            .await
-            .map(|_| ())
+            if let Err(e) = db::update_order_field_and_status(pool, order_id, "token_name", text, OrderStatus::NeedContract).await {
+                warn!(?e, %order_id, "failed to save token name");
+            }
+            bot.send_message(msg.chat.id, "✅ Name saved.\n🔗 <b>4/7 Contract</b>\nSend contract address.")
+                .parse_mode(ParseMode::Html).await.map(|_| ())
         }
-        DraftStep::WaitingContractAddress => {
+        OrderStatus::NeedContract => {
             let Some(text) = msg.text().map(str::trim) else {
-                return bot
-                    .send_message(
-                        msg.chat.id,
-                        "🔗 <b>4/7 Contract</b>\nSend contract address.",
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ());
+                return bot.send_message(msg.chat.id, "🔗 <b>4/7 Contract</b>\nSend contract address.")
+                    .parse_mode(ParseMode::Html).await.map(|_| ());
             };
             if validate_contract_address(text).is_err() {
-                return bot
-                    .send_message(
-                        msg.chat.id,
-                        "<b>Invalid contract.</b>\nSend EVM, TRON, or SOL address.",
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ());
+                return bot.send_message(msg.chat.id, "<b>Invalid contract.</b>\nSend EVM, TRON, or SOL address.")
+                    .parse_mode(ParseMode::Html).await.map(|_| ());
             }
-            draft.contract_address = Some(text.to_string());
-            draft.step = DraftStep::WaitingXLink;
-            info!(
-                user_id = user_id.0 as i64,
-                chat_id = %msg.chat.id,
-                next_step = DraftStep::WaitingXLink.as_str(),
-                "contract address accepted; advancing order wizard"
-            );
-            set_session(user_id, draft, &sessions);
-            bot.send_message(
-                msg.chat.id,
-                "✅ Contract saved.\n✕ <b>5/7 X</b>\n<code>https://x.com/yourproject</code>",
-            )
-            .parse_mode(ParseMode::Html)
-            .await
-            .map(|_| ())
+            if let Err(e) = db::update_order_field_and_status(pool, order_id, "contract_address", text, OrderStatus::NeedXLink).await {
+                warn!(?e, %order_id, "failed to save contract");
+            }
+            bot.send_message(msg.chat.id, "✅ Contract saved.\n✕ <b>5/7 X</b>\n<code>https://x.com/yourproject</code>")
+                .parse_mode(ParseMode::Html).await.map(|_| ())
         }
-        DraftStep::WaitingXLink => {
+        OrderStatus::NeedXLink => {
             let Some(text) = msg.text().map(str::trim) else {
-                return bot
-                    .send_message(msg.chat.id, "✕ <b>5/7 X</b>\nSend X link.")
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ());
+                return bot.send_message(msg.chat.id, "✕ <b>5/7 X</b>\nSend X link.")
+                    .parse_mode(ParseMode::Html).await.map(|_| ());
             };
             if validate_x_url(text).is_err() {
-                return bot
-                    .send_message(
-                        msg.chat.id,
-                        "<b>Invalid X link.</b>\nUse <code>https://x.com/username</code>",
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ());
+                return bot.send_message(msg.chat.id, "<b>Invalid X link.</b>\nUse <code>https://x.com/username</code>")
+                    .parse_mode(ParseMode::Html).await.map(|_| ());
             }
-            draft.x_link = Some(text.to_string());
-            draft.step = DraftStep::WaitingTelegramLink;
-            info!(
-                user_id = user_id.0 as i64,
-                chat_id = %msg.chat.id,
-                next_step = DraftStep::WaitingTelegramLink.as_str(),
-                "x link accepted; advancing order wizard"
-            );
-            set_session(user_id, draft, &sessions);
-            bot.send_message(
-                msg.chat.id,
-                "✅ X saved.\n💬 <b>6/7 Telegram</b>\n<code>https://t.me/yourgroup</code>",
-            )
-            .parse_mode(ParseMode::Html)
-            .await
-            .map(|_| ())
+            if let Err(e) = db::update_order_field_and_status(pool, order_id, "x_url", text, OrderStatus::NeedTme).await {
+                warn!(?e, %order_id, "failed to save x_url");
+            }
+            bot.send_message(msg.chat.id, "✅ X saved.\n💬 <b>6/7 Telegram</b>\n<code>https://t.me/yourgroup</code>")
+                .parse_mode(ParseMode::Html).await.map(|_| ())
         }
-        DraftStep::WaitingTelegramLink => {
+        OrderStatus::NeedTme => {
             let Some(text) = msg.text().map(str::trim) else {
-                return bot
-                    .send_message(msg.chat.id, "💬 <b>6/7 Telegram</b>\nSend Telegram link.")
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ());
+                return bot.send_message(msg.chat.id, "💬 <b>6/7 Telegram</b>\nSend Telegram link.")
+                    .parse_mode(ParseMode::Html).await.map(|_| ());
             };
             if validate_telegram_url(text).is_err() {
-                return bot
-                    .send_message(
-                        msg.chat.id,
-                        "<b>Invalid Telegram link.</b>\nUse <code>https://t.me/yourgroup</code>",
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ());
+                return bot.send_message(msg.chat.id, "<b>Invalid Telegram link.</b>\nUse <code>https://t.me/yourgroup</code>")
+                    .parse_mode(ParseMode::Html).await.map(|_| ());
             }
-            draft.telegram_link = Some(text.to_string());
-            draft.step = DraftStep::WaitingWebsiteUrl;
-            info!(
-                user_id = user_id.0 as i64,
-                chat_id = %msg.chat.id,
-                next_step = DraftStep::WaitingWebsiteUrl.as_str(),
-                "telegram link accepted; advancing order wizard"
-            );
-            set_session(user_id, draft, &sessions);
-            bot.send_message(
-                msg.chat.id,
-                "✅ Telegram saved.\n🌐 <b>7/7 Domain</b>\nExample: <code>pepe.xyz</code>",
-            )
-            .parse_mode(ParseMode::Html)
-            .await
-            .map(|_| ())
+            if let Err(e) = db::update_order_field_and_status(pool, order_id, "telegram_url", text, OrderStatus::NeedDomain).await {
+                warn!(?e, %order_id, "failed to save telegram_url");
+            }
+            bot.send_message(msg.chat.id, "✅ Telegram saved.\n🌐 <b>7/7 Domain</b>\nExample: <code>pepe.xyz</code>")
+                .parse_mode(ParseMode::Html).await.map(|_| ())
         }
-        DraftStep::WaitingWebsiteUrl => {
+        OrderStatus::NeedDomain => {
             let Some(text) = msg.text().map(str::trim) else {
-                return bot
-                    .send_message(msg.chat.id, "🌐 <b>7/7 Domain</b>\nSend domain.")
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ());
+                return bot.send_message(msg.chat.id, "🌐 <b>7/7 Domain</b>\nSend domain.")
+                    .parse_mode(ParseMode::Html).await.map(|_| ());
             };
             let domain = normalize_domain(text);
-            info!(
-                user_id = user_id.0 as i64,
-                chat_id = %msg.chat.id,
-                domain = %domain,
-                "checking requested domain"
-            );
             if validate_domain(&domain).is_err() {
-                return bot
-                    .send_message(
-                        msg.chat.id,
-                        "<b>Invalid domain.</b>\nTry .com, .xyz, .fun, or .site.",
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ());
+                return bot.send_message(msg.chat.id, "<b>Invalid domain.</b>\nTry .com, .xyz, .fun, or .site.")
+                    .parse_mode(ParseMode::Html).await.map(|_| ());
             }
-
-            if config.skip_domain_purchase {
-                warn!(
-                    user_id = user_id.0 as i64,
-                    chat_id = %msg.chat.id,
-                    domain = %domain,
-                    "SKIP_DOMAIN_PURCHASE: accepting domain without quote"
-                );
-                let db_user_id =
-                    match db::upsert_user(pool, user_id.0 as i64, None, None, None, true).await {
-                        Ok(id) => id,
-                        Err(e) => {
-                            warn!(?e, user_id = user_id.0 as i64, "failed to upsert user");
-                            return bot
-                                .send_message(msg.chat.id, "<b>Error.</b>\nPlease try again.")
-                                .parse_mode(ParseMode::Html)
-                                .await
-                                .map(|_| ());
-                        }
-                    };
-                draft.website_url = Some(domain.clone());
-                draft.db_user_id = Some(db_user_id);
-                draft.domain_price_usdt = Some(rust_decimal::Decimal::ZERO);
-                let total = draft.site_price_usdt;
-                draft.total_usdt = Some(total);
-                draft.step = DraftStep::ReadyToPay;
-                set_session(user_id, draft.clone(), &sessions);
-                return bot
-                    .send_message(
-                        msg.chat.id,
-                        format!(
-                            "✅ <b>Domain accepted</b> (testing mode)\nDomain: <b>{domain}</b>\nWebsite: <b>{}</b> USDT\nTotal: <b>{total}</b> USDT\n\nChoose payment chain.",
-                            draft.site_price_usdt
-                        ),
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .reply_markup(payment_chain_keyboard())
-                    .await
-                    .map(|_| ());
-            }
-
-            let (Some(base_url), Some(api_key)) = (
-                config.api_service_base_url.as_deref(),
-                config.api_service_api_key.as_deref(),
-            ) else {
-                let _ = bot
-                    .send_message(
-                        msg.chat.id,
-                        "❌ Domain service is not configured. Contact admin.",
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .await;
-                return Ok(());
-            };
-            let registrar: Box<dyn DomainRegistrar> = Box::new(HttpClientDomainRegistrar::new(
-                base_url.to_string(),
-                api_key.to_string(),
-            ));
-            match quote_domain_with_retries(registrar.as_ref(), &domain).await {
-                Ok(quote) if quote.available && !quote.is_premium => {
-                    info!(
-                        user_id = user_id.0 as i64,
-                        chat_id = %msg.chat.id,
-                        domain = %quote.domain,
-                        price_usd = %quote.price_usd,
-                        "domain quote available"
-                    );
-                    let db_user_id =
-                        match db::upsert_user(pool, user_id.0 as i64, None, None, None, true).await
-                        {
-                            Ok(id) => id,
-                            Err(e) => {
-                                warn!(
-                                    ?e,
-                                    user_id = user_id.0 as i64,
-                                    "failed to upsert user for domain quote"
-                                );
-                                return bot
-                                    .send_message(
-                                        msg.chat.id,
-                                        "<b>Quote failed.</b>\nPlease try again.",
-                                    )
-                                    .parse_mode(ParseMode::Html)
-                                    .await
-                                    .map(|_| ());
-                            }
-                        };
-                    draft.website_url = Some(domain);
-                    draft.db_user_id = Some(db_user_id);
-                    draft.domain_price_usdt = Some(quote.price_usd);
-                    let total = draft.site_price_usdt + quote.price_usd;
-                    if let Some(order_id) = draft.order_id {
-                        if let Err(error) =
-                            db::set_order_domain_pricing(pool, order_id, quote.price_usd, total)
-                                .await
-                        {
-                            warn!(
-                                ?error,
-                                user_id = user_id.0 as i64,
-                                order_id = %order_id,
-                                "failed to set domain pricing on order"
-                            );
-                            return bot
-                                .send_message(
-                                    msg.chat.id,
-                                    "<b>Quote save failed.</b>\nPlease try again.",
-                                )
-                                .parse_mode(ParseMode::Html)
-                                .await
-                                .map(|_| ());
-                        }
-                        if let Err(error) = db::update_order_field(
-                            pool,
-                            order_id,
-                            "requested_domain",
-                            &quote.domain,
-                        )
-                        .await
-                        {
-                            warn!(
-                                ?error,
-                                order_id = %order_id,
-                                "failed to update requested_domain on order"
-                            );
-                        }
-                        info!(
-                            user_id = user_id.0 as i64,
-                            order_id = %order_id,
-                            domain = %quote.domain,
-                            "domain pricing persisted on order"
-                        );
-                    }
-                    draft.total_usdt = Some(total);
-                    draft.step = DraftStep::ReadyToPay;
-                    info!(
-                        user_id = user_id.0 as i64,
-                        chat_id = %msg.chat.id,
-                        domain = %quote.domain,
-                        total_usdt = %total,
-                        next_step = DraftStep::ReadyToPay.as_str(),
-                        "order ready for payment chain selection"
-                    );
-                    set_session(user_id, draft.clone(), &sessions);
-                    bot.send_message(
-                        msg.chat.id,
-                        format!(
-                            "✅ <b>Domain available</b>\nDomain: <b>{}</b> USDT\nWebsite: <b>{}</b> USDT\nTotal: <b>{}</b> USDT\n\nChoose payment chain.",
-                            quote.price_usd, draft.site_price_usdt, total
-                        ),
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .reply_markup(payment_chain_keyboard())
-                    .await
-                    .map(|_| ())
-                }
-                Ok(_) | Err(_) => {
-                    info!(
-                        user_id = user_id.0 as i64,
-                        chat_id = %msg.chat.id,
-                        domain = %domain,
-                        "requested domain unavailable; checking alternatives"
-                    );
-                    let tld = domain.rsplit_once('.').map(|(_, t)| t).unwrap_or("");
-                    let base_name = domain
-                        .rsplit_once('.')
-                        .map(|(name, _)| name)
-                        .unwrap_or(&domain);
-                    let alternatives =
-                        check_alternative_domains(registrar.as_ref(), base_name, tld).await;
-
-                    if alternatives.is_empty() {
-                        bot.send_message(
-                            msg.chat.id,
-                            "<b>Domain unavailable.</b>\nSend another domain.",
-                        )
-                        .parse_mode(ParseMode::Html)
-                        .await
-                        .map(|_| ())
-                    } else {
-                        draft.alternative_domains = Some(alternatives.clone());
-                        set_session(user_id, draft.clone(), &sessions);
-                        bot.send_message(
-                            msg.chat.id,
-                            format!("🔍 <b>{} is taken.</b>\nChoose one:", html_escape(&domain),),
-                        )
-                        .parse_mode(ParseMode::Html)
-                        .reply_markup(alternative_domains_keyboard(&alternatives))
-                        .await
-                        .map(|_| ())
-                    }
-                }
-            }
+            handle_domain_step(&bot, msg.chat.id, user_id, &order, &domain, &config, pool).await
         }
-        DraftStep::ReadyToPay => bot
-            .send_message(msg.chat.id, "💳 <b>Payment</b>\nChoose a chain.")
-            .parse_mode(ParseMode::Html)
-            .reply_markup(payment_chain_keyboard())
-            .await
-            .map(|_| ()),
-        DraftStep::WaitingTx => {
+        OrderStatus::NeedPay => {
             let Some(text) = msg.text().map(str::trim) else {
-                return bot
-                    .send_message(msg.chat.id, "💳 <b>Payment</b>\nPaste TX hash.")
+                return bot.send_message(msg.chat.id, "💳 <b>Payment</b>\nChoose a chain or paste TX hash.")
                     .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ());
+                    .reply_markup(payment_chain_keyboard())
+                    .await.map(|_| ());
             };
             if !looks_like_tx_hash(text) {
-                return bot
-                    .send_message(msg.chat.id, "<b>Invalid TX.</b>\nPaste transaction hash.")
+                return bot.send_message(msg.chat.id, "💳 <b>Payment</b>\nChoose a chain or paste TX hash.")
                     .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ());
+                    .reply_markup(payment_chain_keyboard())
+                    .await.map(|_| ());
             }
-
-            let Some(order_id) = draft.order_id else {
-                return bot
-                    .send_message(msg.chat.id, "⚠️ <b>No order found.</b>\nUse /create.")
-                    .parse_mode(ParseMode::Html)
-                    .await
-                    .map(|_| ());
-            };
-
-            let order = match db::get_order(pool, order_id).await {
-                Ok(Some(order)) => order,
-                Ok(None) => {
-                    warn!(order_id = %order_id, "order not found");
-                    return bot
-                        .send_message(msg.chat.id, "⚠️ <b>Order not found.</b>\nUse /create.")
-                        .parse_mode(ParseMode::Html)
-                        .await
-                        .map(|_| ());
-                }
-                Err(error) => {
-                    warn!(?error, order_id = %order_id, "failed to load order");
-                    return bot
-                        .send_message(
-                            msg.chat.id,
-                            "⚠️ <b>Payment check failed.</b>\nContact admin.",
-                        )
-                        .parse_mode(ParseMode::Html)
-                        .await
-                        .map(|_| ());
-                }
-            };
-            let chain = order
-                .payment_chain
-                .or(draft.payment_chain)
-                .unwrap_or(PaymentChain::Erc20);
-
+            let chain = order.payment_chain.unwrap_or(PaymentChain::Erc20);
             process_payment_tx_context(PaymentTxProcess {
                 bot: &bot,
                 chat_id: msg.chat.id,
                 user_id,
                 config: &config,
-                sessions: &sessions,
                 pool,
                 order_id,
                 chain,
@@ -997,12 +574,103 @@ async fn handle_order_step(
             })
             .await
         }
-        DraftStep::PaymentConfirmed => bot
-            .send_message(msg.chat.id, "<b>Payment confirmed.</b>\nWebsite is queued.")
+        OrderStatus::PaidAndGenerating => bot
+            .send_message(msg.chat.id, "⚙️ <b>Generating...</b>\nYour website is being created.")
             .parse_mode(ParseMode::Html)
             .reply_markup(status_keyboard())
-            .await
-            .map(|_| ()),
+            .await.map(|_| ()),
+        _ => show_main_menu(&bot, msg.chat.id, &config).await,
+    }
+}
+
+async fn handle_domain_step(
+    bot: &Bot,
+    chat_id: ChatId,
+    user_id: UserId,
+    order: &Order,
+    domain: &str,
+    config: &TelegramUiConfig,
+    pool: &SqlitePool,
+) -> ResponseResult<()> {
+    let order_id = order.id;
+
+    if config.skip_domain_purchase {
+        warn!(user_id = user_id.0 as i64, %domain, "SKIP_DOMAIN_PURCHASE: accepting domain without quote");
+        let total = order.site_price_usdt;
+        if let Err(e) = db::set_order_domain_pricing(pool, order_id, rust_decimal::Decimal::ZERO, total).await {
+            warn!(?e, %order_id, "failed to set domain pricing");
+        }
+        if let Err(e) = db::update_order_field_and_status(pool, order_id, "requested_domain", domain, OrderStatus::NeedPay).await {
+            warn!(?e, %order_id, "failed to update domain/status");
+        }
+        return bot.send_message(
+            chat_id,
+            format!(
+                "✅ <b>Domain accepted</b> (testing mode)\nDomain: <b>{domain}</b>\nWebsite: <b>{}</b> USDT\nTotal: <b>{total}</b> USDT\n\nChoose payment chain.",
+                order.site_price_usdt
+            ),
+        )
+        .parse_mode(ParseMode::Html)
+        .reply_markup(payment_chain_keyboard())
+        .await.map(|_| ());
+    }
+
+    let (Some(base_url), Some(api_key)) = (
+        config.api_service_base_url.as_deref(),
+        config.api_service_api_key.as_deref(),
+    ) else {
+        return bot.send_message(chat_id, "❌ Domain service is not configured. Contact admin.")
+            .parse_mode(ParseMode::Html).await.map(|_| ());
+    };
+    let registrar: Box<dyn DomainRegistrar> = Box::new(HttpClientDomainRegistrar::new(
+        base_url.to_string(), api_key.to_string(),
+    ));
+    match quote_domain_with_retries(registrar.as_ref(), domain).await {
+        Ok(quote) if quote.available && !quote.is_premium => {
+            let total = order.site_price_usdt + quote.price_usd;
+            if let Err(e) = db::set_order_domain_pricing(pool, order_id, quote.price_usd, total).await {
+                warn!(?e, %order_id, "failed to set domain pricing");
+                return bot.send_message(chat_id, "<b>Quote save failed.</b>\nPlease try again.")
+                    .parse_mode(ParseMode::Html).await.map(|_| ());
+            }
+            if let Err(e) = db::update_order_field_and_status(pool, order_id, "requested_domain", &quote.domain, OrderStatus::NeedPay).await {
+                warn!(?e, %order_id, "failed to update domain/status");
+            }
+            info!(user_id = user_id.0 as i64, %order_id, domain = %quote.domain, %total, "domain accepted, ready for payment");
+            bot.send_message(
+                chat_id,
+                format!(
+                    "✅ <b>Domain available</b>\nDomain: <b>{}</b> USDT\nWebsite: <b>{}</b> USDT\nTotal: <b>{}</b> USDT\n\nChoose payment chain.",
+                    quote.price_usd, order.site_price_usdt, total
+                ),
+            )
+            .parse_mode(ParseMode::Html)
+            .reply_markup(payment_chain_keyboard())
+            .await.map(|_| ())
+        }
+        Ok(_) | Err(_) => {
+            info!(user_id = user_id.0 as i64, %domain, "domain unavailable; checking alternatives");
+            let tld = domain.rsplit_once('.').map(|(_, t)| t).unwrap_or("");
+            let base_name = domain.rsplit_once('.').map(|(name, _)| name).unwrap_or(domain);
+            let alternatives = check_alternative_domains(registrar.as_ref(), base_name, tld).await;
+
+            if alternatives.is_empty() {
+                bot.send_message(chat_id, "<b>Domain unavailable.</b>\nSend another domain.")
+                    .parse_mode(ParseMode::Html).await.map(|_| ())
+            } else {
+                // Store alternatives in DB
+                if let Ok(json) = serde_json::to_string(&alternatives) {
+                    let _ = db::update_order_field(pool, order_id, "alternative_domains_json", &json).await;
+                }
+                bot.send_message(
+                    chat_id,
+                    format!("🔍 <b>{} is taken.</b>\nChoose one:", html_escape(domain)),
+                )
+                .parse_mode(ParseMode::Html)
+                .reply_markup(alternative_domains_keyboard(&alternatives))
+                .await.map(|_| ())
+            }
+        }
     }
 }
 
@@ -1053,63 +721,11 @@ async fn handle_continue_command(
     bot: &Bot,
     chat_id: ChatId,
     user_id: UserId,
-    sessions: &Sessions,
     pool: &SqlitePool,
     _config: &TelegramUiConfig,
 ) -> ResponseResult<()> {
-    if let Some(draft) = get_session(user_id, sessions) {
-        if draft.is_expired() {
-            cancel_user_order(pool, user_id, sessions).await;
-            return bot
-                .send_message(chat_id, "<b>Order expired.</b>\nUse /create.")
-                .parse_mode(ParseMode::Html)
-                .reply_markup(main_menu_keyboard())
-                .await
-                .map(|_| ());
-        }
-        return continue_step_screen(bot, chat_id, &draft).await;
-    }
-
     match db::get_unpaid_order(pool, user_id.0 as i64).await {
-        Ok(Some(order)) => {
-            let build_mode = match order.build_mode {
-                Some(crate::models::BuildMode::Template) => BuildModeDraft::Template,
-                _ => BuildModeDraft::AiFree,
-            };
-            let step = match order.status {
-                OrderStatus::NeedLogo => DraftStep::WaitingLogo,
-                OrderStatus::NeedTicker => DraftStep::WaitingTicker,
-                OrderStatus::NeedName => DraftStep::WaitingTokenName,
-                OrderStatus::NeedContract => DraftStep::WaitingContractAddress,
-                OrderStatus::NeedXLink => DraftStep::WaitingXLink,
-                OrderStatus::NeedTme => DraftStep::WaitingTelegramLink,
-                OrderStatus::NeedDomain => DraftStep::WaitingWebsiteUrl,
-                OrderStatus::NeedPay => DraftStep::ReadyToPay,
-                _ => DraftStep::ReadyToPay,
-            };
-            let draft = OrderDraft {
-                build_mode,
-                step,
-                site_price_usdt: order.site_price_usdt,
-                template_id: order.template_id.clone(),
-                logo_file_id: order.logo_asset_path.clone(),
-                ticker: order.token_ticker.clone(),
-                token_name: order.token_name.clone(),
-                contract_address: order.contract_address.clone(),
-                x_link: order.x_url.clone(),
-                telegram_link: order.telegram_url.clone(),
-                website_url: order.requested_domain.clone(),
-                domain_price_usdt: Some(order.domain_price_usdt),
-                alternative_domains: None,
-                total_usdt: Some(order.total_usdt),
-                payment_chain: order.payment_chain,
-                order_id: Some(order.id),
-                db_user_id: Some(order.user_id),
-                updated_at: chrono::Utc::now(),
-            };
-            set_session(user_id, draft.clone(), sessions);
-            continue_step_screen(bot, chat_id, &draft).await
-        }
+        Ok(Some(order)) => continue_order_screen(bot, chat_id, &order).await,
         Ok(None) => bot
             .send_message(chat_id, "<b>No active order.</b>\nUse /create.")
             .parse_mode(ParseMode::Html)
@@ -1117,11 +733,7 @@ async fn handle_continue_command(
             .await
             .map(|_| ()),
         Err(error) => {
-            warn!(
-                ?error,
-                user_id = user_id.0 as i64,
-                "failed to load pending order"
-            );
+            warn!(?error, user_id = user_id.0 as i64, "failed to load pending order");
             bot.send_message(chat_id, "<b>Check failed.</b>\nTry later.")
                 .parse_mode(ParseMode::Html)
                 .reply_markup(main_menu_keyboard())
@@ -1137,162 +749,35 @@ async fn edit_payment_chain_and_ask_tx(
     user_id: UserId,
     chain: PaymentChain,
     address: &str,
-    sessions: &Sessions,
     pool: &SqlitePool,
 ) -> ResponseResult<()> {
-    let Some(mut draft) = get_session(user_id, sessions) else {
-        return edit_screen(
-            bot,
-            target,
-            "<b>No active order.</b>\nUse /create.",
-            main_menu_keyboard(),
-        )
-        .await;
+    let order = match db::get_unpaid_order(pool, user_id.0 as i64).await {
+        Ok(Some(order)) => order,
+        Ok(None) => {
+            return edit_screen(bot, target, "<b>No active order.</b>\nUse /create.", main_menu_keyboard()).await;
+        }
+        Err(e) => {
+            warn!(?e, user_id = user_id.0 as i64, "failed to load order for payment chain");
+            return edit_screen(bot, target, "<b>Error.</b>\nTry again.", main_menu_keyboard()).await;
+        }
     };
-    if draft.is_expired() {
-        cancel_user_order(pool, user_id, sessions).await;
-        return edit_screen(
-            bot,
-            target,
-            "<b>Order expired.</b>\nUse /create.",
-            main_menu_keyboard(),
-        )
-        .await;
-    }
 
-    let Some(total) = draft.total_usdt else {
-        return edit_screen(
-            bot,
-            target,
-            "<b>Payment not ready.</b>\nComplete all steps first.",
-            cancel_keyboard(),
-        )
-        .await;
-    };
+    if order.status != OrderStatus::NeedPay {
+        return edit_screen(bot, target, "<b>Payment not ready.</b>\nComplete all steps first.", cancel_keyboard()).await;
+    }
 
     if address.trim().is_empty() {
-        return edit_screen(
-            bot,
-            target,
-            "<b>Payment address missing.</b>\nContact admin.",
-            main_menu_keyboard(),
-        )
-        .await;
+        return edit_screen(bot, target, "<b>Payment address missing.</b>\nContact admin.", main_menu_keyboard()).await;
     }
 
-    let db_user_id = if let Some(db_user_id) = draft.db_user_id {
-        db_user_id
-    } else {
-        match db::upsert_user(pool, user_id.0 as i64, None, None, None, true).await {
-            Ok(id) => id,
-            Err(e) => {
-                warn!(?e, user_id = user_id.0 as i64, "failed to upsert user");
-                return edit_screen(
-                    bot,
-                    target,
-                    "<b>Order failed.</b>\nPlease try again.",
-                    main_menu_keyboard(),
-                )
-                .await;
-            }
-        }
-    };
-
-    let build_mode = match draft.build_mode {
-        BuildModeDraft::Template => crate::models::BuildMode::Template,
-        BuildModeDraft::AiFree => crate::models::BuildMode::AiFree,
-    };
-    let template_id = draft.template_id.as_deref();
-    let order_id = if let Some(order_id) = draft.order_id {
-        order_id
-    } else {
-        let order_id = match db::create_order(
-            pool,
-            db_user_id,
-            build_mode,
-            template_id,
-            draft.site_price_usdt,
-        )
-        .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                warn!(?e, "failed to create order");
-                return edit_screen(
-                    bot,
-                    target,
-                    "<b>Order failed.</b>\nPlease try again.",
-                    main_menu_keyboard(),
-                )
-                .await;
-            }
-        };
-        draft.order_id = Some(order_id);
-        info!(
-            user_id = user_id.0 as i64,
-            order_id = %order_id,
-            total_usdt = %total,
-            chain = chain.as_str(),
-            "order created before payment"
-        );
-        set_session(user_id, draft.clone(), sessions);
-        order_id
-    };
-
-    // Save wizard fields to order
-    let Some(input) = website_input_from_draft(&draft) else {
-        return edit_screen(
-            bot,
-            target,
-            "<b>Payment not ready.</b>\nComplete all steps first.",
-            cancel_keyboard(),
-        )
-        .await;
-    };
-    let field_updates: &[(&str, &str)] = &[
-        ("token_ticker", &input.token_ticker),
-        ("token_name", &input.token_name),
-        ("contract_address", &input.contract_address),
-        ("x_url", &input.x_url),
-        ("telegram_url", &input.telegram_url),
-        ("logo_asset_path", &input.logo_asset_path),
-    ];
-    for (field, value) in field_updates {
-        if let Err(error) = db::update_order_field(pool, order_id, field, value).await {
-            warn!(?error, order_id = %order_id, field, "failed to update order field");
-        }
-    }
-    if let Some(domain) = input.requested_domain.as_deref()
-        && let Err(error) = db::update_order_field(pool, order_id, "requested_domain", domain).await
-    {
-        warn!(?error, order_id = %order_id, "failed to update requested_domain");
-    }
-
-    // Set domain pricing
-    let domain_price = draft
-        .domain_price_usdt
-        .unwrap_or(rust_decimal::Decimal::ZERO);
-    if let Err(error) = db::set_order_domain_pricing(pool, order_id, domain_price, total).await {
-        warn!(?error, order_id = %order_id, "failed to set domain pricing");
-    }
-
-    // Transition to need_pay status
-    if let Err(error) = db::update_order_status(pool, order_id, OrderStatus::NeedPay).await {
-        warn!(?error, order_id = %order_id, "failed to update order status to need_pay");
-        return edit_screen(
-            bot,
-            target,
-            "<b>Payment setup failed.</b>\nUse /create.",
-            main_menu_keyboard(),
-        )
-        .await;
-    }
+    let order_id = order.id;
+    let total = order.total_usdt;
 
     let payment_window = match db::attach_payment_chain(pool, order_id, chain).await {
         Ok(window) => {
             info!(
                 user_id = user_id.0 as i64,
-                order_id = %order_id,
+                %order_id,
                 chain = chain.as_str(),
                 payment_started_at = %window.started_at,
                 payment_expires_at = %window.expires_at,
@@ -1301,29 +786,10 @@ async fn edit_payment_chain_and_ask_tx(
             window
         }
         Err(e) => {
-            warn!(?e, order_id = %order_id, "failed to attach payment chain");
-            return edit_screen(
-                bot,
-                target,
-                "<b>Payment start failed.</b>\nPlease try again.",
-                main_menu_keyboard(),
-            )
-            .await;
+            warn!(?e, %order_id, "failed to attach payment chain");
+            return edit_screen(bot, target, "<b>Payment start failed.</b>\nPlease try again.", main_menu_keyboard()).await;
         }
     };
-
-    draft.payment_chain = Some(chain);
-    draft.step = DraftStep::WaitingTx;
-    draft.order_id = Some(order_id);
-    draft.db_user_id = Some(db_user_id);
-    info!(
-        user_id = user_id.0 as i64,
-        order_id = %order_id,
-        chain = chain.as_str(),
-        next_step = DraftStep::WaitingTx.as_str(),
-        "waiting for payment transaction"
-    );
-    set_session(user_id, draft, sessions);
 
     edit_screen(
         bot,
@@ -1340,107 +806,44 @@ async fn handle_alternative_domain_selection(
     user_id: UserId,
     domain: &str,
     _config: &TelegramUiConfig,
-    sessions: &Sessions,
     pool: &SqlitePool,
 ) -> ResponseResult<()> {
-    let Some(mut draft) = get_session(user_id, sessions) else {
-        return edit_screen(
-            bot,
-            target,
-            "<b>No active order.</b>\nUse /create.",
-            main_menu_keyboard(),
-        )
-        .await;
-    };
-    if draft.is_expired() {
-        cancel_user_order(pool, user_id, sessions).await;
-        return edit_screen(
-            bot,
-            target,
-            "<b>Order expired.</b>\nUse /create.",
-            main_menu_keyboard(),
-        )
-        .await;
-    }
-
-    let Some(alternatives) = &draft.alternative_domains else {
-        return edit_screen(
-            bot,
-            target,
-            "<b>Session expired.</b>\nUse /create.",
-            main_menu_keyboard(),
-        )
-        .await;
-    };
-
-    let Some(quote) = alternatives.iter().find(|q| q.domain == domain).cloned() else {
-        return edit_screen(
-            bot,
-            target,
-            "<b>Domain expired.</b>\nUse /create.",
-            main_menu_keyboard(),
-        )
-        .await;
-    };
-
-    let site_price_usdt = draft.site_price_usdt;
-
-    let db_user_id = match db::upsert_user(pool, user_id.0 as i64, None, None, None, true).await {
-        Ok(id) => id,
+    let order = match db::get_unpaid_order(pool, user_id.0 as i64).await {
+        Ok(Some(order)) => order,
+        Ok(None) => {
+            return edit_screen(bot, target, "<b>No active order.</b>\nUse /create.", main_menu_keyboard()).await;
+        }
         Err(e) => {
-            warn!(
-                ?e,
-                user_id = user_id.0 as i64,
-                "failed to upsert user for alt domain"
-            );
-            return edit_screen(
-                bot,
-                target,
-                "<b>Selection failed.</b>\nPlease try again.",
-                main_menu_keyboard(),
-            )
-            .await;
+            warn!(?e, user_id = user_id.0 as i64, "failed to load order for alt domain");
+            return edit_screen(bot, target, "<b>Error.</b>\nTry again.", main_menu_keyboard()).await;
         }
     };
 
-    let total = site_price_usdt + quote.price_usd;
-    if let Some(order_id) = draft.order_id {
-        if let Err(error) =
-            db::set_order_domain_pricing(pool, order_id, quote.price_usd, total).await
-        {
-            warn!(
-                ?error,
-                user_id = user_id.0 as i64,
-                order_id = %order_id,
-                "failed to set domain pricing for alt domain"
-            );
-            return edit_screen(
-                bot,
-                target,
-                "<b>Quote save failed.</b>\nPlease try again.",
-                main_menu_keyboard(),
-            )
-            .await;
-        }
-        if let Err(error) = db::update_order_field(pool, order_id, "requested_domain", domain).await
-        {
-            warn!(?error, order_id = %order_id, "failed to update requested_domain for alt domain");
-        }
+    let alternatives = parse_alternative_domains(order.alternative_domains_json.as_deref())
+        .unwrap_or_default();
+    let Some(quote) = alternatives.iter().find(|q| q.domain == domain).cloned() else {
+        return edit_screen(bot, target, "<b>Domain expired.</b>\nSend a new domain.", main_menu_keyboard()).await;
+    };
+
+    let order_id = order.id;
+    let total = order.site_price_usdt + quote.price_usd;
+
+    if let Err(e) = db::set_order_domain_pricing(pool, order_id, quote.price_usd, total).await {
+        warn!(?e, %order_id, "failed to set domain pricing for alt domain");
+        return edit_screen(bot, target, "<b>Quote save failed.</b>\nPlease try again.", main_menu_keyboard()).await;
     }
-    draft.website_url = Some(domain.to_string());
-    draft.db_user_id = Some(db_user_id);
-    draft.domain_price_usdt = Some(quote.price_usd);
-    draft.total_usdt = Some(total);
-    draft.step = DraftStep::ReadyToPay;
-    draft.alternative_domains = None;
-    set_session(user_id, draft.clone(), sessions);
+    if let Err(e) = db::update_order_field_and_status(pool, order_id, "requested_domain", domain, OrderStatus::NeedPay).await {
+        warn!(?e, %order_id, "failed to update domain/status for alt domain");
+    }
+    // Clear stored alternatives
+    let _ = db::clear_order_field(pool, order_id, "alternative_domains_json").await;
 
     edit_screen(
         bot,
         target,
         format!(
             "✅ <b>Domain selected</b>\n{domain}\nDomain: <b>{}</b> USDT\nWebsite: <b>{}</b> USDT\nTotal: <b>{}</b> USDT\n\nChoose payment chain.",
-            quote.price_usd, site_price_usdt, total
+            quote.price_usd, order.site_price_usdt, total
         ),
         payment_chain_keyboard(),
     )

@@ -6,8 +6,7 @@ mod payment;
 mod screens;
 mod types;
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use sqlx::SqlitePool;
 use teloxide::{dispatching::UpdateFilterExt, dptree, prelude::*, utils::client_from_env};
@@ -20,7 +19,6 @@ pub use types::{TelegramUiConfig, TemplateOption};
 
 use handlers::{handle_callback, handle_message};
 use helpers::configured_proxy;
-use types::Sessions;
 
 pub async fn run_bot(config: Config, pool: SqlitePool) -> anyhow::Result<()> {
     if config.telegram_bot_token.trim().is_empty() {
@@ -46,13 +44,12 @@ pub async fn run_bot(config: Config, pool: SqlitePool) -> anyhow::Result<()> {
     })?;
 
     let ui_config = Arc::new(TelegramUiConfig::from_config(&config));
-    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
     let handler = dptree::entry()
         .branch(Update::filter_message().endpoint(handle_message))
         .branch(Update::filter_callback_query().endpoint(handle_callback));
 
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![ui_config, sessions, pool])
+        .dependencies(dptree::deps![ui_config, pool])
         .enable_ctrlc_handler()
         .build()
         .dispatch()
