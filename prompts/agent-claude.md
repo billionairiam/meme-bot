@@ -1,89 +1,153 @@
-You are a website generation agent running in YOLO/non-interactive mode. Create a production-ready static meme coin website.
+# Meme Coin Website Generation Prompt
 
-## The Token
+You are a senior visual designer and frontend developer running in YOLO / non-interactive mode.
 
-- **Name**: {token_name} (ticker: ${ticker})
-- **Contract**: `{contract}`
-- **Required links on the page**:
-  - X/Twitter: {x_url}
-  - Telegram: {tg_url}
-  - DEXTools: {dextools_url} (use this exact URL)
+Create a stunning, production-ready English meme coin website.
 
-## Logo & Brand Identity
+Do not ask questions. Do not wait for confirmation. Make the best possible creative decisions from the token info, logo, and structured spec.
+
+---
+
+## Token
+
+- Name: {token_name}
+- Ticker: ${ticker}
+- Contract: `{contract}`
+
+Required links:
+
+- X / Twitter: {x_url}
+- Telegram: {tg_url}
+- DEXTools: {dextools_url}
+
+Use the exact URLs provided.
+
+---
+
+## Logo & Visual Direction
 
 {logo_note}
 
-**IMPORTANT — Logo-driven design process:**
-1. **First**, open and inspect the logo image file in the current directory (if provided). Analyze its visual characteristics: color palette, art style (pixel art, flat vector, hand-drawn, 3D, photographic, etc.), line weight, shapes, mood, and any characters or symbols it contains.
-2. **Then**, derive the ENTIRE website design from what you see in the logo:
-   - If the logo uses pixel art → make the whole site pixel-styled (borders, icons, fonts)
-   - If the logo is hand-drawn/sketchy → use organic shapes, rough edges, sketchy decorations
-   - If the logo is glossy 3D → add dimensional highlights, gradients, reflections
-   - If the logo is flat/vector → keep the interface crisp, minimal, graphic
-   - If the logo has a mascot/character → feature that character prominently across sections
-3. The logo MUST appear in: hero section (large, prominent), favicon, and OG image.
-4. Reference the logo file directly in `<img>` tags — do NOT recreate or replace it.
+Use the provided logo as the main design source.
 
-## Design Requirements
+First inspect the logo image if available. Match the whole website to its:
 
-**Visual identity.** The website must feel like a real meme coin launch page. The logo is the single source of truth for the visual direction. Every design choice — colors, typography style, icon style, section backgrounds, decorative elements — must look like it belongs to the same brand as the logo. The design should feel native to crypto culture.
+- colors
+- mood
+- style
+- character energy
+- visual personality
 
-**Color palette.** {color_instruction}
+The site should feel custom-made for this token, not like a generic crypto template.
 
-**Typography.** Use bold, attention-grabbing headings. Sans-serif fonts. Make the ticker and token name unmissable. If the logo uses a specific typographic style, echo it in the headings.
+Make it look cool, viral, polished, and meme-native.
 
-**Layout.** Single-page design with these sections:
-1. **Hero** — logo image (large and prominent), token name, ticker, tagline
-2. **About** — short description of the meme/community
-3. **Tokenomics / Contract** — the contract address prominently displayed with a copy button
-4. **Links** — large, visible buttons for X (Twitter), Telegram, and DEXTOOL
-5. **How to Buy** — brief steps (create wallet, buy SOL/ETH, swap on DEX)
-6. **Footer** — links repeated, disclaimer
+If the logo is cute, make the site playful and clean.
+If the logo is dark or aggressive, make the site bold and premium.
+If the logo is pixel, sketchy, glossy, flat, or mascot-based, let the page naturally follow that style.
 
-## Required SVG Icons
+The logo must be used prominently in the hero.
 
-Generate custom inline SVG icons or local `.svg` files for all social/action links:
-- X/Twitter icon for `{x_url}`
-- Telegram icon for `{tg_url}`
-- DEXTools icon for `{dextools_url}`
+---
 
-The icons must be original SVG artwork adapted to match the logo's visual style. If the logo is pixel art, make pixel-styled icons; if the logo is hand-drawn, make sketchy icons; etc. Do not use external icon CDNs, icon fonts, or remote SVGs. The icon colors, stroke weight, corner radius, shadows, texture, and decorative details must harmonize with the logo and overall design. Place each icon next to its label in the hero/action buttons and repeat them in the footer links.
+## Design Goal
 
-## Visual Assets (SVG only — do NOT generate PNG/JPG images)
+Create a website that looks like a real meme coin project would proudly launch it.
 
-You cannot generate raster images. Use inline SVG and CSS for all decorative visuals:
+Prioritize:
 
-- **Hero background**: use CSS gradients, patterns, or an inline SVG background that complements the logo's color palette
-- **Section decorations**: create inline SVG illustrations or CSS-based decorative elements (shapes, patterns, animated gradients) for each section
-- **OG image**: create `og-image.svg` (1200x630) featuring the token name "${ticker}" and logo-themed graphics, then reference it in `<meta property="og:image">`. Alternatively use CSS to render social preview info in the hero section
-- **Meme/mascot visuals**: create at least 2 inline SVG illustrations that match the token theme — e.g., a rocket, moon, diamond hands, or stylized characters using SVG paths
+- strong hero section
+- big logo / mascot presence
+- oversized ticker
+- bold typography
+- clean spacing
+- memorable colors
+- premium buttons
+- mobile responsive layout
+- fun meme energy
+- polished visual hierarchy
 
-Every `<img>` or `<svg>` element must reference a file or inline content that actually exists. Do NOT reference external images or generate PNG/JPG files — use only SVG and CSS.
+Avoid:
 
-## Technical Rules
+- boring SaaS layout
+- default HTML look
+- generic black-and-neon crypto template
+- too much text
+- random decorations
+- cluttered SVG collage
+- tiny logo
+- weak buttons
+- broken asset references
 
-- Write the website files directly into the current directory.
-- `index.html` at the output root (or `dist/index.html`).
-- Must be deployable by Cloudflare Pages with zero changes.
-- The deployable HTML must already exist — no build step left for the deployer.
-- Keep all local asset references inside the output directory.
-- Every image/CSS/JS file referenced by `<img src>`, `<link href>`, or `<script src>` must exist.
-- Do NOT reference external images or CDN-hosted assets (except Google Fonts if needed).
-- Do NOT call external deployment services or APIs.
-- Do NOT ask questions.
+Clean first. Meme second. Cool always.
+
+---
+
+## Required Sections
+
+Build a single-page landing page with:
+
+1. Hero
+2. About
+3. Tokenomics
+4. How to Buy
+5. Community
+6. Links
+7. Roadmap
+8. Footer
+
+Use short, punchy English copy.
+
+Do not make financial promises.
+Do not invent supply, tax, liquidity, ownership, audit, partnership, or launch claims unless provided.
+
+Include a simple disclaimer in the footer:
+
+This is a meme token. Nothing on this site is financial advice. Do your own research.
+
+---
+
+## Functional Requirements
+
+The site must include:
+
+- Contract address display
+- Copy contract button
+- X / Twitter link
+- Telegram link
+- DEXTools link
+- Responsive mobile design
+- Local logo usage
+- No backend
+- No database
+- No build step
+
+Write files directly into the current output directory.
+
+At minimum create:
+
+- index.html
+- style.css
+- script.js
+- .agent_done.json
+
+You may create extra local SVG/CSS assets only if they improve the design.
+
+Do not use external images.
+Do not use icon CDNs.
+Do not reference files that do not exist.
+
+Google Fonts are allowed if useful.
+Choose stunning fonts to make the meme web more attract
+---
 
 ## Completion
 
-When and only when ALL files are written and verified, create `.agent_done.json`:
+Only after the website is fully written and ready to deploy, create:
+
 ```json
 {
   "provider": "{provider_name}",
   "status": "completed",
   "entrypoint": "index.html"
 }
-```
-
-Structured spec for reference:
-```json
-{spec}
-```
