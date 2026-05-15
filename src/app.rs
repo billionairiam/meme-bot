@@ -28,21 +28,21 @@ impl App {
     ) -> GenerationQueue {
         let router = Arc::new(GenerationRouter::new(
             self.config.generation_primary_provider,
-            Box::new(CliGenerationProvider::gemini(
+            CliGenerationProvider::gemini(
                 self.config.gemini_agent_command.clone(),
                 self.config.gemini_agent_args.clone(),
                 self.config.agent_timeout_seconds,
-            )),
-            Box::new(CliGenerationProvider::codex(
+            ),
+            CliGenerationProvider::codex(
                 self.config.codex_agent_command.clone(),
                 self.config.codex_agent_args.clone(),
                 self.config.agent_timeout_seconds,
-            )),
-            Box::new(CliGenerationProvider::claude(
+            ),
+            CliGenerationProvider::claude(
                 self.config.claude_agent_command.clone(),
                 self.config.claude_agent_args.clone(),
                 self.config.agent_timeout_seconds,
-            )),
+            ),
         ));
 
         let deployer: Option<Arc<dyn SiteDeployer>> = match (

@@ -6,7 +6,6 @@ use std::{
     time::Duration,
 };
 
-use async_trait::async_trait;
 use regex::Regex;
 use thiserror::Error;
 use tokio::{process::Command, time::timeout};
@@ -59,26 +58,16 @@ impl GenerationError {
     }
 }
 
-#[async_trait]
-pub trait SiteGenerationProvider: Send + Sync {
-    fn name(&self) -> &'static str;
-
-    async fn generate(
-        &self,
-        request: &SiteGenerationRequest,
-    ) -> Result<SiteGenerationResult, GenerationError>;
-}
-
 pub struct GenerationRouter {
-    providers: Vec<Box<dyn SiteGenerationProvider>>,
+    providers: Vec<CliGenerationProvider>,
 }
 
 impl GenerationRouter {
     pub fn new(
         primary: GenerationProviderName,
-        gemini: Box<dyn SiteGenerationProvider>,
-        codex: Box<dyn SiteGenerationProvider>,
-        claude: Box<dyn SiteGenerationProvider>,
+        gemini: CliGenerationProvider,
+        codex: CliGenerationProvider,
+        claude: CliGenerationProvider,
     ) -> Self {
         let providers = match primary {
             GenerationProviderName::Gemini => vec![gemini, codex, claude],
@@ -177,13 +166,12 @@ impl CliGenerationProvider {
     }
 }
 
-#[async_trait]
-impl SiteGenerationProvider for CliGenerationProvider {
-    fn name(&self) -> &'static str {
+impl CliGenerationProvider {
+    pub fn name(&self) -> &'static str {
         self.name
     }
 
-    async fn generate(
+    pub async fn generate(
         &self,
         request: &SiteGenerationRequest,
     ) -> Result<SiteGenerationResult, GenerationError> {
@@ -200,9 +188,6 @@ impl SiteGenerationProvider for CliGenerationProvider {
         let args = render_agent_args(
             &self.args_template,
             &prompt,
-            &prompt_file,
-            &request.output_dir,
-            &done_file,
         )?;
 
         tracing::info!(
@@ -311,16 +296,10 @@ fn load_prompt_template(provider_name: &str) -> Result<String, GenerationError> 
 fn render_agent_args(
     args_template: &str,
     prompt: &str,
-    prompt_file: &Path,
-    output_dir: &Path,
-    done_file: &Path,
 ) -> Result<Vec<String>, GenerationError> {
     const PROMPT_PLACEHOLDER: &str = "\x1f__PROMPT__\x1f";
     let rendered = args_template
-        .replace("{prompt}", PROMPT_PLACEHOLDER)
-        .replace("{prompt_file}", &prompt_file.display().to_string())
-        .replace("{output_dir}", &output_dir.display().to_string())
-        .replace("{done_file}", &done_file.display().to_string());
+        .replace("{prompt}", PROMPT_PLACEHOLDER);
 
     let mut args: Vec<String> = shell_words::split(&rendered)
         .map_err(|error| GenerationError::Failed(format!("invalid agent args: {error}")))?;
@@ -533,75 +512,6 @@ fn should_skip_reference(reference: &str) -> bool {
         || lower.starts_with("javascript:")
 }
 
-pub struct StaticTemplateProvider;
-
-#[async_trait]
-impl SiteGenerationProvider for StaticTemplateProvider {
-    fn name(&self) -> &'static str {
-        "static-template"
-    }
-
-    async fn generate(
-        &self,
-        request: &SiteGenerationRequest,
-    ) -> Result<SiteGenerationResult, GenerationError> {
-        prepare_output_dir(&request.output_dir)?;
-        let html = format!(
-            r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{name} (${ticker})</title>
-  <meta name="description" content="{name} meme coin website">
-</head>
-<body>
-  <main>
-    <h1>{name}</h1>
-    <p>{ticker} is a community meme coin with a simple launch page generated from verified order details.</p>
-    <section>
-      <h2>Token</h2>
-      <p>Contract: <code>{contract}</code></p>
-    </section>
-    <nav>
-      <a href="{x}">X</a>
-      <a href="{telegram}">Telegram</a>
-      <a href="https://www.dextools.io/app/en/token/{contract}">DEXTOOL</a>
-    </nav>
-  </main>
-</body>
-</html>
-"#,
-            name = request.input.token_name,
-            ticker = request.input.token_ticker,
-            contract = request.input.contract_address,
-            x = request.input.x_url,
-            telegram = request.input.telegram_url,
-        );
-        fs::write(request.output_dir.join("index.html"), html)
-            .map_err(|error| GenerationError::Failed(error.to_string()))?;
-        let done = serde_json::json!({
-            "provider": self.name(),
-            "status": "completed",
-            "entrypoint": "index.html"
-        });
-        fs::write(
-            request.output_dir.join(".agent_done.json"),
-            done.to_string(),
-        )
-        .map_err(|error| GenerationError::Failed(error.to_string()))?;
-        validate_agent_output(
-            request,
-            self.name(),
-            &request.output_dir.join(".agent_done.json"),
-        )?;
-        Ok(SiteGenerationResult {
-            provider_name: self.name().to_string(),
-            output_dir: request.output_dir.clone(),
-        })
-    }
-}
-
 fn map_provider_spawn_error(error: std::io::Error, provider: &str) -> GenerationError {
     if error.kind() == std::io::ErrorKind::NotFound {
         GenerationError::ProviderUnavailable
@@ -615,61 +525,6 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-
-    struct FailingProvider;
-    struct InvalidOutputProvider;
-
-    #[async_trait]
-    impl SiteGenerationProvider for FailingProvider {
-        fn name(&self) -> &'static str {
-            "failing"
-        }
-
-        async fn generate(
-            &self,
-            _request: &SiteGenerationRequest,
-        ) -> Result<SiteGenerationResult, GenerationError> {
-            Err(GenerationError::QuotaExhausted)
-        }
-    }
-
-    #[async_trait]
-    impl SiteGenerationProvider for InvalidOutputProvider {
-        fn name(&self) -> &'static str {
-            "invalid-output"
-        }
-
-        async fn generate(
-            &self,
-            request: &SiteGenerationRequest,
-        ) -> Result<SiteGenerationResult, GenerationError> {
-            prepare_output_dir(&request.output_dir)?;
-            fs::write(
-                request.output_dir.join("index.html"),
-                "<!doctype html><html><body>blank</body></html>",
-            )
-            .unwrap();
-            fs::write(
-                request.output_dir.join(".agent_done.json"),
-                serde_json::json!({
-                    "provider": self.name(),
-                    "status": "completed",
-                    "entrypoint": "index.html"
-                })
-                .to_string(),
-            )
-            .unwrap();
-            validate_agent_output(
-                request,
-                self.name(),
-                &request.output_dir.join(".agent_done.json"),
-            )?;
-            Ok(SiteGenerationResult {
-                provider_name: self.name().to_string(),
-                output_dir: request.output_dir.clone(),
-            })
-        }
-    }
 
     fn test_request(output_dir: PathBuf) -> SiteGenerationRequest {
         SiteGenerationRequest {
@@ -687,38 +542,6 @@ mod tests {
             },
             output_dir,
         }
-    }
-
-    #[tokio::test]
-    async fn falls_back_to_second_provider() {
-        let dir = tempdir().unwrap();
-        let request = test_request(dir.path().to_path_buf());
-        let router = GenerationRouter::new(
-            GenerationProviderName::Gemini,
-            Box::new(FailingProvider),
-            Box::new(StaticTemplateProvider),
-            Box::new(FailingProvider),
-        );
-
-        let result = router.generate(&request).await.unwrap();
-        assert_eq!(result.provider_name, "static-template");
-    }
-
-    #[tokio::test]
-    async fn falls_back_when_first_provider_writes_invalid_site() {
-        let dir = tempdir().unwrap();
-        let request = test_request(dir.path().to_path_buf());
-        let router = GenerationRouter::new(
-            GenerationProviderName::Gemini,
-            Box::new(InvalidOutputProvider),
-            Box::new(StaticTemplateProvider),
-            Box::new(FailingProvider),
-        );
-
-        let result = router.generate(&request).await.unwrap();
-        assert_eq!(result.provider_name, "static-template");
-        let html = fs::read_to_string(dir.path().join("index.html")).unwrap();
-        assert!(html.contains("Moon Token"));
     }
 
     #[test]
