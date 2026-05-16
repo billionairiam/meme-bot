@@ -1,8 +1,8 @@
-use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -55,143 +55,74 @@ pub enum PaymentVerificationError {
     Provider(String),
 }
 
-#[async_trait]
-pub trait PaymentVerifier: Send + Sync {
-    async fn verify(
-        &self,
-        request: &PaymentVerificationRequest,
-    ) -> Result<PaymentVerificationOutcome, PaymentVerificationError>;
-}
-
-pub struct PaymentService<V> {
-    verifier: V,
-}
-
-impl<V> PaymentService<V>
-where
-    V: PaymentVerifier,
-{
-    pub fn new(verifier: V) -> Self {
-        Self { verifier }
+/// Validates payment invariants (expiry, timing, recipient, amount) against
+/// a raw chain verification outcome. Extracted for testability.
+fn validate_outcome(
+    outcome: PaymentVerificationOutcome,
+    request: &PaymentVerificationRequest,
+) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
+    if Utc::now() > request.expires_at {
+        return Err(PaymentVerificationError::ExpiredOrder);
     }
-
-    pub async fn verify_tx(
-        &self,
-        request: PaymentVerificationRequest,
-    ) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
-        if Utc::now() > request.expires_at {
-            return Err(PaymentVerificationError::ExpiredOrder);
-        }
-
-        let outcome = self.verifier.verify(&request).await?;
-        if outcome.confirmed_at < request.payment_started_at {
-            return Err(PaymentVerificationError::OldTransaction);
-        }
-        if outcome.confirmed_at > request.submitted_at + Duration::minutes(2) {
-            return Err(PaymentVerificationError::TransactionAfterSubmission);
-        }
-        if !outcome
-            .observed_to_address
-            .eq_ignore_ascii_case(&request.expected_to_address)
-        {
-            return Err(PaymentVerificationError::WrongRecipient);
-        }
-        if outcome.observed_amount_usdt < request.required_amount_usdt {
-            return Err(PaymentVerificationError::InsufficientAmount);
-        }
-        Ok(outcome)
+    if outcome.confirmed_at < request.payment_started_at {
+        return Err(PaymentVerificationError::OldTransaction);
     }
+    if outcome.confirmed_at > request.submitted_at + Duration::minutes(2) {
+        return Err(PaymentVerificationError::TransactionAfterSubmission);
+    }
+    if !outcome
+        .observed_to_address
+        .eq_ignore_ascii_case(&request.expected_to_address)
+    {
+        return Err(PaymentVerificationError::WrongRecipient);
+    }
+    if outcome.observed_amount_usdt < request.required_amount_usdt {
+        return Err(PaymentVerificationError::InsufficientAmount);
+    }
+    Ok(outcome)
 }
 
-pub struct StubPaymentVerifier;
-
-#[async_trait]
-impl PaymentVerifier for StubPaymentVerifier {
-    async fn verify(
-        &self,
-        request: &PaymentVerificationRequest,
-    ) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
-        if !request.tx_hash.starts_with("valid_") {
-            return Err(PaymentVerificationError::NotFound);
-        }
-
-        Ok(PaymentVerificationOutcome {
-            observed_amount_usdt: request.required_amount_usdt,
-            observed_to_address: request.expected_to_address.clone(),
-            confirmations: Some(match request.chain {
-                PaymentChain::Erc20 => 12,
-                PaymentChain::Tron => 20,
-                PaymentChain::Sol => 1,
-            }),
-            confirmed_at: request.submitted_at,
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ChainPaymentVerifier {
+    config: Arc<Config>,
     client: Client,
-    erc20_rpc_url: String,
-    erc20_contract: String,
-    erc20_min_confirmations: u64,
-    tron_grid_base_url: String,
-    tron_grid_api_key: Option<String>,
-    tron_contract: String,
-    tron_min_confirmations: u64,
-    solana_rpc_url: String,
-    sol_mint: String,
-    sol_min_confirmations: u64,
 }
 
 impl ChainPaymentVerifier {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        erc20_rpc_url: String,
-        erc20_contract: String,
-        erc20_min_confirmations: u64,
-        tron_grid_base_url: String,
-        tron_grid_api_key: Option<String>,
-        tron_contract: String,
-        tron_min_confirmations: u64,
-        solana_rpc_url: String,
-        sol_mint: String,
-        sol_min_confirmations: u64,
-    ) -> Self {
+    pub fn new(config: Arc<Config>) -> Self {
         Self {
+            config,
             client: Client::new(),
-            erc20_rpc_url,
-            erc20_contract,
-            erc20_min_confirmations,
-            tron_grid_base_url: tron_grid_base_url.trim_end_matches('/').to_string(),
-            tron_grid_api_key,
-            tron_contract,
-            tron_min_confirmations,
-            solana_rpc_url,
-            sol_mint,
-            sol_min_confirmations,
         }
     }
 
-    pub fn from_config(config: &Config) -> Self {
-        Self::new(
-            config.usdt_erc20_rpc_url.clone(),
-            config.usdt_erc20_contract.clone(),
-            config.usdt_erc20_min_confirmations,
-            config.tron_grid_base_url.clone(),
-            config.tron_grid_api_key.clone(),
-            config.usdt_tron_contract.clone(),
-            config.usdt_tron_min_confirmations,
-            config.solana_rpc_url.clone(),
-            config.usdt_sol_mint.clone(),
-            config.usdt_sol_min_confirmations,
-        )
+    /// Full verification: chain-specific check + payment invariants.
+    pub async fn verify_tx(
+        &self,
+        request: &PaymentVerificationRequest,
+    ) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
+        let outcome = self.verify_chain(request).await?;
+        validate_outcome(outcome, request)
+    }
+
+    async fn verify_chain(
+        &self,
+        request: &PaymentVerificationRequest,
+    ) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
+        match request.chain {
+            PaymentChain::Erc20 => self.verify_erc20(request).await,
+            PaymentChain::Tron => self.verify_tron(request).await,
+            PaymentChain::Sol => self.verify_sol(request).await,
+        }
     }
 
     async fn verify_erc20(
         &self,
         request: &PaymentVerificationRequest,
     ) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
-        if self.erc20_rpc_url.trim().is_empty() || self.erc20_contract.trim().is_empty() {
+        if self.config.usdt_erc20_rpc_url.trim().is_empty()
+            || self.config.usdt_erc20_contract.trim().is_empty()
+        {
             return Err(PaymentVerificationError::Provider(
                 "USDT_ERC20_RPC_URL and USDT_ERC20_CONTRACT are required".to_string(),
             ));
@@ -212,7 +143,7 @@ impl ChainPaymentVerifier {
 
         let transfer = find_erc20_transfer(
             receipt.get("logs").and_then(Value::as_array),
-            &self.erc20_contract,
+            &self.config.usdt_erc20_contract,
             &request.expected_to_address,
         )
         .ok_or(PaymentVerificationError::WrongRecipient)?;
@@ -232,7 +163,7 @@ impl ChainPaymentVerifier {
                 PaymentVerificationError::Provider("missing latest block".to_string())
             })?;
         let confirmations = latest.saturating_sub(block_number).saturating_add(1);
-        if confirmations < self.erc20_min_confirmations {
+        if confirmations < self.config.usdt_erc20_min_confirmations {
             return Err(PaymentVerificationError::InsufficientConfirmations);
         }
 
@@ -264,7 +195,7 @@ impl ChainPaymentVerifier {
     ) -> Result<Value, PaymentVerificationError> {
         let response = self
             .client
-            .post(&self.erc20_rpc_url)
+            .post(&self.config.usdt_erc20_rpc_url)
             .json(&json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
             .send()
             .await
@@ -283,18 +214,21 @@ impl ChainPaymentVerifier {
         &self,
         request: &PaymentVerificationRequest,
     ) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
-        if self.tron_grid_base_url.trim().is_empty() || self.tron_contract.trim().is_empty() {
+        if self.config.tron_grid_base_url.trim().is_empty()
+            || self.config.usdt_tron_contract.trim().is_empty()
+        {
             return Err(PaymentVerificationError::Provider(
                 "TRON_GRID_BASE_URL and USDT_TRON_CONTRACT are required".to_string(),
             ));
         }
 
+        let tron_base = self.config.tron_grid_base_url.trim_end_matches('/');
         let url = format!(
             "{}/v1/transactions/{}/events?event_name=Transfer&contract_address={}",
-            self.tron_grid_base_url, request.tx_hash, self.tron_contract
+            tron_base, request.tx_hash, self.config.usdt_tron_contract
         );
         let mut builder = self.client.get(url);
-        if let Some(api_key) = &self.tron_grid_api_key {
+        if let Some(api_key) = &self.config.tron_grid_api_key {
             builder = builder.header("TRON-PRO-API-KEY", api_key);
         }
         let body: Value = builder
@@ -353,7 +287,7 @@ impl ChainPaymentVerifier {
         })?;
         let latest = self.tron_latest_block_number().await?;
         let confirmations = latest.saturating_sub(block_number).saturating_add(1);
-        if confirmations < self.tron_min_confirmations {
+        if confirmations < self.config.usdt_tron_min_confirmations {
             return Err(PaymentVerificationError::InsufficientConfirmations);
         }
 
@@ -366,9 +300,10 @@ impl ChainPaymentVerifier {
     }
 
     async fn tron_latest_block_number(&self) -> Result<u64, PaymentVerificationError> {
-        let url = format!("{}/wallet/getnowblock", self.tron_grid_base_url);
+        let tron_base = self.config.tron_grid_base_url.trim_end_matches('/');
+        let url = format!("{tron_base}/wallet/getnowblock");
         let mut builder = self.client.post(url).json(&json!({}));
-        if let Some(api_key) = &self.tron_grid_api_key {
+        if let Some(api_key) = &self.config.tron_grid_api_key {
             builder = builder.header("TRON-PRO-API-KEY", api_key);
         }
         let body: Value = builder
@@ -389,7 +324,9 @@ impl ChainPaymentVerifier {
         &self,
         request: &PaymentVerificationRequest,
     ) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
-        if self.solana_rpc_url.trim().is_empty() || self.sol_mint.trim().is_empty() {
+        if self.config.solana_rpc_url.trim().is_empty()
+            || self.config.usdt_sol_mint.trim().is_empty()
+        {
             return Err(PaymentVerificationError::Provider(
                 "SOLANA_RPC_URL and USDT_SOL_MINT are required".to_string(),
             ));
@@ -397,7 +334,7 @@ impl ChainPaymentVerifier {
 
         let response = self
             .client
-            .post(&self.solana_rpc_url)
+            .post(&self.config.solana_rpc_url)
             .json(&json!({
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -432,12 +369,12 @@ impl ChainPaymentVerifier {
             .unwrap_or_else(Utc::now);
         let latest_slot = self.solana_slot().await?;
         let confirmations = latest_slot.saturating_sub(slot).saturating_add(1);
-        if confirmations < self.sol_min_confirmations {
+        if confirmations < self.config.usdt_sol_min_confirmations {
             return Err(PaymentVerificationError::InsufficientConfirmations);
         }
 
         if let Some(amount) =
-            find_solana_usdt_transfer(tx, &self.sol_mint, &request.expected_to_address)
+            find_solana_usdt_transfer(tx, &self.config.usdt_sol_mint, &request.expected_to_address)
         {
             return Ok(PaymentVerificationOutcome {
                 observed_amount_usdt: amount,
@@ -453,7 +390,7 @@ impl ChainPaymentVerifier {
     async fn solana_slot(&self) -> Result<u64, PaymentVerificationError> {
         let body: Value = self
             .client
-            .post(&self.solana_rpc_url)
+            .post(&self.config.solana_rpc_url)
             .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "getSlot"}))
             .send()
             .await
@@ -464,20 +401,6 @@ impl ChainPaymentVerifier {
         body.get("result")
             .and_then(Value::as_u64)
             .ok_or_else(|| PaymentVerificationError::Provider("missing Solana slot".to_string()))
-    }
-}
-
-#[async_trait]
-impl PaymentVerifier for ChainPaymentVerifier {
-    async fn verify(
-        &self,
-        request: &PaymentVerificationRequest,
-    ) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
-        match request.chain {
-            PaymentChain::Erc20 => self.verify_erc20(request).await,
-            PaymentChain::Tron => self.verify_tron(request).await,
-            PaymentChain::Sol => self.verify_sol(request).await,
-        }
     }
 }
 
@@ -674,28 +597,20 @@ mod tests {
 
     use super::*;
 
-    struct FixedTimeVerifier {
+    fn make_outcome(
+        request: &PaymentVerificationRequest,
         confirmed_at: DateTime<Utc>,
-    }
-
-    #[async_trait]
-    impl PaymentVerifier for FixedTimeVerifier {
-        async fn verify(
-            &self,
-            request: &PaymentVerificationRequest,
-        ) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
-            Ok(PaymentVerificationOutcome {
-                observed_amount_usdt: request.required_amount_usdt,
-                observed_to_address: request.expected_to_address.clone(),
-                confirmations: Some(12),
-                confirmed_at: self.confirmed_at,
-            })
+    ) -> PaymentVerificationOutcome {
+        PaymentVerificationOutcome {
+            observed_amount_usdt: request.required_amount_usdt,
+            observed_to_address: request.expected_to_address.clone(),
+            confirmations: Some(12),
+            confirmed_at,
         }
     }
 
-    #[tokio::test]
-    async fn allows_overpayment_or_exact_payment() {
-        let service = PaymentService::new(StubPaymentVerifier);
+    #[test]
+    fn allows_overpayment_or_exact_payment() {
         let request = PaymentVerificationRequest {
             order_id: Uuid::new_v4(),
             chain: PaymentChain::Erc20,
@@ -706,13 +621,12 @@ mod tests {
             submitted_at: Utc::now(),
             expires_at: Utc::now() + Duration::minutes(29),
         };
-
-        assert!(service.verify_tx(request).await.is_ok());
+        let outcome = make_outcome(&request, request.submitted_at);
+        assert!(validate_outcome(outcome, &request).is_ok());
     }
 
-    #[tokio::test]
-    async fn rejects_expired_orders() {
-        let service = PaymentService::new(StubPaymentVerifier);
+    #[test]
+    fn rejects_expired_orders() {
         let request = PaymentVerificationRequest {
             order_id: Uuid::new_v4(),
             chain: PaymentChain::Tron,
@@ -723,19 +637,16 @@ mod tests {
             submitted_at: Utc::now(),
             expires_at: Utc::now() - Duration::minutes(1),
         };
-
+        let outcome = make_outcome(&request, request.submitted_at);
         assert_eq!(
-            service.verify_tx(request).await.unwrap_err(),
+            validate_outcome(outcome, &request).unwrap_err(),
             PaymentVerificationError::ExpiredOrder
         );
     }
 
-    #[tokio::test]
-    async fn rejects_transactions_before_payment_window_started() {
+    #[test]
+    fn rejects_transactions_before_payment_window_started() {
         let payment_started_at = Utc::now();
-        let service = PaymentService::new(FixedTimeVerifier {
-            confirmed_at: payment_started_at - Duration::seconds(1),
-        });
         let request = PaymentVerificationRequest {
             order_id: Uuid::new_v4(),
             chain: PaymentChain::Erc20,
@@ -746,19 +657,16 @@ mod tests {
             submitted_at: payment_started_at + Duration::minutes(1),
             expires_at: payment_started_at + Duration::minutes(30),
         };
-
+        let outcome = make_outcome(&request, payment_started_at - Duration::seconds(1));
         assert_eq!(
-            service.verify_tx(request).await.unwrap_err(),
+            validate_outcome(outcome, &request).unwrap_err(),
             PaymentVerificationError::OldTransaction
         );
     }
 
-    #[tokio::test]
-    async fn rejects_transactions_confirmed_well_after_user_submission() {
+    #[test]
+    fn rejects_transactions_confirmed_well_after_user_submission() {
         let submitted_at = Utc::now();
-        let service = PaymentService::new(FixedTimeVerifier {
-            confirmed_at: submitted_at + Duration::minutes(3),
-        });
         let request = PaymentVerificationRequest {
             order_id: Uuid::new_v4(),
             chain: PaymentChain::Erc20,
@@ -769,19 +677,16 @@ mod tests {
             submitted_at,
             expires_at: submitted_at + Duration::minutes(29),
         };
-
+        let outcome = make_outcome(&request, submitted_at + Duration::minutes(3));
         assert_eq!(
-            service.verify_tx(request).await.unwrap_err(),
+            validate_outcome(outcome, &request).unwrap_err(),
             PaymentVerificationError::TransactionAfterSubmission
         );
     }
 
-    #[tokio::test]
-    async fn allows_transactions_within_clock_skew_tolerance() {
+    #[test]
+    fn allows_transactions_within_clock_skew_tolerance() {
         let submitted_at = Utc::now();
-        let service = PaymentService::new(FixedTimeVerifier {
-            confirmed_at: submitted_at + Duration::seconds(30),
-        });
         let request = PaymentVerificationRequest {
             order_id: Uuid::new_v4(),
             chain: PaymentChain::Erc20,
@@ -792,7 +697,7 @@ mod tests {
             submitted_at,
             expires_at: submitted_at + Duration::minutes(29),
         };
-
-        assert!(service.verify_tx(request).await.is_ok());
+        let outcome = make_outcome(&request, submitted_at + Duration::seconds(30));
+        assert!(validate_outcome(outcome, &request).is_ok());
     }
 }

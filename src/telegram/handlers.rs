@@ -64,7 +64,7 @@ pub(crate) async fn handle_message(
         user_id = user_id.0 as i64,
         chat_id = %msg.chat.id,
         message_kind = message_kind(&msg),
-        session_step = current_step.unwrap_or("none"),
+        order_status = current_step.unwrap_or("none"),
         "telegram message received"
     );
     expire_stale_orders_for_user(&pool, user_id).await;
@@ -155,19 +155,10 @@ pub(crate) async fn handle_callback(
         chat_id,
         message_id: message.id(),
     };
-    let current_step = {
-        let order = orders(&pool)
-            .get_unpaid(query.from.id.0 as i64)
-            .await
-            .ok()
-            .flatten();
-        order.map(|o| o.status.as_str().to_string())
-    };
     info!(
         user_id = query.from.id.0 as i64,
         chat_id = %chat_id,
         callback = query.data.as_deref().unwrap_or("<none>"),
-        session_step = current_step.as_deref().unwrap_or("none"),
         "telegram callback received"
     );
 
@@ -1579,8 +1570,7 @@ async fn process_edit_payment_tx(
                 .await
                 .map(|_| ());
         };
-        let verifier = crate::payment::ChainPaymentVerifier::from_config(config);
-        let service = crate::payment::PaymentService::new(verifier);
+        let verifier = crate::payment::ChainPaymentVerifier::new(config.shared_config());
         let request = crate::payment::PaymentVerificationRequest {
             order_id: order.id,
             chain,
@@ -1591,7 +1581,7 @@ async fn process_edit_payment_tx(
             submitted_at: chrono::Utc::now(),
             expires_at,
         };
-        if let Err(error) = super::payment::verify_payment_with_retries(&service, request).await {
+        if let Err(error) = super::payment::verify_payment_with_retries(&verifier, request).await {
             return bot
                 .send_message(
                     chat_id,

@@ -12,7 +12,9 @@ use tokio::{process::Command, time::timeout};
 use uuid::Uuid;
 
 use crate::{
-    config::GenerationProviderName, models::WebsiteInput, validation::DEFAULT_CONTRACT_ADDRESS,
+    config::{Config, GenerationProviderName},
+    models::WebsiteInput,
+    validation::DEFAULT_CONTRACT_ADDRESS,
 };
 
 const AGENT_PROMPT_FILE_NAME: &str = "agent-prompt.md";
@@ -60,18 +62,39 @@ impl GenerationError {
     }
 }
 
+struct CliProvider {
+    name: &'static str,
+    command: String,
+    args_template: String,
+    timeout: Duration,
+}
+
 pub struct GenerationRouter {
-    providers: Vec<CliGenerationProvider>,
+    providers: Vec<CliProvider>,
 }
 
 impl GenerationRouter {
-    pub fn new(
-        primary: GenerationProviderName,
-        gemini: CliGenerationProvider,
-        codex: CliGenerationProvider,
-        claude: CliGenerationProvider,
-    ) -> Self {
-        let providers = match primary {
+    pub fn from_config(config: &Config) -> Self {
+        let timeout = Duration::from_secs(config.agent_timeout_seconds);
+        let gemini = CliProvider {
+            name: "gemini",
+            command: config.gemini_agent_command.clone(),
+            args_template: config.gemini_agent_args.clone(),
+            timeout,
+        };
+        let codex = CliProvider {
+            name: "codex",
+            command: config.codex_agent_command.clone(),
+            args_template: config.codex_agent_args.clone(),
+            timeout,
+        };
+        let claude = CliProvider {
+            name: "claude",
+            command: config.claude_agent_command.clone(),
+            args_template: config.claude_agent_args.clone(),
+            timeout,
+        };
+        let providers = match config.generation_primary_provider {
             GenerationProviderName::Gemini => vec![gemini, codex, claude],
             GenerationProviderName::Codex => vec![codex, gemini, claude],
             GenerationProviderName::Claude => vec![claude, gemini, codex],
@@ -89,18 +112,17 @@ impl GenerationRouter {
         let mut last_error = None;
         let total = self.providers.len();
         for (i, provider) in self.providers.iter().enumerate() {
-            let name = provider.name();
             tracing::info!(
-                provider = name,
+                provider = provider.name,
                 index = i + 1,
                 total,
                 order_id = %request.order_id,
                 "starting generation with provider"
             );
-            match provider.generate(request).await {
+            match run_cli_provider(provider, request).await {
                 Ok(result) => {
                     tracing::info!(
-                        provider = name,
+                        provider = provider.name,
                         order_id = %request.order_id,
                         "generation succeeded"
                     );
@@ -108,7 +130,7 @@ impl GenerationRouter {
                 }
                 Err(error) if error.is_provider_recoverable() => {
                     tracing::warn!(
-                        provider = name,
+                        provider = provider.name,
                         order_id = %request.order_id,
                         error = %error,
                         "provider failed (recoverable), switching to next provider"
@@ -118,7 +140,7 @@ impl GenerationRouter {
                 }
                 Err(error) => {
                     tracing::error!(
-                        provider = name,
+                        provider = provider.name,
                         order_id = %request.order_id,
                         error = %error,
                         "provider failed (non-recoverable)"
@@ -135,104 +157,62 @@ impl GenerationRouter {
     }
 }
 
-pub struct CliGenerationProvider {
-    name: &'static str,
-    command: String,
-    args_template: String,
-    timeout: Duration,
-}
-
-impl CliGenerationProvider {
-    pub fn gemini(command: String, args_template: String, timeout_seconds: u64) -> Self {
-        Self {
-            name: "gemini",
-            command,
-            args_template,
-            timeout: Duration::from_secs(timeout_seconds),
+async fn run_cli_provider(
+    provider: &CliProvider,
+    request: &SiteGenerationRequest,
+) -> Result<SiteGenerationResult, GenerationError> {
+    let prompt = agent_prompt(request, provider.name)?;
+    let prompt_file = request.output_dir.join(AGENT_PROMPT_FILE_NAME);
+    fs::write(&prompt_file, &prompt).map_err(|error| {
+        GenerationError::Failed(format!("write agent prompt failed: {error}"))
+    })?;
+    let done_file = request.output_dir.join(".agent_done.json");
+    match fs::remove_file(&done_file) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(GenerationError::Failed(format!(
+                "remove stale done file failed: {error}"
+            )));
         }
     }
 
-    pub fn codex(command: String, args_template: String, timeout_seconds: u64) -> Self {
-        Self {
-            name: "codex",
-            command,
-            args_template,
-            timeout: Duration::from_secs(timeout_seconds),
-        }
-    }
+    let args = render_agent_args(&provider.args_template, &prompt)?;
 
-    pub fn claude(command: String, args_template: String, timeout_seconds: u64) -> Self {
-        Self {
-            name: "claude",
-            command,
-            args_template,
-            timeout: Duration::from_secs(timeout_seconds),
-        }
-    }
-}
+    tracing::info!(
+        provider = provider.name,
+        command = %provider.command,
+        output_dir = %request.output_dir.display(),
+        timeout_secs = provider.timeout.as_secs(),
+        "launching CLI agent"
+    );
 
-impl CliGenerationProvider {
-    pub fn name(&self) -> &'static str {
-        self.name
-    }
+    let mut command = Command::new(&provider.command);
+    command
+        .args(args)
+        .current_dir(&request.output_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    pub async fn generate(
-        &self,
-        request: &SiteGenerationRequest,
-    ) -> Result<SiteGenerationResult, GenerationError> {
-        let prompt = agent_prompt(request, self.name)?;
-        let prompt_file = request.output_dir.join(AGENT_PROMPT_FILE_NAME);
-        fs::write(&prompt_file, &prompt).map_err(|error| {
-            GenerationError::Failed(format!("write agent prompt failed: {error}"))
-        })?;
-        let done_file = request.output_dir.join(".agent_done.json");
-        match fs::remove_file(&done_file) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(GenerationError::Failed(format!(
-                    "remove stale done file failed: {error}"
-                )));
-            }
-        }
+    let output = timeout(provider.timeout, command.output())
+        .await
+        .map_err(|_| GenerationError::ProviderUnavailable)?
+        .map_err(|error| map_provider_spawn_error(error, provider.name))?;
 
-        let args = render_agent_args(&self.args_template, &prompt)?;
-
-        tracing::info!(
-            provider = self.name,
-            command = %self.command,
-            output_dir = %request.output_dir.display(),
-            timeout_secs = self.timeout.as_secs(),
-            "launching CLI agent"
-        );
-
-        let mut command = Command::new(&self.command);
-        command
-            .args(args)
-            .current_dir(&request.output_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let output = timeout(self.timeout, command.output())
-            .await
-            .map_err(|_| GenerationError::ProviderUnavailable)?
-            .map_err(|error| map_provider_spawn_error(error, self.name))?;
-
-        if output.status.success() {
-            validate_agent_output(request, self.name, &done_file)?;
-            Ok(SiteGenerationResult {
-                provider_name: self.name.to_string(),
-                output_dir: request.output_dir.clone(),
-            })
+    if output.status.success() {
+        validate_agent_output(request, provider.name, &done_file)?;
+        Ok(SiteGenerationResult {
+            provider_name: provider.name.to_string(),
+            output_dir: request.output_dir.clone(),
+        })
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        if stderr.contains("quota") || stderr.contains("limit") {
+            Err(GenerationError::QuotaExhausted)
+        } else if stderr.contains("rate") {
+            Err(GenerationError::RateLimited)
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
-            if stderr.contains("quota") || stderr.contains("limit") {
-                Err(GenerationError::QuotaExhausted)
-            } else if stderr.contains("rate") {
-                Err(GenerationError::RateLimited)
-            } else {
-                Err(GenerationError::Failed(stderr))
-            }
+            Err(GenerationError::Failed(stderr))
         }
     }
 }

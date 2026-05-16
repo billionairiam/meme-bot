@@ -116,6 +116,10 @@ impl TelegramUiConfig {
             crate::models::PaymentChain::Sol => &self.usdt_sol_address,
         }
     }
+
+    pub(crate) fn shared_config(&self) -> Arc<Config> {
+        Arc::clone(&self.config)
+    }
 }
 
 fn build_template_options(

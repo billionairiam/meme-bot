@@ -8,7 +8,7 @@ use crate::{
     api_client::HttpClientPagesDeployer,
     config::Config,
     deployment::SiteDeployer,
-    generation::{CliGenerationProvider, GenerationRouter},
+    generation::GenerationRouter,
     queue::{GenerationQueue, GenerationQueueConfig, UserNotification},
 };
 
@@ -26,24 +26,7 @@ impl App {
         &self,
         notification_tx: Option<mpsc::UnboundedSender<UserNotification>>,
     ) -> GenerationQueue {
-        let router = Arc::new(GenerationRouter::new(
-            self.config.generation_primary_provider,
-            CliGenerationProvider::gemini(
-                self.config.gemini_agent_command.clone(),
-                self.config.gemini_agent_args.clone(),
-                self.config.agent_timeout_seconds,
-            ),
-            CliGenerationProvider::codex(
-                self.config.codex_agent_command.clone(),
-                self.config.codex_agent_args.clone(),
-                self.config.agent_timeout_seconds,
-            ),
-            CliGenerationProvider::claude(
-                self.config.claude_agent_command.clone(),
-                self.config.claude_agent_args.clone(),
-                self.config.agent_timeout_seconds,
-            ),
-        ));
+        let router = Arc::new(GenerationRouter::from_config(&self.config));
 
         let deployer: Option<Arc<dyn SiteDeployer>> = match (
             self.config.api_service_base_url.as_deref(),

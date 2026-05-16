@@ -9,8 +9,8 @@ use crate::{
     db,
     models::PaymentChain,
     payment::{
-        ChainPaymentVerifier, PaymentService, PaymentVerificationError, PaymentVerificationOutcome,
-        PaymentVerificationRequest, PaymentVerifier,
+        ChainPaymentVerifier, PaymentVerificationError, PaymentVerificationOutcome,
+        PaymentVerificationRequest,
     },
 };
 
@@ -117,8 +117,7 @@ impl<'a> PaymentTxProcess<'a> {
                     .map(|_| ());
             }
 
-            let verifier = ChainPaymentVerifier::from_config(config);
-            let service = PaymentService::new(verifier);
+            let verifier = ChainPaymentVerifier::new(config.shared_config());
             let tx_submitted_at = chrono::Utc::now();
 
             // Reconstruct payment window from order
@@ -143,7 +142,7 @@ impl<'a> PaymentTxProcess<'a> {
                 submitted_at: tx_submitted_at,
                 expires_at: payment_expires_at,
             };
-            let verification = verify_payment_with_retries(&service, verify_request).await;
+            let verification = verify_payment_with_retries(&verifier, verify_request).await;
 
             match verification {
                 Ok(outcome) => {
@@ -267,13 +266,10 @@ impl<'a> PaymentTxProcess<'a> {
     }
 }
 
-pub(crate) async fn verify_payment_with_retries<V>(
-    service: &PaymentService<V>,
+pub(crate) async fn verify_payment_with_retries(
+    verifier: &ChainPaymentVerifier,
     request: PaymentVerificationRequest,
-) -> Result<PaymentVerificationOutcome, PaymentVerificationError>
-where
-    V: PaymentVerifier,
-{
+) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
     let mut last_error = None;
     for attempt in 1..=EXTERNAL_STEP_MAX_ATTEMPTS {
         info!(
@@ -282,7 +278,7 @@ where
             attempt,
             "checking payment transaction"
         );
-        match service.verify_tx(request.clone()).await {
+        match verifier.verify_tx(&request).await {
             Ok(outcome) => {
                 info!(
                     order_id = %request.order_id,
