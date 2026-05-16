@@ -108,44 +108,16 @@ This is a meme token. Nothing on this site is financial advice. Do your own rese
 
 ---
 
-## Functional Requirements
-
-The site must include:
-
-- Token name
-- Ticker display
-- Contract address display and copy button only if a contract is provided
-- X / Twitter link only if provided
-- Telegram link only if provided
-- DEXTools link only if provided
-- Responsive mobile design
-- Local logo usage
-- No backend
-- No database
-- No build step
-
-Write files directly into the current output directory.
-
-At minimum create:
-
-- index.html
-- style.css
-- script.js
-- .agent_done.json
-
-You may create extra local SVG/CSS assets only if they improve the design.
-
-Do not use external images.
-Do not use icon CDNs.
-Do not reference files that do not exist.
+## Fonts Requirements
 
 Google Fonts are allowed if useful.
 Choose stunning fonts to make the meme web more attract
 ---
 
+
 ## Completion
 
-Only after the website is fully written and ready to deploy, create:
+Only after the website is fully written and ready to deploy, create .agent_done.json:
 
 ```json
 {
@@ -153,3 +125,5 @@ Only after the website is fully written and ready to deploy, create:
   "status": "completed",
   "entrypoint": "index.html"
 }
+
+```

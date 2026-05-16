@@ -83,6 +83,9 @@ impl GenerationRouter {
         &self,
         request: &SiteGenerationRequest,
     ) -> Result<SiteGenerationResult, GenerationError> {
+        prepare_output_dir(&request.output_dir)?;
+        copy_logo_to_output_dir(request)?;
+
         let mut last_error = None;
         let total = self.providers.len();
         for (i, provider) in self.providers.iter().enumerate() {
@@ -177,15 +180,21 @@ impl CliGenerationProvider {
         &self,
         request: &SiteGenerationRequest,
     ) -> Result<SiteGenerationResult, GenerationError> {
-        prepare_output_dir(&request.output_dir)?;
-        copy_logo_to_output_dir(request)?;
-
         let prompt = agent_prompt(request, self.name)?;
         let prompt_file = request.output_dir.join(AGENT_PROMPT_FILE_NAME);
         fs::write(&prompt_file, &prompt).map_err(|error| {
             GenerationError::Failed(format!("write agent prompt failed: {error}"))
         })?;
         let done_file = request.output_dir.join(".agent_done.json");
+        match fs::remove_file(&done_file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(GenerationError::Failed(format!(
+                    "remove stale done file failed: {error}"
+                )));
+            }
+        }
 
         let args = render_agent_args(&self.args_template, &prompt)?;
 
