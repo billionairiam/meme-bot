@@ -25,6 +25,14 @@ use super::payment::{PaymentTxProcess, process_payment_tx_context};
 use super::screens::*;
 use super::types::*;
 
+fn users(pool: &SqlitePool) -> db::UserStore {
+    db::UserStore::new(pool.clone())
+}
+
+fn orders(pool: &SqlitePool) -> db::OrderStore {
+    db::OrderStore::new(pool.clone())
+}
+
 pub(crate) async fn handle_message(
     bot: Bot,
     msg: Message,
@@ -44,7 +52,8 @@ pub(crate) async fn handle_message(
         return show_main_menu(&bot, msg.chat.id, &config).await;
     };
     let user_id = user.id;
-    let current_order = db::get_unpaid_order(&pool, user_id.0 as i64)
+    let current_order = orders(&pool)
+        .get_unpaid(user_id.0 as i64)
         .await
         .ok()
         .flatten();
@@ -127,7 +136,8 @@ pub(crate) async fn handle_callback(
         message_id: message.id(),
     };
     let current_step = {
-        let order = db::get_unpaid_order(&pool, query.from.id.0 as i64)
+        let order = orders(&pool)
+            .get_unpaid(query.from.id.0 as i64)
             .await
             .ok()
             .flatten();
@@ -410,22 +420,23 @@ async fn start_new_order(
     template_id: Option<&str>,
     site_price_usdt: rust_decimal::Decimal,
 ) -> anyhow::Result<uuid::Uuid> {
-    let db_user_id = db::upsert_user(
-        pool,
-        telegram_user_id.0 as i64,
-        username,
-        first_name,
-        last_name,
-        true,
-    )
-    .await?;
+    let db_user_id = users(pool)
+        .upsert(
+            telegram_user_id.0 as i64,
+            username,
+            first_name,
+            last_name,
+            true,
+        )
+        .await?;
 
-    if db::has_unpaid_order(pool, telegram_user_id.0 as i64).await? {
+    if orders(pool).has_unpaid(telegram_user_id.0 as i64).await? {
         anyhow::bail!("has pending order");
     }
 
-    let order_id =
-        db::create_order(pool, db_user_id, build_mode, template_id, site_price_usdt).await?;
+    let order_id = orders(pool)
+        .create(db_user_id, build_mode, template_id, site_price_usdt)
+        .await?;
     info!(
         user_id = telegram_user_id.0 as i64,
         order_id = %order_id,
@@ -436,7 +447,10 @@ async fn start_new_order(
 }
 
 async fn expire_stale_orders_for_user(pool: &SqlitePool, user_id: UserId) {
-    match db::expire_stale_pending_orders_for_user(pool, user_id.0 as i64).await {
+    match orders(pool)
+        .expire_stale_pending_for_user(user_id.0 as i64)
+        .await
+    {
         Ok(expired) if expired > 0 => {
             info!(
                 user_id = user_id.0 as i64,
@@ -454,7 +468,7 @@ async fn expire_stale_orders_for_user(pool: &SqlitePool, user_id: UserId) {
 }
 
 async fn cancel_user_order(pool: &SqlitePool, user_id: UserId) {
-    match db::cancel_order_for_user(pool, user_id.0 as i64, None).await {
+    match orders(pool).cancel_for_user(user_id.0 as i64, None).await {
         Ok(cancelled) => {
             info!(
                 user_id = user_id.0 as i64,
@@ -477,7 +491,7 @@ async fn handle_order_step(
     config: Arc<TelegramUiConfig>,
     pool: &SqlitePool,
 ) -> ResponseResult<()> {
-    let order = match db::get_unpaid_order(pool, user_id.0 as i64).await {
+    let order = match orders(pool).get_unpaid(user_id.0 as i64).await {
         Ok(Some(order)) => order,
         Ok(None) => {
             // No active order — check if it's a TX hash for NeedPay order
@@ -517,14 +531,14 @@ async fn handle_order_step(
             let temp_id = uuid::Uuid::new_v4().to_string();
             match download_telegram_logo(&bot, &file_id, &temp_id).await {
                 Ok(local_path) => {
-                    if let Err(e) = db::update_order_field_and_status(
-                        pool,
-                        order_id,
-                        "logo_asset_path",
-                        &local_path,
-                        OrderStatus::NeedTicker,
-                    )
-                    .await
+                    if let Err(e) = orders(pool)
+                        .update_field_and_status(
+                            order_id,
+                            "logo_asset_path",
+                            &local_path,
+                            OrderStatus::NeedTicker,
+                        )
+                        .await
                     {
                         warn!(?e, %order_id, "failed to save logo");
                         return bot
@@ -576,14 +590,9 @@ async fn handle_order_step(
                     .await
                     .map(|_| ());
             }
-            if let Err(e) = db::update_order_field_and_status(
-                pool,
-                order_id,
-                "token_ticker",
-                &ticker,
-                OrderStatus::NeedName,
-            )
-            .await
+            if let Err(e) = orders(pool)
+                .update_field_and_status(order_id, "token_ticker", &ticker, OrderStatus::NeedName)
+                .await
             {
                 warn!(?e, %order_id, "failed to save ticker");
             }
@@ -610,14 +619,9 @@ async fn handle_order_step(
                     .await
                     .map(|_| ());
             }
-            if let Err(e) = db::update_order_field_and_status(
-                pool,
-                order_id,
-                "token_name",
-                text,
-                OrderStatus::NeedContract,
-            )
-            .await
+            if let Err(e) = orders(pool)
+                .update_field_and_status(order_id, "token_name", text, OrderStatus::NeedContract)
+                .await
             {
                 warn!(?e, %order_id, "failed to save token name");
             }
@@ -661,14 +665,9 @@ async fn handle_order_step(
                     .await
                     .map(|_| ());
             }
-            if let Err(e) = db::update_order_field_and_status(
-                pool,
-                order_id,
-                "contract_address",
-                text,
-                OrderStatus::NeedXLink,
-            )
-            .await
+            if let Err(e) = orders(pool)
+                .update_field_and_status(order_id, "contract_address", text, OrderStatus::NeedXLink)
+                .await
             {
                 warn!(?e, %order_id, "failed to save contract");
             }
@@ -701,14 +700,9 @@ async fn handle_order_step(
                     .await
                     .map(|_| ());
             }
-            if let Err(e) = db::update_order_field_and_status(
-                pool,
-                order_id,
-                "x_url",
-                text,
-                OrderStatus::NeedTme,
-            )
-            .await
+            if let Err(e) = orders(pool)
+                .update_field_and_status(order_id, "x_url", text, OrderStatus::NeedTme)
+                .await
             {
                 warn!(?e, %order_id, "failed to save x_url");
             }
@@ -744,14 +738,9 @@ async fn handle_order_step(
                     .await
                     .map(|_| ());
             }
-            if let Err(e) = db::update_order_field_and_status(
-                pool,
-                order_id,
-                "telegram_url",
-                text,
-                OrderStatus::NeedDomain,
-            )
-            .await
+            if let Err(e) = orders(pool)
+                .update_field_and_status(order_id, "telegram_url", text, OrderStatus::NeedDomain)
+                .await
             {
                 warn!(?e, %order_id, "failed to save telegram_url");
             }
@@ -848,19 +837,15 @@ async fn handle_domain_step(
     if config.skip_domain_purchase {
         warn!(user_id = user_id.0 as i64, %domain, "SKIP_DOMAIN_PURCHASE: accepting domain without quote");
         let total = order.site_price_usdt;
-        if let Err(e) =
-            db::set_order_domain_pricing(pool, order_id, rust_decimal::Decimal::ZERO, total).await
+        if let Err(e) = orders(pool)
+            .set_domain_pricing(order_id, rust_decimal::Decimal::ZERO, total)
+            .await
         {
             warn!(?e, %order_id, "failed to set domain pricing");
         }
-        if let Err(e) = db::update_order_field_and_status(
-            pool,
-            order_id,
-            "requested_domain",
-            domain,
-            OrderStatus::NeedPay,
-        )
-        .await
+        if let Err(e) = orders(pool)
+            .update_field_and_status(order_id, "requested_domain", domain, OrderStatus::NeedPay)
+            .await
         {
             warn!(?e, %order_id, "failed to update domain/status");
         }
@@ -896,8 +881,9 @@ async fn handle_domain_step(
     match quote_domain_with_retries(registrar.as_ref(), domain).await {
         Ok(quote) if quote.available && !quote.is_premium => {
             let total = order.site_price_usdt + quote.price_usd;
-            if let Err(e) =
-                db::set_order_domain_pricing(pool, order_id, quote.price_usd, total).await
+            if let Err(e) = orders(pool)
+                .set_domain_pricing(order_id, quote.price_usd, total)
+                .await
             {
                 warn!(?e, %order_id, "failed to set domain pricing");
                 return bot
@@ -906,14 +892,14 @@ async fn handle_domain_step(
                     .await
                     .map(|_| ());
             }
-            if let Err(e) = db::update_order_field_and_status(
-                pool,
-                order_id,
-                "requested_domain",
-                &quote.domain,
-                OrderStatus::NeedPay,
-            )
-            .await
+            if let Err(e) = orders(pool)
+                .update_field_and_status(
+                    order_id,
+                    "requested_domain",
+                    &quote.domain,
+                    OrderStatus::NeedPay,
+                )
+                .await
             {
                 warn!(?e, %order_id, "failed to update domain/status");
             }
@@ -946,9 +932,9 @@ async fn handle_domain_step(
             } else {
                 // Store alternatives in DB
                 if let Ok(json) = serde_json::to_string(&alternatives) {
-                    let _ =
-                        db::update_order_field(pool, order_id, "alternative_domains_json", &json)
-                            .await;
+                    let _ = orders(pool)
+                        .update_field(order_id, "alternative_domains_json", &json)
+                        .await;
                 }
                 bot.send_message(
                     chat_id,
@@ -970,7 +956,7 @@ async fn handle_optional_step_skip(
     field: &str,
     pool: &SqlitePool,
 ) -> ResponseResult<()> {
-    let order = match db::get_unpaid_order(pool, user_id.0 as i64).await {
+    let order = match orders(pool).get_unpaid(user_id.0 as i64).await {
         Ok(Some(order)) => order,
         Ok(None) => {
             return edit_screen(
@@ -1038,8 +1024,9 @@ async fn handle_optional_step_skip(
         .await;
     }
 
-    if let Err(e) =
-        db::update_order_field_and_status(pool, order.id, db_field, value, next_status).await
+    if let Err(e) = orders(pool)
+        .update_field_and_status(order.id, db_field, value, next_status)
+        .await
     {
         warn!(?e, order_id = %order.id, field, "failed to skip optional field");
         return edit_screen(
@@ -1064,7 +1051,7 @@ async fn handle_token_chain_selection(
     let Some(chain) = TokenChain::from_db(value) else {
         return edit_screen(bot, target, "<b>Unknown chain.</b>", token_chain_keyboard()).await;
     };
-    let order = match db::get_unpaid_order(pool, user_id.0 as i64).await {
+    let order = match orders(pool).get_unpaid(user_id.0 as i64).await {
         Ok(Some(order)) => order,
         _ => {
             return edit_screen(
@@ -1085,14 +1072,14 @@ async fn handle_token_chain_selection(
         )
         .await;
     }
-    if let Err(error) = db::update_order_field_and_status(
-        pool,
-        order.id,
-        "token_chain",
-        chain.as_str(),
-        OrderStatus::NeedLogo,
-    )
-    .await
+    if let Err(error) = orders(pool)
+        .update_field_and_status(
+            order.id,
+            "token_chain",
+            chain.as_str(),
+            OrderStatus::NeedLogo,
+        )
+        .await
     {
         warn!(?error, order_id = %order.id, "failed to save token chain");
         return edit_screen(bot, target, "<b>Save failed.</b>", cancel_keyboard()).await;
@@ -1119,7 +1106,10 @@ async fn handle_edit_select(
     let Ok(order_id) = uuid::Uuid::parse_str(order_id) else {
         return edit_screen(bot, target, "<b>Invalid order.</b>", main_menu_keyboard()).await;
     };
-    let order = match db::get_completed_order_for_user(pool, user_id.0 as i64, order_id).await {
+    let order = match orders(pool)
+        .get_completed_for_user(user_id.0 as i64, order_id)
+        .await
+    {
         Ok(Some(order)) => order,
         _ => {
             return edit_screen(
@@ -1132,17 +1122,19 @@ async fn handle_edit_select(
         }
     };
     if order.edit_status == "none"
-        && let Err(error) = db::start_edit_draft(pool, order_id).await
+        && let Err(error) = orders(pool).start_edit_draft(order_id).await
     {
         warn!(?error, %order_id, "failed to start edit draft");
         return edit_screen(bot, target, "<b>Edit failed.</b>", main_menu_keyboard()).await;
     }
-    let order = db::get_order(pool, order_id)
+    let order = orders(pool)
+        .get(order_id)
         .await
         .ok()
         .flatten()
         .unwrap_or(order);
-    let free_used = db::user_edit_success_count(pool, user_id.0 as i64)
+    let free_used = orders(pool)
+        .user_edit_success_count(user_id.0 as i64)
         .await
         .unwrap_or(0);
     edit_screen(
@@ -1171,7 +1163,10 @@ async fn handle_edit_field_select(
     if !matches!(field, "contract" | "x" | "telegram") {
         return edit_screen(bot, target, "<b>Invalid field.</b>", main_menu_keyboard()).await;
     }
-    match db::get_completed_order_for_user(pool, user_id.0 as i64, order_id).await {
+    match orders(pool)
+        .get_completed_for_user(user_id.0 as i64, order_id)
+        .await
+    {
         Ok(Some(_)) => {}
         _ => {
             return edit_screen(
@@ -1183,7 +1178,10 @@ async fn handle_edit_field_select(
             .await;
         }
     }
-    if let Err(error) = db::set_pending_edit_field(pool, order_id, Some(field)).await {
+    if let Err(error) = orders(pool)
+        .set_pending_edit_field(order_id, Some(field))
+        .await
+    {
         warn!(?error, %order_id, field, "failed to select edit field");
         return edit_screen(bot, target, "<b>Edit failed.</b>", main_menu_keyboard()).await;
     }
@@ -1212,13 +1210,14 @@ async fn handle_edit_cancel(
     let Ok(order_id) = uuid::Uuid::parse_str(order_id) else {
         return edit_screen(bot, target, "<b>Invalid order.</b>", main_menu_keyboard()).await;
     };
-    if db::get_completed_order_for_user(pool, user_id.0 as i64, order_id)
+    if orders(pool)
+        .get_completed_for_user(user_id.0 as i64, order_id)
         .await
         .ok()
         .flatten()
         .is_some()
     {
-        let _ = db::clear_edit_draft(pool, order_id).await;
+        let _ = orders(pool).clear_edit_draft(order_id).await;
     }
     edit_screen(
         bot,
@@ -1240,7 +1239,10 @@ async fn handle_edit_apply(
     let Ok(order_id) = uuid::Uuid::parse_str(order_id) else {
         return edit_screen(bot, target, "<b>Invalid order.</b>", main_menu_keyboard()).await;
     };
-    let order = match db::get_completed_order_for_user(pool, user_id.0 as i64, order_id).await {
+    let order = match orders(pool)
+        .get_completed_for_user(user_id.0 as i64, order_id)
+        .await
+    {
         Ok(Some(order)) => order,
         _ => {
             return edit_screen(
@@ -1254,13 +1256,13 @@ async fn handle_edit_apply(
     };
     match dry_run_edit(&order, config).await {
         Ok(0) => {
-            let _ = db::clear_edit_draft(pool, order_id).await;
+            let _ = orders(pool).clear_edit_draft(order_id).await;
             return edit_screen(bot, target, "<b>No changes.</b>", main_menu_keyboard()).await;
         }
         Ok(_) => {}
         Err(error) => {
             warn!(?error, %order_id, "edit dry-run failed");
-            let _ = db::mark_edit_manual_review(pool, order_id).await;
+            let _ = orders(pool).mark_edit_manual_review(order_id).await;
             return edit_screen(
                 bot,
                 target,
@@ -1271,14 +1273,15 @@ async fn handle_edit_apply(
         }
     }
 
-    let free_used = db::user_edit_success_count(pool, user_id.0 as i64)
+    let free_used = orders(pool)
+        .user_edit_success_count(user_id.0 as i64)
         .await
         .unwrap_or(0);
     if free_used < db::FREE_EDIT_LIMIT {
         return apply_edit_and_reply(bot, target, &order, config, pool).await;
     }
 
-    if let Err(error) = db::mark_edit_need_pay(pool, order_id).await {
+    if let Err(error) = orders(pool).mark_edit_need_pay(order_id).await {
         warn!(?error, %order_id, "failed to mark edit need pay");
         return edit_screen(bot, target, "<b>Edit failed.</b>", main_menu_keyboard()).await;
     }
@@ -1303,7 +1306,8 @@ async fn handle_edit_message(
     config: &TelegramUiConfig,
     pool: &SqlitePool,
 ) -> ResponseResult<bool> {
-    let Some(mut order) = db::get_active_edit_order(pool, user_id.0 as i64)
+    let Some(mut order) = orders(pool)
+        .get_active_edit(user_id.0 as i64)
         .await
         .ok()
         .flatten()
@@ -1332,19 +1336,24 @@ async fn handle_edit_message(
                 .await?;
             return Ok(true);
         }
-        if let Err(error) = db::update_pending_edit_value(pool, order.id, &field, text).await {
+        if let Err(error) = orders(pool)
+            .update_pending_edit_value(order.id, &field, text)
+            .await
+        {
             warn!(?error, order_id = %order.id, field, "failed to save edit value");
             bot.send_message(chat_id, "<b>Save failed.</b>")
                 .parse_mode(ParseMode::Html)
                 .await?;
             return Ok(true);
         }
-        order = db::get_order(pool, order.id)
+        order = orders(pool)
+            .get(order.id)
             .await
             .ok()
             .flatten()
             .unwrap_or(order);
-        let free_used = db::user_edit_success_count(pool, user_id.0 as i64)
+        let free_used = orders(pool)
+            .user_edit_success_count(user_id.0 as i64)
             .await
             .unwrap_or(0);
         bot.send_message(chat_id, edit_order_text(&order, free_used))
@@ -1423,7 +1432,7 @@ async fn apply_edit_and_reply(
     config: &TelegramUiConfig,
     pool: &SqlitePool,
 ) -> ResponseResult<()> {
-    if let Err(error) = db::mark_edit_applying(pool, order.id).await {
+    if let Err(error) = orders(pool).mark_edit_applying(order.id).await {
         warn!(?error, order_id = %order.id, "failed to mark edit applying");
         return edit_screen(bot, target, "<b>Edit failed.</b>", main_menu_keyboard()).await;
     }
@@ -1438,8 +1447,9 @@ async fn apply_edit_and_reply(
                 .pending_telegram_url
                 .as_deref()
                 .unwrap_or(DEFAULT_TELEGRAM_URL);
-            if let Err(error) =
-                db::mark_edit_success_and_update_fields(pool, order.id, contract, x, telegram).await
+            if let Err(error) = orders(pool)
+                .mark_edit_success_and_update_fields(order.id, contract, x, telegram)
+                .await
             {
                 warn!(?error, order_id = %order.id, "failed to record successful edit");
                 return edit_screen(
@@ -1460,7 +1470,7 @@ async fn apply_edit_and_reply(
         }
         Err(error) => {
             warn!(?error, order_id = %order.id, "failed to apply repo edit");
-            let _ = db::mark_edit_manual_review(pool, order.id).await;
+            let _ = orders(pool).mark_edit_manual_review(order.id).await;
             edit_screen(
                 bot,
                 target,
@@ -1482,7 +1492,7 @@ async fn process_edit_payment_tx(
     tx_hash: &str,
 ) -> ResponseResult<()> {
     let chain = order.edit_payment_chain.unwrap_or(PaymentChain::Erc20);
-    match db::tx_hash_already_used(pool, chain, tx_hash).await {
+    match orders(pool).tx_hash_already_used(chain, tx_hash).await {
         Ok(true) => {
             return bot
                 .send_message(chat_id, "<b>TX already used.</b>\nSend a new TX.")
@@ -1545,7 +1555,7 @@ async fn process_edit_payment_tx(
         }
     }
 
-    if let Err(error) = db::mark_edit_paid(pool, order.id, chain, tx_hash).await {
+    if let Err(error) = orders(pool).mark_edit_paid(order.id, chain, tx_hash).await {
         warn!(?error, order_id = %order.id, "failed to record edit payment");
         return bot
             .send_message(chat_id, "<b>Payment record failed.</b>\nContact admin.")
@@ -1553,7 +1563,8 @@ async fn process_edit_payment_tx(
             .await
             .map(|_| ());
     }
-    let order = db::get_order(pool, order.id)
+    let order = orders(pool)
+        .get(order.id)
         .await
         .ok()
         .flatten()
@@ -1580,8 +1591,9 @@ async fn apply_edit_and_send(
                 .pending_telegram_url
                 .as_deref()
                 .unwrap_or(DEFAULT_TELEGRAM_URL);
-            if let Err(error) =
-                db::mark_edit_success_and_update_fields(pool, order.id, contract, x, telegram).await
+            if let Err(error) = orders(pool)
+                .mark_edit_success_and_update_fields(order.id, contract, x, telegram)
+                .await
             {
                 warn!(?error, order_id = %order.id, "failed to record successful paid edit");
                 return bot
@@ -1605,7 +1617,7 @@ async fn apply_edit_and_send(
         }
         Err(error) => {
             warn!(?error, order_id = %order.id, "failed to apply paid repo edit");
-            let _ = db::mark_edit_manual_review(pool, order.id).await;
+            let _ = orders(pool).mark_edit_manual_review(order.id).await;
             bot.send_message(chat_id, "<b>Edit needs manual review.</b>\nContact admin.")
                 .parse_mode(ParseMode::Html)
                 .reply_markup(main_menu_keyboard())
@@ -1665,7 +1677,7 @@ async fn handle_continue_command(
     pool: &SqlitePool,
     _config: &TelegramUiConfig,
 ) -> ResponseResult<()> {
-    match db::get_unpaid_order(pool, user_id.0 as i64).await {
+    match orders(pool).get_unpaid(user_id.0 as i64).await {
         Ok(Some(order)) => continue_order_screen(bot, chat_id, &order).await,
         Ok(None) => bot
             .send_message(chat_id, "<b>No active order.</b>\nUse /create.")
@@ -1696,7 +1708,7 @@ async fn edit_payment_chain_and_ask_tx(
     address: &str,
     pool: &SqlitePool,
 ) -> ResponseResult<()> {
-    if let Ok(Some(edit_order)) = db::get_active_edit_order(pool, user_id.0 as i64).await
+    if let Ok(Some(edit_order)) = orders(pool).get_active_edit(user_id.0 as i64).await
         && edit_order.edit_status == "need_pay"
     {
         if address.trim().is_empty() {
@@ -1708,7 +1720,10 @@ async fn edit_payment_chain_and_ask_tx(
             )
             .await;
         }
-        let payment_window = match db::attach_edit_payment_chain(pool, edit_order.id, chain).await {
+        let payment_window = match orders(pool)
+            .attach_edit_payment_chain(edit_order.id, chain)
+            .await
+        {
             Ok(window) => window,
             Err(e) => {
                 warn!(?e, order_id = %edit_order.id, "failed to attach edit payment chain");
@@ -1736,7 +1751,7 @@ async fn edit_payment_chain_and_ask_tx(
         .await;
     }
 
-    let order = match db::get_unpaid_order(pool, user_id.0 as i64).await {
+    let order = match orders(pool).get_unpaid(user_id.0 as i64).await {
         Ok(Some(order)) => order,
         Ok(None) => {
             return edit_screen(
@@ -1786,7 +1801,7 @@ async fn edit_payment_chain_and_ask_tx(
     let order_id = order.id;
     let total = order.total_usdt;
 
-    let payment_window = match db::attach_payment_chain(pool, order_id, chain).await {
+    let payment_window = match orders(pool).attach_payment_chain(order_id, chain).await {
         Ok(window) => {
             info!(
                 user_id = user_id.0 as i64,
@@ -1827,7 +1842,7 @@ async fn handle_alternative_domain_selection(
     _config: &TelegramUiConfig,
     pool: &SqlitePool,
 ) -> ResponseResult<()> {
-    let order = match db::get_unpaid_order(pool, user_id.0 as i64).await {
+    let order = match orders(pool).get_unpaid(user_id.0 as i64).await {
         Ok(Some(order)) => order,
         Ok(None) => {
             return edit_screen(
@@ -1869,7 +1884,10 @@ async fn handle_alternative_domain_selection(
     let order_id = order.id;
     let total = order.site_price_usdt + quote.price_usd;
 
-    if let Err(e) = db::set_order_domain_pricing(pool, order_id, quote.price_usd, total).await {
+    if let Err(e) = orders(pool)
+        .set_domain_pricing(order_id, quote.price_usd, total)
+        .await
+    {
         warn!(?e, %order_id, "failed to set domain pricing for alt domain");
         return edit_screen(
             bot,
@@ -1879,19 +1897,16 @@ async fn handle_alternative_domain_selection(
         )
         .await;
     }
-    if let Err(e) = db::update_order_field_and_status(
-        pool,
-        order_id,
-        "requested_domain",
-        domain,
-        OrderStatus::NeedPay,
-    )
-    .await
+    if let Err(e) = orders(pool)
+        .update_field_and_status(order_id, "requested_domain", domain, OrderStatus::NeedPay)
+        .await
     {
         warn!(?e, %order_id, "failed to update domain/status for alt domain");
     }
     // Clear stored alternatives
-    let _ = db::clear_order_field(pool, order_id, "alternative_domains_json").await;
+    let _ = orders(pool)
+        .clear_field(order_id, "alternative_domains_json")
+        .await;
 
     edit_screen(
         bot,

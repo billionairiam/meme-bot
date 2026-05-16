@@ -44,6 +44,7 @@ pub(crate) async fn process_payment_tx_context(
         amount_usdt,
         tx_hash,
     } = request;
+    let orders = db::OrderStore::new(pool.clone());
     info!(
         user_id = user_id.0 as i64,
         order_id = %order_id,
@@ -53,7 +54,7 @@ pub(crate) async fn process_payment_tx_context(
     );
 
     // Check if already paid
-    if let Ok(Some(order)) = db::get_order(pool, order_id).await
+    if let Ok(Some(order)) = orders.get(order_id).await
         && (order.status == crate::models::OrderStatus::PaidAndGenerating
             || order.status == crate::models::OrderStatus::Done)
     {
@@ -70,7 +71,7 @@ pub(crate) async fn process_payment_tx_context(
             .map(|_| ());
     }
 
-    match db::tx_hash_already_used(pool, chain, tx_hash).await {
+    match orders.tx_hash_already_used(chain, tx_hash).await {
         Ok(true) => {
             warn!(
                 user_id = user_id.0 as i64,
@@ -133,7 +134,7 @@ pub(crate) async fn process_payment_tx_context(
         let tx_submitted_at = chrono::Utc::now();
 
         // Reconstruct payment window from order
-        let order = db::get_order(pool, order_id).await.ok().flatten();
+        let order = orders.get(order_id).await.ok().flatten();
         let payment_expires_at = order
             .as_ref()
             .and_then(|o| o.payment_expires_at)
@@ -194,7 +195,7 @@ pub(crate) async fn process_payment_tx_context(
 
     // Mark order as paid — this transitions to paid_and_generating.
     // The queue worker will pick it up automatically.
-    if let Err(error) = db::mark_order_paid(pool, order_id, chain, tx_hash).await {
+    if let Err(error) = orders.mark_paid(order_id, chain, tx_hash).await {
         warn!(?error, order_id = %order_id, "failed to mark order paid");
         return bot
             .send_message(chat_id, "⚠️ <b>Payment record failed.</b>\nContact admin.")
@@ -212,7 +213,8 @@ pub(crate) async fn process_payment_tx_context(
 
     // Bind domain to Cloudflare: create zone + set nameservers.
     // This runs early so the zone can propagate while the site is being generated.
-    let domain = db::get_order(pool, order_id)
+    let domain = orders
+        .get(order_id)
         .await
         .ok()
         .flatten()

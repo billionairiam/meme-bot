@@ -50,20 +50,23 @@ async fn main() -> anyhow::Result<()> {
         .run(&pool)
         .await
         .context("run migrations")?;
-    meme_bot::db::normalize_sqlite_uuid_storage(&pool)
+    let stores = meme_bot::db::DbStores::new(pool.clone());
+    stores
+        .normalize_sqlite_uuid_storage()
         .await
         .context("normalize sqlite uuid storage")?;
-    let synced_templates = meme_bot::db::sync_template_catalog(
-        &pool,
-        &config.template_preview_domain,
-        &config.template_preview_base_url,
-        &config.template_prices_usdt,
-    )
-    .await
-    .context("sync template catalog")?;
+    let synced_templates = stores
+        .templates
+        .sync_catalog(
+            &config.template_preview_domain,
+            &config.template_preview_base_url,
+            &config.template_prices_usdt,
+        )
+        .await
+        .context("sync template catalog")?;
     info!(synced_templates, "template catalog synced");
 
-    match meme_bot::db::reset_generating_orders_on_startup(&pool).await {
+    match stores.orders.reset_generating_on_startup().await {
         Ok(0) => {}
         Ok(count) => info!(
             count,

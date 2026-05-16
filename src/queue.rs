@@ -6,7 +6,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
-    db,
+    db::{OrderStore, WebsiteStore},
     deployment::{DeploymentRequest, SiteDeployer},
     generation::{GenerationError, GenerationRouter, SiteGenerationRequest},
     models::{Order, OrderStatus, WebsiteInput},
@@ -31,6 +31,8 @@ pub struct GenerationQueueConfig {
 
 pub struct GenerationQueue {
     pool: SqlitePool,
+    orders: OrderStore,
+    websites: WebsiteStore,
     router: Arc<GenerationRouter>,
     deployer: Option<Arc<dyn SiteDeployer>>,
     repo_owner: String,
@@ -51,6 +53,8 @@ impl GenerationQueue {
         notification_tx: Option<mpsc::UnboundedSender<UserNotification>>,
     ) -> Self {
         Self {
+            orders: OrderStore::new(pool.clone()),
+            websites: WebsiteStore::new(pool.clone()),
             pool,
             router,
             deployer,
@@ -70,7 +74,9 @@ impl GenerationQueue {
 
         let order = {
             let _guard = self.lock_mutex.lock().await;
-            db::lock_next_generation_order(&self.pool, &self.worker_id, MAX_JOB_ATTEMPTS).await?
+            self.orders
+                .lock_next_generation(&self.worker_id, MAX_JOB_ATTEMPTS)
+                .await?
         };
 
         let Some(order) = order else {
@@ -109,7 +115,9 @@ impl GenerationQueue {
             "starting site generation"
         );
 
-        db::update_order_status(&self.pool, order_id, OrderStatus::PaidAndGenerating).await?;
+        self.orders
+            .update_status(order_id, OrderStatus::PaidAndGenerating)
+            .await?;
 
         match self.router.generate(&request).await {
             Ok(result) => {
@@ -120,14 +128,10 @@ impl GenerationQueue {
                 );
 
                 // Create website record
-                if let Err(e) = db::create_website(
-                    &self.pool,
-                    order.user_id,
-                    order_id,
-                    &input,
-                    Some(&result.provider_name),
-                )
-                .await
+                if let Err(e) = self
+                    .websites
+                    .create(order.user_id, order_id, &input, Some(&result.provider_name))
+                    .await
                 {
                     error!(order_id = %order_id, error = %e, "failed to create website record");
                 }
@@ -151,12 +155,9 @@ impl GenerationQueue {
                                 custom_domain = deployment.custom_domain.as_deref().unwrap_or("<none>"),
                                 "site deployment succeeded"
                             );
-                            db::update_website_deployment_success(
-                                &self.pool,
-                                order_id,
-                                &deployment,
-                            )
-                            .await?;
+                            self.websites
+                                .update_deployment_success(order_id, &deployment)
+                                .await?;
 
                             let site_url = deployment
                                 .custom_domain
@@ -239,12 +240,10 @@ impl GenerationQueue {
     }
 
     async fn reclaim_stale_locked_orders(&self) -> anyhow::Result<()> {
-        let results = db::reclaim_stale_locked_orders(
-            &self.pool,
-            STALE_RUNNING_JOB_MINUTES,
-            MAX_JOB_ATTEMPTS,
-        )
-        .await?;
+        let results = self
+            .orders
+            .reclaim_stale_locked(STALE_RUNNING_JOB_MINUTES, MAX_JOB_ATTEMPTS)
+            .await?;
 
         for (order_id, went_to_review) in results {
             if went_to_review {
@@ -261,7 +260,7 @@ impl GenerationQueue {
     }
 
     async fn mark_manual_review(&self, order_id: Uuid) -> anyhow::Result<()> {
-        db::mark_order_manual_review(&self.pool, order_id).await
+        self.orders.mark_manual_review(order_id).await
     }
 
     async fn retry_or_manual_review(
@@ -276,7 +275,7 @@ impl GenerationQueue {
                 max_attempts = MAX_JOB_ATTEMPTS,
                 "requeueing order for retry"
             );
-            db::requeue_order_for_retry(&self.pool, order_id).await?;
+            self.orders.requeue_for_retry(order_id).await?;
             return Ok(false);
         }
         self.mark_manual_review(order_id).await?;

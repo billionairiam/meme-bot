@@ -89,7 +89,8 @@ fn choose_chain_text() -> &'static str {
 }
 
 async fn status_text(user_id: UserId, pool: &SqlitePool) -> String {
-    match db::get_active_orders(pool, user_id.0 as i64).await {
+    let orders = db::OrderStore::new(pool.clone());
+    match orders.get_active(user_id.0 as i64).await {
         Ok(orders) if orders.is_empty() => {
             "📊 <b>Order Status</b>\nNo active order. Use /create.".to_string()
         }
@@ -111,7 +112,8 @@ async fn status_text(user_id: UserId, pool: &SqlitePool) -> String {
 }
 
 async fn history_text(user_id: UserId, pool: &SqlitePool) -> String {
-    match db::get_completed_orders(pool, user_id.0 as i64, 10).await {
+    let orders = db::OrderStore::new(pool.clone());
+    match orders.get_completed(user_id.0 as i64, 10).await {
         Ok(items) if items.is_empty() => "🧾 <b>History</b>\nNo completed orders.".to_string(),
         Ok(items) => {
             let mut lines = vec!["🧾 <b>Completed Orders</b>".to_string()];
@@ -324,7 +326,8 @@ pub(crate) async fn show_edit_list(
     user_id: UserId,
     pool: &SqlitePool,
 ) -> ResponseResult<()> {
-    match db::get_completed_orders(pool, user_id.0 as i64, 10).await {
+    let orders = db::OrderStore::new(pool.clone());
+    match orders.get_completed(user_id.0 as i64, 10).await {
         Ok(items) if items.is_empty() => {
             send_screen(
                 bot,
@@ -366,7 +369,8 @@ pub(crate) async fn edit_edit_list(
     user_id: UserId,
     pool: &SqlitePool,
 ) -> ResponseResult<()> {
-    match db::get_completed_orders(pool, user_id.0 as i64, 10).await {
+    let orders = db::OrderStore::new(pool.clone());
+    match orders.get_completed(user_id.0 as i64, 10).await {
         Ok(items) if items.is_empty() => {
             edit_screen(
                 bot,
