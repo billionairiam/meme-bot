@@ -9,7 +9,7 @@ use crate::{
     db,
     deployment::{DeploymentRequest, SiteDeployer},
     generation::{GenerationError, GenerationRouter, SiteGenerationRequest},
-    models::{Order, WebsiteInput, OrderStatus},
+    models::{Order, OrderStatus, WebsiteInput},
 };
 
 const MAX_JOB_ATTEMPTS: i64 = 3;
@@ -384,7 +384,7 @@ fn project_name_from_repo_name(repo_name: &str) -> String {
 mod tests {
     use uuid::Uuid;
 
-    use crate::models::{BuildMode, OrderStatus};
+    use crate::models::{BuildMode, OrderStatus, TokenChain};
 
     use super::build_generation_request;
 
@@ -396,6 +396,7 @@ mod tests {
             status: OrderStatus::PaidAndGenerating,
             build_mode: Some(BuildMode::AiFree),
             template_id: None,
+            token_chain: Some(TokenChain::Eth),
             token_ticker: Some("AAA".to_string()),
             token_name: Some("AAA BBB".to_string()),
             contract_address: Some("0x123".to_string()),
@@ -410,6 +411,16 @@ mod tests {
             tx_hash: None,
             payment_expires_at: None,
             paid_at: None,
+            pending_contract_address: None,
+            pending_x_url: None,
+            pending_telegram_url: None,
+            pending_edit_field: None,
+            edit_status: "none".to_string(),
+            edit_payment_chain: None,
+            edit_tx_hash: None,
+            edit_payment_expires_at: None,
+            edit_paid_at: None,
+            edit_success_count: 0,
             attempt_count: 0,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

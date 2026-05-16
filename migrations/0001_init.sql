@@ -27,8 +27,8 @@ CREATE TABLE templates (
 CREATE TABLE orders (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id),
-    status TEXT NOT NULL DEFAULT 'need_logo' CHECK (status IN (
-        'need_logo', 'need_ticker', 'need_name', 'need_contract',
+    status TEXT NOT NULL DEFAULT 'need_chain' CHECK (status IN (
+        'need_chain', 'need_logo', 'need_ticker', 'need_name', 'need_contract',
         'need_x_link', 'need_tme', 'need_domain', 'need_pay',
         'paid_and_generating', 'need_manual_review', 'done', 'cancelled'
     )),
@@ -36,6 +36,7 @@ CREATE TABLE orders (
     template_id TEXT REFERENCES templates(template_id),
 
     -- wizard asset fields
+    token_chain TEXT CHECK (token_chain IN ('eth', 'bsc', 'sol', 'ton')),
     token_ticker TEXT,
     token_name TEXT,
     contract_address TEXT,
@@ -56,6 +57,20 @@ CREATE TABLE orders (
     payment_expires_at TEXT,
     paid_at TEXT,
 
+    -- live edit state (for already deployed websites)
+    pending_contract_address TEXT,
+    pending_x_url TEXT,
+    pending_telegram_url TEXT,
+    pending_edit_field TEXT CHECK (pending_edit_field IN ('contract', 'x', 'telegram')),
+    edit_status TEXT NOT NULL DEFAULT 'none' CHECK (edit_status IN (
+        'none', 'draft', 'need_pay', 'applying', 'need_manual_review'
+    )),
+    edit_payment_chain TEXT CHECK (edit_payment_chain IN ('erc20', 'tron', 'sol')),
+    edit_tx_hash TEXT,
+    edit_payment_expires_at TEXT,
+    edit_paid_at TEXT,
+    edit_success_count INTEGER NOT NULL DEFAULT 0,
+
     -- queue / generation
     locked_by TEXT,
     locked_at TEXT,
@@ -70,6 +85,7 @@ CREATE TABLE websites (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id),
     order_id TEXT NOT NULL UNIQUE REFERENCES orders(id),
+    token_chain TEXT NOT NULL,
     token_ticker TEXT NOT NULL,
     token_name TEXT NOT NULL,
     contract_address TEXT NOT NULL,

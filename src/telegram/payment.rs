@@ -277,7 +277,7 @@ pub(crate) async fn process_payment_tx_context(
     .map(|_| ())
 }
 
-async fn verify_payment_with_retries<V>(
+pub(crate) async fn verify_payment_with_retries<V>(
     service: &PaymentService<V>,
     request: PaymentVerificationRequest,
 ) -> Result<PaymentVerificationOutcome, PaymentVerificationError>

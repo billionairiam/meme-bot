@@ -34,6 +34,7 @@ impl BuildMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderStatus {
+    NeedChain,
     NeedLogo,
     NeedTicker,
     NeedName,
@@ -51,6 +52,7 @@ pub enum OrderStatus {
 impl OrderStatus {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::NeedChain => "need_chain",
             Self::NeedLogo => "need_logo",
             Self::NeedTicker => "need_ticker",
             Self::NeedName => "need_name",
@@ -68,6 +70,7 @@ impl OrderStatus {
 
     pub fn from_db(value: &str) -> Option<Self> {
         match value {
+            "need_chain" => Some(Self::NeedChain),
             "need_logo" => Some(Self::NeedLogo),
             "need_ticker" => Some(Self::NeedTicker),
             "need_name" => Some(Self::NeedName),
@@ -89,6 +92,7 @@ impl OrderStatus {
         matches!(
             self,
             Self::NeedLogo
+                | Self::NeedChain
                 | Self::NeedTicker
                 | Self::NeedName
                 | Self::NeedContract
@@ -117,6 +121,7 @@ impl OrderStatus {
     pub fn display_label(self) -> &'static str {
         match self {
             Self::NeedLogo => "📷 Waiting for logo",
+            Self::NeedChain => "⛓ Waiting for chain",
             Self::NeedTicker => "🏷 Waiting for ticker",
             Self::NeedName => "📝 Waiting for token name",
             Self::NeedContract => "📄 Waiting for contract address",
@@ -146,6 +151,45 @@ pub enum PaymentChain {
     Sol,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenChain {
+    Eth,
+    Bsc,
+    Sol,
+    Ton,
+}
+
+impl TokenChain {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Eth => "eth",
+            Self::Bsc => "bsc",
+            Self::Sol => "sol",
+            Self::Ton => "ton",
+        }
+    }
+
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Eth => "ETH",
+            Self::Bsc => "BSC",
+            Self::Sol => "SOL",
+            Self::Ton => "TON",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "eth" => Some(Self::Eth),
+            "bsc" => Some(Self::Bsc),
+            "sol" => Some(Self::Sol),
+            "ton" => Some(Self::Ton),
+            _ => None,
+        }
+    }
+}
+
 impl PaymentChain {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -168,6 +212,7 @@ impl PaymentChain {
 /// Input data collected during the wizard steps. Stored directly on the order.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WebsiteInput {
+    pub token_chain: TokenChain,
     pub token_ticker: String,
     pub token_name: String,
     pub contract_address: String,
@@ -193,6 +238,7 @@ pub struct Order {
     pub build_mode: Option<BuildMode>,
     pub template_id: Option<String>,
     // wizard assets
+    pub token_chain: Option<TokenChain>,
     pub token_ticker: Option<String>,
     pub token_name: Option<String>,
     pub contract_address: Option<String>,
@@ -210,6 +256,16 @@ pub struct Order {
     pub tx_hash: Option<String>,
     pub payment_expires_at: Option<DateTime<Utc>>,
     pub paid_at: Option<DateTime<Utc>>,
+    pub pending_contract_address: Option<String>,
+    pub pending_x_url: Option<String>,
+    pub pending_telegram_url: Option<String>,
+    pub pending_edit_field: Option<String>,
+    pub edit_status: String,
+    pub edit_payment_chain: Option<PaymentChain>,
+    pub edit_tx_hash: Option<String>,
+    pub edit_payment_expires_at: Option<DateTime<Utc>>,
+    pub edit_paid_at: Option<DateTime<Utc>>,
+    pub edit_success_count: i64,
     // generation queue
     pub attempt_count: i64,
     // timestamps
@@ -222,11 +278,21 @@ impl Order {
     /// Returns `None` if any required field is missing.
     pub fn website_input(&self) -> Option<WebsiteInput> {
         Some(WebsiteInput {
+            token_chain: self.token_chain?,
             token_ticker: self.token_ticker.clone()?,
             token_name: self.token_name.clone()?,
-            contract_address: self.contract_address.clone().unwrap_or_default(),
-            x_url: self.x_url.clone().unwrap_or_default(),
-            telegram_url: self.telegram_url.clone().unwrap_or_default(),
+            contract_address: self
+                .contract_address
+                .clone()
+                .unwrap_or_else(|| crate::validation::DEFAULT_CONTRACT_ADDRESS.to_string()),
+            x_url: self
+                .x_url
+                .clone()
+                .unwrap_or_else(|| crate::validation::DEFAULT_X_URL.to_string()),
+            telegram_url: self
+                .telegram_url
+                .clone()
+                .unwrap_or_else(|| crate::validation::DEFAULT_TELEGRAM_URL.to_string()),
             logo_asset_path: self.logo_asset_path.clone()?,
             requested_domain: Some(self.requested_domain.clone()?),
         })
@@ -239,6 +305,7 @@ pub struct Website {
     pub id: Uuid,
     pub user_id: Uuid,
     pub order_id: Uuid,
+    pub token_chain: TokenChain,
     pub token_ticker: String,
     pub token_name: String,
     pub contract_address: String,
@@ -275,6 +342,7 @@ mod tests {
             status: OrderStatus::NeedPay,
             build_mode: Some(BuildMode::AiFree),
             template_id: None,
+            token_chain: Some(TokenChain::Eth),
             token_ticker: Some("LOGO".to_string()),
             token_name: Some("Logo Coin".to_string()),
             contract_address: None,
@@ -290,18 +358,32 @@ mod tests {
             tx_hash: None,
             payment_expires_at: None,
             paid_at: None,
+            pending_contract_address: None,
+            pending_x_url: None,
+            pending_telegram_url: None,
+            pending_edit_field: None,
+            edit_status: "none".to_string(),
+            edit_payment_chain: None,
+            edit_tx_hash: None,
+            edit_payment_expires_at: None,
+            edit_paid_at: None,
+            edit_success_count: 0,
             attempt_count: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
 
         let input = order.website_input().expect("required input is valid");
+        assert_eq!(input.token_chain, TokenChain::Eth);
         assert_eq!(input.token_ticker, "LOGO");
         assert_eq!(input.token_name, "Logo Coin");
         assert_eq!(input.logo_asset_path, "/tmp/logo.png");
-        assert!(input.contract_address.is_empty());
-        assert!(input.x_url.is_empty());
-        assert!(input.telegram_url.is_empty());
+        assert_eq!(
+            input.contract_address,
+            crate::validation::DEFAULT_CONTRACT_ADDRESS
+        );
+        assert_eq!(input.x_url, crate::validation::DEFAULT_X_URL);
+        assert_eq!(input.telegram_url, crate::validation::DEFAULT_TELEGRAM_URL);
         assert_eq!(input.requested_domain.as_deref(), Some("logocoin.xyz"));
     }
 }

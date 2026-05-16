@@ -1,6 +1,6 @@
 # Meme Bot
 
-Rust Telegram bot for selling meme coin websites. Users choose a template or AI-generated site, pay USDT on-chain, and the system generates a static website, pushes it to GitHub, deploys it with Cloudflare Pages, and optionally registers/configures a custom domain through Namecheap and Cloudflare.
+Rust Telegram bot for selling meme coin websites. Users choose a template or AI-generated site, provide the required token basics, pay USDT on-chain, and the system generates a static website, pushes it to GitHub, deploys it with Cloudflare Pages, and optionally registers/configures a custom domain through Namecheap and Cloudflare.
 
 ## What Runs
 
@@ -78,10 +78,20 @@ The SQLite schema is in `migrations/0001_init.sql`.
 |-------|---------|
 | `users` | Telegram user identity and membership state |
 | `templates` | Template catalog rows |
-| `orders` | Order wizard state, pricing, payment data, and queue lock fields |
+| `orders` | Order wizard state, edit state, pricing, payment data, and queue lock fields |
 | `websites` | Completed website/deployment records |
 
-The order lifecycle is represented by one `orders.status` value, such as `need_logo`, `need_pay`, `paid_and_generating`, `need_manual_review`, `done`, or `cancelled`.
+The order lifecycle is represented by one `orders.status` value, such as `need_chain`, `need_logo`, `need_pay`, `paid_and_generating`, `need_manual_review`, `done`, or `cancelled`.
+
+## Bot Workflow
+
+Creation supports template and AI modes. The required website inputs are chain (`ETH`, `BSC`, `SOL`, or `TON`), logo, token ticker, token name, and website domain. Contract address, X URL, and Telegram URL can be skipped; skipped values are stored as text placeholders:
+
+- Contract: `0x0000000000000000000000000000000000000000`
+- X: `https://x.com`
+- Telegram: `https://t.me`
+
+Live websites can be edited with `/edit`. Users may change only contract address, X URL, and Telegram URL. The bot applies edits by replacing the stored text in the matching GitHub repository and pushing a new commit; Cloudflare Pages updates from that commit. Each Telegram user gets three successful free edits globally. After that, each edit costs `10` USDT and uses the same payment verification flow.
 
 ## Quick Start
 

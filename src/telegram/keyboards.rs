@@ -11,12 +11,27 @@ pub(crate) fn main_menu_keyboard() -> InlineKeyboardMarkup {
             "🚀 Create Website",
             "create",
         )],
+        vec![InlineKeyboardButton::callback("✏️ Edit Website", "edit")],
         vec![InlineKeyboardButton::callback("📊 Order Status", "status")],
         vec![InlineKeyboardButton::callback("🧾 Paid History", "history")],
         vec![InlineKeyboardButton::callback(
             "👤 Contact Admin",
             "contact_admin",
         )],
+    ])
+}
+
+pub(crate) fn token_chain_keyboard() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            InlineKeyboardButton::callback("ETH", "token_chain:eth"),
+            InlineKeyboardButton::callback("BSC", "token_chain:bsc"),
+        ],
+        vec![
+            InlineKeyboardButton::callback("SOL", "token_chain:sol"),
+            InlineKeyboardButton::callback("TON", "token_chain:ton"),
+        ],
+        vec![InlineKeyboardButton::callback("🛑 Cancel Order", "cancel")],
     ])
 }
 
@@ -140,4 +155,49 @@ pub(crate) fn alternative_domains_keyboard(
         "alt_domain_custom",
     )]);
     InlineKeyboardMarkup::new(rows)
+}
+
+pub(crate) fn edit_order_list_keyboard(
+    items: &[crate::db::OrderWithWebsite],
+) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    for item in items.iter().take(10) {
+        let label = item
+            .custom_domain
+            .as_deref()
+            .or(item.requested_domain.as_deref())
+            .or(item.token_ticker.as_deref())
+            .unwrap_or("Website");
+        rows.push(vec![InlineKeyboardButton::callback(
+            format!("✏️ {label}"),
+            format!("edit_select:{}", item.order_id),
+        )]);
+    }
+    rows.push(vec![InlineKeyboardButton::callback("⬅ Back", "main")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub(crate) fn edit_menu_keyboard(order_id: uuid::Uuid) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![InlineKeyboardButton::callback(
+            "CA",
+            format!("edit_field:{order_id}:contract"),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "X",
+            format!("edit_field:{order_id}:x"),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "Telegram",
+            format!("edit_field:{order_id}:telegram"),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "✅ Apply",
+            format!("edit_apply:{order_id}"),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "🛑 Cancel Edit",
+            format!("edit_cancel:{order_id}"),
+        )],
+    ])
 }

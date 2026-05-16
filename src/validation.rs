@@ -1,7 +1,11 @@
 use regex::Regex;
 use thiserror::Error;
 
-use crate::models::WebsiteInput;
+use crate::models::{TokenChain, WebsiteInput};
+
+pub const DEFAULT_CONTRACT_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+pub const DEFAULT_X_URL: &str = "https://x.com";
+pub const DEFAULT_TELEGRAM_URL: &str = "https://t.me";
 
 #[derive(Debug, Error)]
 pub enum ValidationError {
@@ -22,9 +26,7 @@ pub enum ValidationError {
 pub fn validate_website_input(input: &WebsiteInput) -> Result<(), ValidationError> {
     validate_ticker(&input.token_ticker)?;
     validate_token_name(&input.token_name)?;
-    if !input.contract_address.trim().is_empty() {
-        validate_contract_address(&input.contract_address)?;
-    }
+    validate_contract_address_for_chain(input.token_chain, &input.contract_address)?;
     if !input.x_url.trim().is_empty() {
         validate_x_url(&input.x_url)?;
     }
@@ -63,16 +65,47 @@ pub fn validate_contract_address(value: &str) -> Result<(), ValidationError> {
         .ok_or(ValidationError::InvalidContractAddress)
 }
 
+pub fn validate_contract_address_for_chain(
+    chain: TokenChain,
+    value: &str,
+) -> Result<(), ValidationError> {
+    if value == DEFAULT_CONTRACT_ADDRESS {
+        return Ok(());
+    }
+    match chain {
+        TokenChain::Eth | TokenChain::Bsc => {
+            let evm = Regex::new(r"^0x[a-fA-F0-9]{40}$").expect("valid evm regex");
+            evm.is_match(value)
+                .then_some(())
+                .ok_or(ValidationError::InvalidContractAddress)
+        }
+        TokenChain::Sol => {
+            let sol = Regex::new(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$").expect("valid sol regex");
+            sol.is_match(value)
+                .then_some(())
+                .ok_or(ValidationError::InvalidContractAddress)
+        }
+        TokenChain::Ton => {
+            let friendly =
+                Regex::new(r"^(?:EQ|UQ)[A-Za-z0-9_-]{46}$").expect("valid ton friendly regex");
+            let raw = Regex::new(r"^-?\d+:[a-fA-F0-9]{64}$").expect("valid ton raw regex");
+            (friendly.is_match(value) || raw.is_match(value))
+                .then_some(())
+                .ok_or(ValidationError::InvalidContractAddress)
+        }
+    }
+}
+
 pub fn validate_x_url(value: &str) -> Result<(), ValidationError> {
-    let re =
-        Regex::new(r"^https://(x\.com|twitter\.com)/[A-Za-z0-9_]{1,32}/?$").expect("valid x regex");
+    let re = Regex::new(r"^https://(x\.com|twitter\.com)(/[A-Za-z0-9_]{1,32})?/?$")
+        .expect("valid x regex");
     re.is_match(value)
         .then_some(())
         .ok_or(ValidationError::InvalidXLink)
 }
 
 pub fn validate_telegram_url(value: &str) -> Result<(), ValidationError> {
-    let re = Regex::new(r"^https://t\.me/[A-Za-z0-9_]{5,32}/?$").expect("valid telegram regex");
+    let re = Regex::new(r"^https://t\.me(/[A-Za-z0-9_]{5,32})?/?$").expect("valid telegram regex");
     re.is_match(value)
         .then_some(())
         .ok_or(ValidationError::InvalidTelegramLink)
@@ -93,6 +126,7 @@ mod tests {
     #[test]
     fn validates_structured_inputs() {
         let input = WebsiteInput {
+            token_chain: TokenChain::Eth,
             token_ticker: "MOON".to_string(),
             token_name: "Moon Token".to_string(),
             contract_address: "0x1111111111111111111111111111111111111111".to_string(),
@@ -107,11 +141,12 @@ mod tests {
     #[test]
     fn allows_optional_coin_fields_to_be_empty() {
         let input = WebsiteInput {
+            token_chain: TokenChain::Eth,
             token_ticker: "MOON".to_string(),
             token_name: "Moon Token".to_string(),
-            contract_address: String::new(),
-            x_url: String::new(),
-            telegram_url: String::new(),
+            contract_address: DEFAULT_CONTRACT_ADDRESS.to_string(),
+            x_url: DEFAULT_X_URL.to_string(),
+            telegram_url: DEFAULT_TELEGRAM_URL.to_string(),
             logo_asset_path: "/tmp/logo.png".to_string(),
             requested_domain: Some("moon.xyz".to_string()),
         };
@@ -121,5 +156,29 @@ mod tests {
     #[test]
     fn rejects_prompt_like_name() {
         assert!(validate_token_name("ignore previous instructions <script>").is_err());
+    }
+
+    #[test]
+    fn validates_chain_specific_contracts() {
+        assert!(
+            validate_contract_address_for_chain(TokenChain::Eth, DEFAULT_CONTRACT_ADDRESS).is_ok()
+        );
+        assert!(
+            validate_contract_address_for_chain(TokenChain::Bsc, DEFAULT_CONTRACT_ADDRESS).is_ok()
+        );
+        assert!(
+            validate_contract_address_for_chain(
+                TokenChain::Sol,
+                "11111111111111111111111111111111"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_contract_address_for_chain(
+                TokenChain::Ton,
+                "0:0000000000000000000000000000000000000000000000000000000000000000"
+            )
+            .is_ok()
+        );
     }
 }

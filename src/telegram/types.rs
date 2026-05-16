@@ -43,6 +43,7 @@ pub struct TelegramUiConfig {
     pub api_service_base_url: Option<String>,
     pub api_service_api_key: Option<String>,
     pub github_owner: String,
+    pub github_token: String,
     pub template_preview_base_url: String,
     pub template_preview_domain: String,
     pub template_options: Vec<TemplateOption>,
@@ -87,6 +88,7 @@ impl TelegramUiConfig {
             api_service_base_url: config.api_service_base_url.clone(),
             api_service_api_key: config.api_service_api_key.clone(),
             github_owner: config.github_owner.clone(),
+            github_token: config.github_token.clone(),
             template_preview_base_url: config.template_preview_base_url.clone(),
             template_preview_domain: config.template_preview_domain.clone(),
             template_options: build_template_options(

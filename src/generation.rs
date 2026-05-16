@@ -11,7 +11,9 @@ use thiserror::Error;
 use tokio::{process::Command, time::timeout};
 use uuid::Uuid;
 
-use crate::{config::GenerationProviderName, models::WebsiteInput};
+use crate::{
+    config::GenerationProviderName, models::WebsiteInput, validation::DEFAULT_CONTRACT_ADDRESS,
+};
 
 const AGENT_PROMPT_FILE_NAME: &str = "agent-prompt.md";
 
@@ -268,6 +270,7 @@ fn agent_prompt(
 
     Ok(template
         .replace("{token_name}", token_name)
+        .replace("{token_chain}", request.input.token_chain.display_label())
         .replace("{ticker}", &request.input.token_ticker)
         .replace("{contract}", &request.input.contract_address)
         .replace("{x_url}", &request.input.x_url)
@@ -449,7 +452,7 @@ fn validate_html_entry(
 }
 
 fn optional_dextools_url(contract_address: &str) -> String {
-    if contract_address.trim().is_empty() {
+    if contract_address.trim().is_empty() || contract_address.trim() == DEFAULT_CONTRACT_ADDRESS {
         String::new()
     } else {
         format!("https://www.dextools.io/app/en/token/{contract_address}")
@@ -525,6 +528,8 @@ fn map_provider_spawn_error(error: std::io::Error, provider: &str) -> Generation
 mod tests {
     use tempfile::tempdir;
 
+    use crate::models::TokenChain;
+
     use super::*;
 
     fn test_request(output_dir: PathBuf) -> SiteGenerationRequest {
@@ -533,6 +538,7 @@ mod tests {
             build_mode: "template".to_string(),
             template_local_path: None,
             input: WebsiteInput {
+                token_chain: TokenChain::Eth,
                 token_ticker: "MOON".to_string(),
                 token_name: "Moon Token".to_string(),
                 contract_address: "0x1111111111111111111111111111111111111111".to_string(),
@@ -583,11 +589,12 @@ mod tests {
             build_mode: "ai_free".to_string(),
             template_local_path: None,
             input: WebsiteInput {
+                token_chain: TokenChain::Eth,
                 token_ticker: "LOGO".to_string(),
                 token_name: "Logo Coin".to_string(),
-                contract_address: String::new(),
-                x_url: String::new(),
-                telegram_url: String::new(),
+                contract_address: DEFAULT_CONTRACT_ADDRESS.to_string(),
+                x_url: crate::validation::DEFAULT_X_URL.to_string(),
+                telegram_url: crate::validation::DEFAULT_TELEGRAM_URL.to_string(),
                 logo_asset_path: "logo.png".to_string(),
                 requested_domain: Some("logocoin.xyz".to_string()),
             },
@@ -603,8 +610,11 @@ mod tests {
     <main>
       <h1>Logo Coin</h1>
       <p>LOGO is a clean meme coin landing page generated from required brand inputs.</p>
+      <p>0x0000000000000000000000000000000000000000</p>
+      <a href="https://x.com">X</a>
+      <a href="https://t.me">Telegram</a>
       <section>Hero, about, tokenomics, roadmap, and community sections with polished copy.</section>
-      <section>This page intentionally omits contract and social links because the user skipped them.</section>
+      <section>This page uses default contract and social placeholders because the user skipped them.</section>
       <footer>This is a meme token. Nothing on this site is financial advice. Do your own research.</footer>
     </main>
   </body>

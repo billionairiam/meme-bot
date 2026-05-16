@@ -12,6 +12,7 @@ Do not ask questions. Do not wait for confirmation. Make the best creative decis
 
 - Name: {token_name}
 - Ticker: ${ticker}
+- Chain: {token_chain}
 - Contract: `{contract}`
 
 Optional links. Empty values mean the user chose not to provide that item:

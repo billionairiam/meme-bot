@@ -1,4 +1,8 @@
-use std::{path::Path, process::Stdio};
+use std::{
+    fs as std_fs,
+    path::{Path, PathBuf},
+    process::Stdio,
+};
 
 use reqwest::{Client, StatusCode};
 use serde_json::json;
@@ -199,12 +203,7 @@ pub(crate) async fn push_site_to_github(
     .await?;
     run_git(&request.site_dir, &["config", "user.name", "Meme Bot"], &[]).await?;
     // Disable credential helper for this repo to avoid VS Code socket interference
-    run_git(
-        &request.site_dir,
-        &["config", "credential.helper", ""],
-        &[],
-    )
-    .await?;
+    run_git(&request.site_dir, &["config", "credential.helper", ""], &[]).await?;
     run_git(
         &request.site_dir,
         &["checkout", "-B", &request.production_branch],
@@ -236,6 +235,151 @@ pub(crate) async fn push_site_to_github(
         no_credential_envs,
     )
     .await
+}
+
+pub(crate) struct RepoTextEditRequest<'a> {
+    pub repo_owner: &'a str,
+    pub repo_name: &'a str,
+    pub github_token: &'a str,
+    pub production_branch: &'a str,
+    pub generated_sites_dir: &'a str,
+    pub replacements: Vec<(&'a str, &'a str)>,
+    pub dry_run: bool,
+}
+
+pub(crate) async fn replace_repo_text_and_push(
+    request: RepoTextEditRequest<'_>,
+) -> Result<usize, DeploymentError> {
+    let site_dir = Path::new(request.generated_sites_dir).join(request.repo_name);
+    if !site_dir.is_dir() {
+        return Err(DeploymentError::GitPush(format!(
+            "local generated site repo not found: {}",
+            site_dir.display()
+        )));
+    }
+
+    let auth_url = format!(
+        "https://x-access-token:{}@github.com/{}/{}.git",
+        request.github_token, request.repo_owner, request.repo_name
+    );
+
+    if !request.dry_run {
+        run_git(&site_dir, &["checkout", &request.production_branch], &[]).await?;
+    }
+
+    let changed_files = apply_text_replacements(&site_dir, &request.replacements, request.dry_run)?;
+    if request.dry_run || changed_files == 0 {
+        return Ok(changed_files);
+    }
+
+    run_git(
+        &site_dir,
+        &["config", "user.email", "bot@mem-bot.local"],
+        &[],
+    )
+    .await?;
+    run_git(&site_dir, &["config", "user.name", "Meme Bot"], &[]).await?;
+    run_git(&site_dir, &["config", "credential.helper", ""], &[]).await?;
+    run_git(&site_dir, &["add", "."], &[]).await?;
+    run_git(&site_dir, &["commit", "-m", "Update website links"], &[]).await?;
+    let refspec = format!("HEAD:{}", request.production_branch);
+    run_git(
+        &site_dir,
+        &["push", &auth_url, &refspec],
+        &[
+            ("GIT_ASKPASS", String::new()),
+            ("GIT_TERMINAL_PROMPT", "0".to_string()),
+        ],
+    )
+    .await?;
+    Ok(changed_files)
+}
+
+fn apply_text_replacements(
+    repo_dir: &Path,
+    replacements: &[(&str, &str)],
+    dry_run: bool,
+) -> Result<usize, DeploymentError> {
+    let active: Vec<(&str, &str)> = replacements
+        .iter()
+        .copied()
+        .filter(|(old, new)| !old.is_empty() && old != new)
+        .collect();
+    if active.is_empty() {
+        return Ok(0);
+    }
+
+    let mut found = vec![false; active.len()];
+    let mut changed_files = 0;
+    for path in list_repo_files(repo_dir)? {
+        let Ok(content) = std_fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut next = content.clone();
+        for (index, (old, new)) in active.iter().enumerate() {
+            if next.contains(old) {
+                found[index] = true;
+                next = next.replace(old, new);
+            }
+        }
+        if next != content {
+            changed_files += 1;
+            if !dry_run {
+                std_fs::write(&path, next).map_err(|error| {
+                    DeploymentError::GitPush(format!(
+                        "write edited file {} failed: {error}",
+                        path.display()
+                    ))
+                })?;
+            }
+        }
+    }
+
+    let missing: Vec<&str> = active
+        .iter()
+        .zip(found.iter())
+        .filter_map(|((old, _), found)| (!*found).then_some(*old))
+        .collect();
+    if !missing.is_empty() {
+        return Err(DeploymentError::GitPush(format!(
+            "replacement source text not found in repo: {}",
+            missing.join(", ")
+        )));
+    }
+
+    Ok(changed_files)
+}
+
+fn list_repo_files(dir: &Path) -> Result<Vec<PathBuf>, DeploymentError> {
+    let mut files = Vec::new();
+    list_repo_files_inner(dir, &mut files)?;
+    Ok(files)
+}
+
+fn list_repo_files_inner(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), DeploymentError> {
+    for entry in std_fs::read_dir(dir).map_err(|error| {
+        DeploymentError::GitPush(format!("read repo dir {} failed: {error}", dir.display()))
+    })? {
+        let entry = entry.map_err(|error| DeploymentError::GitPush(error.to_string()))?;
+        let path = entry.path();
+        let name = entry.file_name();
+        if name.to_string_lossy() == ".git" {
+            continue;
+        }
+        if path.is_dir() {
+            list_repo_files_inner(&path, files)?;
+        } else if is_editable_site_asset(&path) {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn is_editable_site_asset(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("html" | "css" | "js")
+    )
 }
 
 async fn ensure_site_gitignore(site_dir: impl AsRef<Path>) -> Result<(), DeploymentError> {

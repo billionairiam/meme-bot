@@ -4,7 +4,7 @@ use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use uuid::Uuid;
 
 use crate::deployment::DeploymentResult;
-use crate::models::{BuildMode, Order, OrderStatus, PaymentChain, WebsiteInput};
+use crate::models::{BuildMode, Order, OrderStatus, PaymentChain, TokenChain, WebsiteInput};
 
 pub const PAYMENT_WINDOW_MINUTES: i64 = 30;
 pub const ASSET_COLLECTION_TIMEOUT_MINUTES: i64 = 60;
@@ -147,7 +147,7 @@ pub async fn upsert_user(
 // Orders
 // ============================================================
 
-/// Create a new order in need_logo status. Fails if user already has an
+/// Create a new order in need_chain status. Fails if user already has an
 /// unpaid order (need_logo ~ need_pay).
 pub async fn create_order(
     pool: &SqlitePool,
@@ -163,7 +163,7 @@ pub async fn create_order(
             id, user_id, build_mode, template_id, status,
             site_price_usdt, total_usdt
         )
-        VALUES (?, ?, ?, ?, 'need_logo', ?, ?)
+        VALUES (?, ?, ?, ?, 'need_chain', ?, ?)
         RETURNING id
         "#,
     )
@@ -187,7 +187,7 @@ pub async fn has_unpaid_order(pool: &SqlitePool, telegram_user_id: i64) -> anyho
         FROM orders o
         JOIN users u ON o.user_id = u.id
         WHERE u.telegram_user_id = ?
-          AND o.status IN ('need_logo', 'need_ticker', 'need_name', 'need_contract',
+          AND o.status IN ('need_chain', 'need_logo', 'need_ticker', 'need_name', 'need_contract',
                            'need_x_link', 'need_tme', 'need_domain', 'need_pay')
         LIMIT 1
         "#,
@@ -209,7 +209,7 @@ pub async fn get_unpaid_order(
         FROM orders o
         JOIN users u ON o.user_id = u.id
         WHERE u.telegram_user_id = ?
-          AND o.status IN ('need_logo', 'need_ticker', 'need_name', 'need_contract',
+          AND o.status IN ('need_chain', 'need_logo', 'need_ticker', 'need_name', 'need_contract',
                            'need_x_link', 'need_tme', 'need_domain', 'need_pay')
         ORDER BY o.created_at DESC
         LIMIT 1
@@ -259,6 +259,7 @@ pub async fn update_order_field(
 ) -> anyhow::Result<()> {
     let allowed = [
         "token_ticker",
+        "token_chain",
         "token_name",
         "contract_address",
         "x_url",
@@ -289,6 +290,7 @@ pub async fn update_order_field_and_status(
 ) -> anyhow::Result<()> {
     let allowed = [
         "token_ticker",
+        "token_chain",
         "token_name",
         "contract_address",
         "x_url",
@@ -322,7 +324,8 @@ pub async fn clear_order_field(
     if !allowed.contains(&field) {
         anyhow::bail!("disallowed clear field: {field}");
     }
-    let sql = format!("UPDATE orders SET {field} = NULL, updated_at = datetime('now') WHERE id = ?");
+    let sql =
+        format!("UPDATE orders SET {field} = NULL, updated_at = datetime('now') WHERE id = ?");
     sqlx::query(&sql)
         .bind(uuid_value(order_id))
         .execute(pool)
@@ -362,7 +365,7 @@ pub async fn cancel_order_for_user(
         UPDATE orders
         SET status = 'cancelled', updated_at = datetime('now')
         WHERE user_id IN (SELECT id FROM users WHERE telegram_user_id = ?)
-          AND status IN ('need_logo', 'need_ticker', 'need_name', 'need_contract',
+          AND status IN ('need_chain', 'need_logo', 'need_ticker', 'need_name', 'need_contract',
                          'need_x_link', 'need_tme', 'need_domain', 'need_pay')
     "#
     .to_string();
@@ -387,7 +390,7 @@ pub async fn expire_stale_pending_orders_for_user(
         UPDATE orders
         SET status = 'cancelled', updated_at = datetime('now')
         WHERE user_id IN (SELECT id FROM users WHERE telegram_user_id = ?)
-          AND status IN ('need_logo', 'need_ticker', 'need_name', 'need_contract',
+          AND status IN ('need_chain', 'need_logo', 'need_ticker', 'need_name', 'need_contract',
                          'need_x_link', 'need_tme', 'need_domain', 'need_pay')
           AND (
             datetime(updated_at) < datetime('now', ?)
@@ -483,8 +486,14 @@ pub async fn tx_hash_already_used(
 ) -> anyhow::Result<bool> {
     let canonical = canonical_tx_hash(chain, tx_hash);
     let row = sqlx::query(
-        "SELECT COUNT(*) AS count FROM orders WHERE tx_hash = ? AND status NOT IN ('cancelled')",
+        r#"
+        SELECT COUNT(*) AS count
+        FROM orders
+        WHERE (tx_hash = ? OR edit_tx_hash = ?)
+          AND status NOT IN ('cancelled')
+        "#,
     )
+    .bind(&canonical)
     .bind(&canonical)
     .fetch_one(pool)
     .await?;
@@ -533,7 +542,8 @@ pub async fn get_completed_orders(
 ) -> anyhow::Result<Vec<OrderWithWebsite>> {
     let rows = sqlx::query(
         r#"
-        SELECT o.id AS order_id, o.token_ticker, o.token_name, o.requested_domain,
+        SELECT o.id AS order_id, o.token_chain, o.token_ticker, o.token_name,
+               o.contract_address, o.x_url, o.telegram_url, o.requested_domain,
                o.total_usdt, o.payment_chain, o.paid_at,
                w.cloudflare_pages_url, w.custom_domain, w.github_repo_url
         FROM orders o
@@ -554,8 +564,15 @@ pub async fn get_completed_orders(
         .map(|row| {
             Ok(OrderWithWebsite {
                 order_id: uuid_from_row(row, "order_id")?,
+                token_chain: row
+                    .get::<Option<String>, _>("token_chain")
+                    .as_deref()
+                    .and_then(TokenChain::from_db),
                 token_ticker: row.get("token_ticker"),
                 token_name: row.get("token_name"),
+                contract_address: row.get("contract_address"),
+                x_url: row.get("x_url"),
+                telegram_url: row.get("telegram_url"),
                 requested_domain: row.get("requested_domain"),
                 total_usdt: Decimal::from_str_exact(row.get::<&str, _>("total_usdt"))?,
                 payment_chain: row.get("payment_chain"),
@@ -575,8 +592,12 @@ pub async fn get_completed_orders(
 #[derive(Debug, Clone)]
 pub struct OrderWithWebsite {
     pub order_id: Uuid,
+    pub token_chain: Option<TokenChain>,
     pub token_ticker: Option<String>,
     pub token_name: Option<String>,
+    pub contract_address: Option<String>,
+    pub x_url: Option<String>,
+    pub telegram_url: Option<String>,
     pub requested_domain: Option<String>,
     pub total_usdt: Decimal,
     pub payment_chain: Option<String>,
@@ -584,6 +605,331 @@ pub struct OrderWithWebsite {
     pub cloudflare_pages_url: Option<String>,
     pub custom_domain: Option<String>,
     pub github_repo_url: Option<String>,
+}
+
+// ============================================================
+// Live website edits
+// ============================================================
+
+pub const FREE_EDIT_LIMIT: i64 = 3;
+pub const EDIT_PRICE_USDT: i64 = 10;
+
+pub async fn get_completed_order_for_user(
+    pool: &SqlitePool,
+    telegram_user_id: i64,
+    order_id: Uuid,
+) -> anyhow::Result<Option<Order>> {
+    let row = sqlx::query(
+        r#"
+        SELECT o.*
+        FROM orders o
+        JOIN users u ON o.user_id = u.id
+        WHERE u.telegram_user_id = ?
+          AND o.id = ?
+          AND o.status = 'done'
+        LIMIT 1
+        "#,
+    )
+    .bind(telegram_user_id)
+    .bind(uuid_value(order_id))
+    .fetch_optional(pool)
+    .await?;
+
+    row.as_ref().map(order_from_row).transpose()
+}
+
+pub async fn get_active_edit_order(
+    pool: &SqlitePool,
+    telegram_user_id: i64,
+) -> anyhow::Result<Option<Order>> {
+    let row = sqlx::query(
+        r#"
+        SELECT o.*
+        FROM orders o
+        JOIN users u ON o.user_id = u.id
+        WHERE u.telegram_user_id = ?
+          AND o.status = 'done'
+          AND o.edit_status IN ('draft', 'need_pay', 'applying')
+        ORDER BY o.updated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(telegram_user_id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.as_ref().map(order_from_row).transpose()
+}
+
+pub async fn start_edit_draft(pool: &SqlitePool, order_id: Uuid) -> anyhow::Result<()> {
+    let result = sqlx::query(
+        r#"
+        UPDATE orders
+        SET pending_contract_address = contract_address,
+            pending_x_url = x_url,
+            pending_telegram_url = telegram_url,
+            pending_edit_field = NULL,
+            edit_status = 'draft',
+            edit_payment_chain = NULL,
+            edit_tx_hash = NULL,
+            edit_payment_expires_at = NULL,
+            edit_paid_at = NULL,
+            updated_at = datetime('now')
+        WHERE id = ? AND status = 'done'
+        "#,
+    )
+    .bind(uuid_value(order_id))
+    .execute(pool)
+    .await?;
+    if result.rows_affected() != 1 {
+        anyhow::bail!("completed order does not exist: {order_id}");
+    }
+    Ok(())
+}
+
+pub async fn set_pending_edit_field(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    field: Option<&str>,
+) -> anyhow::Result<()> {
+    if let Some(field) = field
+        && !matches!(field, "contract" | "x" | "telegram")
+    {
+        anyhow::bail!("disallowed edit field: {field}");
+    }
+    sqlx::query(
+        r#"
+        UPDATE orders
+        SET pending_edit_field = ?, edit_status = 'draft', updated_at = datetime('now')
+        WHERE id = ? AND status = 'done'
+        "#,
+    )
+    .bind(field)
+    .bind(uuid_value(order_id))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn update_pending_edit_value(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    field: &str,
+    value: &str,
+) -> anyhow::Result<()> {
+    let column = match field {
+        "contract" => "pending_contract_address",
+        "x" => "pending_x_url",
+        "telegram" => "pending_telegram_url",
+        other => anyhow::bail!("disallowed edit field: {other}"),
+    };
+    let sql = format!(
+        "UPDATE orders SET {column} = ?, pending_edit_field = NULL, edit_status = 'draft', updated_at = datetime('now') WHERE id = ? AND status = 'done'"
+    );
+    sqlx::query(&sql)
+        .bind(value)
+        .bind(uuid_value(order_id))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn clear_edit_draft(pool: &SqlitePool, order_id: Uuid) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE orders
+        SET pending_contract_address = NULL,
+            pending_x_url = NULL,
+            pending_telegram_url = NULL,
+            pending_edit_field = NULL,
+            edit_status = 'none',
+            edit_payment_chain = NULL,
+            edit_tx_hash = NULL,
+            edit_payment_expires_at = NULL,
+            edit_paid_at = NULL,
+            updated_at = datetime('now')
+        WHERE id = ?
+        "#,
+    )
+    .bind(uuid_value(order_id))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn user_edit_success_count(
+    pool: &SqlitePool,
+    telegram_user_id: i64,
+) -> anyhow::Result<i64> {
+    let row = sqlx::query(
+        r#"
+        SELECT COALESCE(SUM(o.edit_success_count), 0) AS count
+        FROM orders o
+        JOIN users u ON o.user_id = u.id
+        WHERE u.telegram_user_id = ?
+        "#,
+    )
+    .bind(telegram_user_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.get("count"))
+}
+
+pub async fn mark_edit_need_pay(pool: &SqlitePool, order_id: Uuid) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE orders
+        SET edit_status = 'need_pay',
+            edit_payment_chain = NULL,
+            edit_tx_hash = NULL,
+            edit_payment_expires_at = NULL,
+            updated_at = datetime('now')
+        WHERE id = ? AND status = 'done'
+        "#,
+    )
+    .bind(uuid_value(order_id))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn attach_edit_payment_chain(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    chain: PaymentChain,
+) -> anyhow::Result<PaymentWindow> {
+    let now = Utc::now();
+    let expires_at = now + Duration::minutes(PAYMENT_WINDOW_MINUTES);
+    let row = sqlx::query(
+        r#"
+        UPDATE orders
+        SET edit_payment_chain = ?,
+            edit_payment_expires_at = COALESCE(edit_payment_expires_at, ?),
+            updated_at = datetime('now')
+        WHERE id = ?
+          AND status = 'done'
+          AND edit_status = 'need_pay'
+        RETURNING edit_payment_expires_at
+        "#,
+    )
+    .bind(chain.as_str())
+    .bind(expires_at.to_rfc3339())
+    .bind(uuid_value(order_id))
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        anyhow::bail!("edit is not waiting for payment or does not exist");
+    };
+    Ok(PaymentWindow {
+        started_at: now,
+        expires_at: parse_db_datetime(row.get::<&str, _>("edit_payment_expires_at"))?,
+    })
+}
+
+pub async fn mark_edit_paid(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    chain: PaymentChain,
+    tx_hash: &str,
+) -> anyhow::Result<()> {
+    let canonical = canonical_tx_hash(chain, tx_hash);
+    let result = sqlx::query(
+        r#"
+        UPDATE orders
+        SET edit_payment_chain = ?,
+            edit_tx_hash = ?,
+            edit_paid_at = datetime('now'),
+            edit_status = 'applying',
+            updated_at = datetime('now')
+        WHERE id = ? AND status = 'done' AND edit_status = 'need_pay'
+        "#,
+    )
+    .bind(chain.as_str())
+    .bind(&canonical)
+    .bind(uuid_value(order_id))
+    .execute(pool)
+    .await?;
+    if result.rows_affected() != 1 {
+        anyhow::bail!("edit is not waiting for payment or does not exist");
+    }
+    Ok(())
+}
+
+pub async fn mark_edit_applying(pool: &SqlitePool, order_id: Uuid) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE orders SET edit_status = 'applying', updated_at = datetime('now') WHERE id = ? AND status = 'done'",
+    )
+    .bind(uuid_value(order_id))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn mark_edit_success_and_update_fields(
+    pool: &SqlitePool,
+    order_id: Uuid,
+    contract_address: &str,
+    x_url: &str,
+    telegram_url: &str,
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        r#"
+        UPDATE orders
+        SET contract_address = ?,
+            x_url = ?,
+            telegram_url = ?,
+            pending_contract_address = NULL,
+            pending_x_url = NULL,
+            pending_telegram_url = NULL,
+            pending_edit_field = NULL,
+            edit_status = 'none',
+            edit_payment_chain = NULL,
+            edit_tx_hash = NULL,
+            edit_payment_expires_at = NULL,
+            edit_paid_at = NULL,
+            edit_success_count = edit_success_count + 1,
+            updated_at = datetime('now')
+        WHERE id = ? AND status = 'done'
+        "#,
+    )
+    .bind(contract_address)
+    .bind(x_url)
+    .bind(telegram_url)
+    .bind(uuid_value(order_id))
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE websites
+        SET contract_address = ?,
+            x_url = ?,
+            telegram_url = ?,
+            updated_at = datetime('now')
+        WHERE order_id = ?
+        "#,
+    )
+    .bind(contract_address)
+    .bind(x_url)
+    .bind(telegram_url)
+    .bind(uuid_value(order_id))
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn mark_edit_manual_review(pool: &SqlitePool, order_id: Uuid) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE orders SET edit_status = 'need_manual_review', updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(uuid_value(order_id))
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 // ============================================================
@@ -835,11 +1181,11 @@ pub async fn create_website(
     let row = sqlx::query(
         r#"
         INSERT INTO websites (
-            id, user_id, order_id, token_ticker, token_name, contract_address,
+            id, user_id, order_id, token_chain, token_ticker, token_name, contract_address,
             x_url, telegram_url, logo_asset_path, requested_domain,
             generation_provider_used
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(order_id) DO UPDATE SET
             generation_provider_used = EXCLUDED.generation_provider_used,
             updated_at = datetime('now')
@@ -849,6 +1195,7 @@ pub async fn create_website(
     .bind(uuid_value(id))
     .bind(uuid_value(user_id))
     .bind(uuid_value(order_id))
+    .bind(input.token_chain.as_str())
     .bind(&input.token_ticker)
     .bind(&input.token_name)
     .bind(&input.contract_address)
@@ -926,6 +1273,10 @@ fn order_from_row(row: &SqliteRow) -> anyhow::Result<Order> {
         status,
         build_mode,
         template_id: row.get("template_id"),
+        token_chain: row
+            .get::<Option<String>, _>("token_chain")
+            .as_deref()
+            .and_then(TokenChain::from_db),
         token_ticker: row.get("token_ticker"),
         token_name: row.get("token_name"),
         contract_address: row.get("contract_address"),
@@ -952,6 +1303,27 @@ fn order_from_row(row: &SqliteRow) -> anyhow::Result<Order> {
             .as_deref()
             .map(parse_db_datetime)
             .transpose()?,
+        pending_contract_address: row.get("pending_contract_address"),
+        pending_x_url: row.get("pending_x_url"),
+        pending_telegram_url: row.get("pending_telegram_url"),
+        pending_edit_field: row.get("pending_edit_field"),
+        edit_status: row.get("edit_status"),
+        edit_payment_chain: row
+            .get::<Option<String>, _>("edit_payment_chain")
+            .as_deref()
+            .and_then(PaymentChain::from_db),
+        edit_tx_hash: row.get("edit_tx_hash"),
+        edit_payment_expires_at: row
+            .get::<Option<String>, _>("edit_payment_expires_at")
+            .as_deref()
+            .map(parse_db_datetime)
+            .transpose()?,
+        edit_paid_at: row
+            .get::<Option<String>, _>("edit_paid_at")
+            .as_deref()
+            .map(parse_db_datetime)
+            .transpose()?,
+        edit_success_count: row.get("edit_success_count"),
         attempt_count: row.get("attempt_count"),
         created_at: parse_db_datetime(row.get::<&str, _>("created_at"))?,
         updated_at: parse_db_datetime(row.get::<&str, _>("updated_at"))?,

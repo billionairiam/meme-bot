@@ -8,10 +8,13 @@ use tracing::{info, warn};
 use crate::{
     api_client::HttpClientDomainRegistrar,
     db,
+    deployment::github::{RepoTextEditRequest, replace_repo_text_and_push},
     domain::DomainRegistrar,
-    models::{BuildMode, Order, OrderStatus, PaymentChain},
+    models::{BuildMode, Order, OrderStatus, PaymentChain, TokenChain},
     validation::{
-        validate_contract_address, validate_domain, validate_telegram_url, validate_x_url,
+        DEFAULT_CONTRACT_ADDRESS, DEFAULT_TELEGRAM_URL, DEFAULT_X_URL,
+        validate_contract_address_for_chain, validate_domain, validate_telegram_url,
+        validate_x_url,
     },
 };
 
@@ -73,6 +76,7 @@ pub(crate) async fn handle_message(
             }
             "/status" => return show_status(&bot, msg.chat.id, user_id, &pool).await,
             "/history" => return show_history(&bot, msg.chat.id, user_id, &pool).await,
+            "/edit" => return show_edit_list(&bot, msg.chat.id, user_id, &pool).await,
             "/continue" => {
                 return handle_continue_command(&bot, msg.chat.id, user_id, &pool, &config).await;
             }
@@ -87,6 +91,20 @@ pub(crate) async fn handle_message(
             }
             _ => {}
         }
+    }
+
+    if current_order.is_none()
+        && handle_edit_message(
+            &bot,
+            msg.chat.id,
+            msg.text().map(str::trim),
+            user_id,
+            &config,
+            &pool,
+        )
+        .await?
+    {
+        return Ok(());
     }
 
     handle_order_step(bot, msg, user_id, config, &pool).await
@@ -161,7 +179,7 @@ pub(crate) async fn handle_callback(
                         build_mode = "ai_free",
                         "new order created"
                     );
-                    edit_ask_logo(&bot, target).await
+                    edit_choose_chain(&bot, target).await
                 }
                 Err(error) => {
                     let msg = if format!("{error:#}").contains("pending order") {
@@ -186,6 +204,7 @@ pub(crate) async fn handle_callback(
         Some("pay_menu") => edit_payment_chain_menu(&bot, target).await,
         Some("status") => edit_status(&bot, target, query.from.id, &pool).await,
         Some("history") => edit_history(&bot, target, query.from.id, &pool).await,
+        Some("edit") => edit_edit_list(&bot, target, query.from.id, &pool).await,
         Some("contact_admin") => edit_contact_admin(&bot, target, &config).await,
         Some("pay_erc20") => {
             edit_payment_chain_and_ask_tx(
@@ -256,7 +275,7 @@ pub(crate) async fn handle_callback(
                                 build_mode = "template",
                                 "new template order created"
                             );
-                            edit_ask_logo(&bot, target).await
+                            edit_choose_chain(&bot, target).await
                         }
                         Err(error) => {
                             let msg = if format!("{error:#}").contains("pending order") {
@@ -295,6 +314,57 @@ pub(crate) async fn handle_callback(
             let domain = data.trim_start_matches("alt_domain:");
             handle_alternative_domain_selection(&bot, target, query.from.id, domain, &config, &pool)
                 .await
+        }
+        Some(data) if data.starts_with("token_chain:") => {
+            handle_token_chain_selection(
+                &bot,
+                target,
+                query.from.id,
+                data.trim_start_matches("token_chain:"),
+                &pool,
+            )
+            .await
+        }
+        Some(data) if data.starts_with("edit_select:") => {
+            handle_edit_select(
+                &bot,
+                target,
+                query.from.id,
+                data.trim_start_matches("edit_select:"),
+                &pool,
+            )
+            .await
+        }
+        Some(data) if data.starts_with("edit_field:") => {
+            handle_edit_field_select(
+                &bot,
+                target,
+                query.from.id,
+                data.trim_start_matches("edit_field:"),
+                &pool,
+            )
+            .await
+        }
+        Some(data) if data.starts_with("edit_apply:") => {
+            handle_edit_apply(
+                &bot,
+                target,
+                query.from.id,
+                data.trim_start_matches("edit_apply:"),
+                &config,
+                &pool,
+            )
+            .await
+        }
+        Some(data) if data.starts_with("edit_cancel:") => {
+            handle_edit_cancel(
+                &bot,
+                target,
+                query.from.id,
+                data.trim_start_matches("edit_cancel:"),
+                &pool,
+            )
+            .await
         }
         Some(data) if data.starts_with("skip_optional:") => {
             let field = data.trim_start_matches("skip_optional:");
@@ -419,10 +489,19 @@ async fn handle_order_step(
     let order_id = order.id;
 
     match order.status {
+        OrderStatus::NeedChain => bot
+            .send_message(
+                msg.chat.id,
+                "⛓ <b>1/8 Chain</b>\nChoose the meme website chain.",
+            )
+            .parse_mode(ParseMode::Html)
+            .reply_markup(token_chain_keyboard())
+            .await
+            .map(|_| ()),
         OrderStatus::NeedLogo => {
             let Some(photo) = msg.photo().and_then(|photos| photos.last()) else {
                 return bot
-                    .send_message(msg.chat.id, "🖼 <b>1/7 Logo</b>\nUpload token logo.")
+                    .send_message(msg.chat.id, "🖼 <b>2/8 Logo</b>\nUpload token logo.")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
@@ -450,7 +529,7 @@ async fn handle_order_step(
                     info!(user_id = user_id.0 as i64, %order_id, logo_path = %local_path, "logo saved");
                     bot.send_message(
                         msg.chat.id,
-                        "✅ Logo saved.\n🔤 <b>2/7 Ticker</b>\nExample: <code>PEPE</code>",
+                        "✅ Logo saved.\n🔤 <b>3/8 Ticker</b>\nExample: <code>PEPE</code>",
                     )
                     .parse_mode(ParseMode::Html)
                     .await
@@ -471,7 +550,7 @@ async fn handle_order_step(
         OrderStatus::NeedTicker => {
             let Some(text) = msg.text().map(str::trim) else {
                 return bot
-                    .send_message(msg.chat.id, "🔤 <b>2/7 Ticker</b>\nSend ticker.")
+                    .send_message(msg.chat.id, "🔤 <b>3/8 Ticker</b>\nSend ticker.")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
@@ -503,7 +582,7 @@ async fn handle_order_step(
             }
             bot.send_message(
                 msg.chat.id,
-                "✅ Ticker saved.\n🏷 <b>3/7 Name</b>\nExample: <code>Pepe Coin</code>",
+                "✅ Ticker saved.\n🏷 <b>4/8 Name</b>\nExample: <code>Pepe Coin</code>",
             )
             .parse_mode(ParseMode::Html)
             .await
@@ -512,7 +591,7 @@ async fn handle_order_step(
         OrderStatus::NeedName => {
             let Some(text) = msg.text().map(str::trim) else {
                 return bot
-                    .send_message(msg.chat.id, "🏷 <b>3/7 Name</b>\nSend token name.")
+                    .send_message(msg.chat.id, "🏷 <b>4/8 Name</b>\nSend token name.")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
@@ -537,7 +616,7 @@ async fn handle_order_step(
             }
             bot.send_message(
                 msg.chat.id,
-                "✅ Name saved.\n🔗 <b>4/7 Contract</b>\nSend contract address or tap Skip.",
+                "✅ Name saved.\n🔗 <b>5/8 Contract</b>\nSend contract address or tap Skip.",
             )
             .parse_mode(ParseMode::Html)
             .reply_markup(optional_step_keyboard("contract"))
@@ -549,18 +628,26 @@ async fn handle_order_step(
                 return bot
                     .send_message(
                         msg.chat.id,
-                        "🔗 <b>4/7 Contract</b>\nSend contract address or tap Skip.",
+                        "🔗 <b>5/8 Contract</b>\nSend contract address or tap Skip.",
                     )
                     .parse_mode(ParseMode::Html)
                     .reply_markup(optional_step_keyboard("contract"))
                     .await
                     .map(|_| ());
             };
-            if validate_contract_address(text).is_err() {
+            let Some(chain) = order.token_chain else {
+                return bot
+                    .send_message(msg.chat.id, "⛓ <b>Chain missing.</b>\nUse /continue.")
+                    .parse_mode(ParseMode::Html)
+                    .reply_markup(token_chain_keyboard())
+                    .await
+                    .map(|_| ());
+            };
+            if validate_contract_address_for_chain(chain, text).is_err() {
                 return bot
                     .send_message(
                         msg.chat.id,
-                        "<b>Invalid contract.</b>\nSend EVM, TRON, or SOL address, or tap Skip.",
+                        "<b>Invalid contract.</b>\nSend a contract for the selected chain, or tap Skip.",
                     )
                     .parse_mode(ParseMode::Html)
                     .reply_markup(optional_step_keyboard("contract"))
@@ -580,7 +667,7 @@ async fn handle_order_step(
             }
             bot.send_message(
                 msg.chat.id,
-                "✅ Contract saved.\n✕ <b>5/7 X</b>\n<code>https://x.com/yourproject</code>\nSend X link or tap Skip.",
+                "✅ Contract saved.\n✕ <b>6/8 X</b>\n<code>https://x.com/yourproject</code>\nSend X link or tap Skip.",
             )
             .parse_mode(ParseMode::Html)
             .reply_markup(optional_step_keyboard("x"))
@@ -590,7 +677,7 @@ async fn handle_order_step(
         OrderStatus::NeedXLink => {
             let Some(text) = msg.text().map(str::trim) else {
                 return bot
-                    .send_message(msg.chat.id, "✕ <b>5/7 X</b>\nSend X link or tap Skip.")
+                    .send_message(msg.chat.id, "✕ <b>6/8 X</b>\nSend X link or tap Skip.")
                     .parse_mode(ParseMode::Html)
                     .reply_markup(optional_step_keyboard("x"))
                     .await
@@ -620,7 +707,7 @@ async fn handle_order_step(
             }
             bot.send_message(
                 msg.chat.id,
-                "✅ X saved.\n💬 <b>6/7 Telegram</b>\n<code>https://t.me/yourgroup</code>\nSend Telegram link or tap Skip.",
+                "✅ X saved.\n💬 <b>7/8 Telegram</b>\n<code>https://t.me/yourgroup</code>\nSend Telegram link or tap Skip.",
             )
             .parse_mode(ParseMode::Html)
             .reply_markup(optional_step_keyboard("telegram"))
@@ -632,7 +719,7 @@ async fn handle_order_step(
                 return bot
                     .send_message(
                         msg.chat.id,
-                        "💬 <b>6/7 Telegram</b>\nSend Telegram link or tap Skip.",
+                        "💬 <b>7/8 Telegram</b>\nSend Telegram link or tap Skip.",
                     )
                     .parse_mode(ParseMode::Html)
                     .reply_markup(optional_step_keyboard("telegram"))
@@ -663,7 +750,7 @@ async fn handle_order_step(
             }
             bot.send_message(
                 msg.chat.id,
-                "✅ Telegram saved.\n🌐 <b>7/7 Domain</b>\nExample: <code>pepe.xyz</code>",
+                "✅ Telegram saved.\n🌐 <b>8/8 Domain</b>\nExample: <code>pepe.xyz</code>",
             )
             .parse_mode(ParseMode::Html)
             .await
@@ -672,7 +759,7 @@ async fn handle_order_step(
         OrderStatus::NeedDomain => {
             let Some(text) = msg.text().map(str::trim) else {
                 return bot
-                    .send_message(msg.chat.id, "🌐 <b>7/7 Domain</b>\nSend domain.")
+                    .send_message(msg.chat.id, "🌐 <b>8/8 Domain</b>\nSend domain.")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
@@ -903,26 +990,29 @@ async fn handle_optional_step_skip(
         }
     };
 
-    let (expected_status, db_field, next_status, next_text, next_keyboard) = match field {
+    let (expected_status, db_field, value, next_status, next_text, next_keyboard) = match field {
         "contract" => (
             OrderStatus::NeedContract,
             "contract_address",
+            DEFAULT_CONTRACT_ADDRESS,
             OrderStatus::NeedXLink,
-            "⏭ Contract skipped.\n✕ <b>5/7 X</b>\nSend X link or tap Skip.",
+            "⏭ Contract skipped.\n✕ <b>6/8 X</b>\nSend X link or tap Skip.",
             optional_step_keyboard("x"),
         ),
         "x" => (
             OrderStatus::NeedXLink,
             "x_url",
+            DEFAULT_X_URL,
             OrderStatus::NeedTme,
-            "⏭ X skipped.\n💬 <b>6/7 Telegram</b>\nSend Telegram link or tap Skip.",
+            "⏭ X skipped.\n💬 <b>7/8 Telegram</b>\nSend Telegram link or tap Skip.",
             optional_step_keyboard("telegram"),
         ),
         "telegram" => (
             OrderStatus::NeedTme,
             "telegram_url",
+            DEFAULT_TELEGRAM_URL,
             OrderStatus::NeedDomain,
-            "⏭ Telegram skipped.\n🌐 <b>7/7 Domain</b>\nExample: <code>pepe.xyz</code>",
+            "⏭ Telegram skipped.\n🌐 <b>8/8 Domain</b>\nExample: <code>pepe.xyz</code>",
             cancel_keyboard(),
         ),
         other => {
@@ -942,7 +1032,7 @@ async fn handle_optional_step_skip(
     }
 
     if let Err(e) =
-        db::update_order_field_and_status(pool, order.id, db_field, "", next_status).await
+        db::update_order_field_and_status(pool, order.id, db_field, value, next_status).await
     {
         warn!(?e, order_id = %order.id, field, "failed to skip optional field");
         return edit_screen(
@@ -955,6 +1045,567 @@ async fn handle_optional_step_skip(
     }
 
     edit_screen(bot, target, next_text, next_keyboard).await
+}
+
+async fn handle_token_chain_selection(
+    bot: &Bot,
+    target: UiMessage,
+    user_id: UserId,
+    value: &str,
+    pool: &SqlitePool,
+) -> ResponseResult<()> {
+    let Some(chain) = TokenChain::from_db(value) else {
+        return edit_screen(bot, target, "<b>Unknown chain.</b>", token_chain_keyboard()).await;
+    };
+    let order = match db::get_unpaid_order(pool, user_id.0 as i64).await {
+        Ok(Some(order)) => order,
+        _ => {
+            return edit_screen(
+                bot,
+                target,
+                "<b>No active order.</b>\nUse /create.",
+                main_menu_keyboard(),
+            )
+            .await;
+        }
+    };
+    if order.status != OrderStatus::NeedChain {
+        return edit_screen(
+            bot,
+            target,
+            "<b>This step is no longer active.</b>\nUse /continue.",
+            main_menu_keyboard(),
+        )
+        .await;
+    }
+    if let Err(error) = db::update_order_field_and_status(
+        pool,
+        order.id,
+        "token_chain",
+        chain.as_str(),
+        OrderStatus::NeedLogo,
+    )
+    .await
+    {
+        warn!(?error, order_id = %order.id, "failed to save token chain");
+        return edit_screen(bot, target, "<b>Save failed.</b>", cancel_keyboard()).await;
+    }
+    edit_screen(
+        bot,
+        target,
+        format!(
+            "✅ Chain saved: <b>{}</b>\n🖼 <b>2/8 Logo</b>\nUpload token logo.",
+            chain.display_label()
+        ),
+        cancel_keyboard(),
+    )
+    .await
+}
+
+async fn handle_edit_select(
+    bot: &Bot,
+    target: UiMessage,
+    user_id: UserId,
+    order_id: &str,
+    pool: &SqlitePool,
+) -> ResponseResult<()> {
+    let Ok(order_id) = uuid::Uuid::parse_str(order_id) else {
+        return edit_screen(bot, target, "<b>Invalid order.</b>", main_menu_keyboard()).await;
+    };
+    let order = match db::get_completed_order_for_user(pool, user_id.0 as i64, order_id).await {
+        Ok(Some(order)) => order,
+        _ => {
+            return edit_screen(
+                bot,
+                target,
+                "<b>Website not found.</b>",
+                main_menu_keyboard(),
+            )
+            .await;
+        }
+    };
+    if order.edit_status == "none"
+        && let Err(error) = db::start_edit_draft(pool, order_id).await
+    {
+        warn!(?error, %order_id, "failed to start edit draft");
+        return edit_screen(bot, target, "<b>Edit failed.</b>", main_menu_keyboard()).await;
+    }
+    let order = db::get_order(pool, order_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(order);
+    let free_used = db::user_edit_success_count(pool, user_id.0 as i64)
+        .await
+        .unwrap_or(0);
+    edit_screen(
+        bot,
+        target,
+        edit_order_text(&order, free_used),
+        edit_menu_keyboard(order_id),
+    )
+    .await
+}
+
+async fn handle_edit_field_select(
+    bot: &Bot,
+    target: UiMessage,
+    user_id: UserId,
+    data: &str,
+    pool: &SqlitePool,
+) -> ResponseResult<()> {
+    let mut parts = data.split(':');
+    let Some(order_id) = parts.next().and_then(|v| uuid::Uuid::parse_str(v).ok()) else {
+        return edit_screen(bot, target, "<b>Invalid order.</b>", main_menu_keyboard()).await;
+    };
+    let Some(field) = parts.next() else {
+        return edit_screen(bot, target, "<b>Invalid field.</b>", main_menu_keyboard()).await;
+    };
+    if !matches!(field, "contract" | "x" | "telegram") {
+        return edit_screen(bot, target, "<b>Invalid field.</b>", main_menu_keyboard()).await;
+    }
+    match db::get_completed_order_for_user(pool, user_id.0 as i64, order_id).await {
+        Ok(Some(_)) => {}
+        _ => {
+            return edit_screen(
+                bot,
+                target,
+                "<b>Website not found.</b>",
+                main_menu_keyboard(),
+            )
+            .await;
+        }
+    }
+    if let Err(error) = db::set_pending_edit_field(pool, order_id, Some(field)).await {
+        warn!(?error, %order_id, field, "failed to select edit field");
+        return edit_screen(bot, target, "<b>Edit failed.</b>", main_menu_keyboard()).await;
+    }
+    let prompt = match field {
+        "contract" => "Send new contract address.",
+        "x" => "Send new X URL.",
+        "telegram" => "Send new Telegram URL.",
+        _ => unreachable!(),
+    };
+    edit_screen(
+        bot,
+        target,
+        format!("✏️ <b>Edit</b>\n{prompt}"),
+        cancel_keyboard(),
+    )
+    .await
+}
+
+async fn handle_edit_cancel(
+    bot: &Bot,
+    target: UiMessage,
+    user_id: UserId,
+    order_id: &str,
+    pool: &SqlitePool,
+) -> ResponseResult<()> {
+    let Ok(order_id) = uuid::Uuid::parse_str(order_id) else {
+        return edit_screen(bot, target, "<b>Invalid order.</b>", main_menu_keyboard()).await;
+    };
+    if db::get_completed_order_for_user(pool, user_id.0 as i64, order_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        let _ = db::clear_edit_draft(pool, order_id).await;
+    }
+    edit_screen(
+        bot,
+        target,
+        "🛑 <b>Edit cancelled.</b>",
+        main_menu_keyboard(),
+    )
+    .await
+}
+
+async fn handle_edit_apply(
+    bot: &Bot,
+    target: UiMessage,
+    user_id: UserId,
+    order_id: &str,
+    config: &TelegramUiConfig,
+    pool: &SqlitePool,
+) -> ResponseResult<()> {
+    let Ok(order_id) = uuid::Uuid::parse_str(order_id) else {
+        return edit_screen(bot, target, "<b>Invalid order.</b>", main_menu_keyboard()).await;
+    };
+    let order = match db::get_completed_order_for_user(pool, user_id.0 as i64, order_id).await {
+        Ok(Some(order)) => order,
+        _ => {
+            return edit_screen(
+                bot,
+                target,
+                "<b>Website not found.</b>",
+                main_menu_keyboard(),
+            )
+            .await;
+        }
+    };
+    match dry_run_edit(&order, config).await {
+        Ok(0) => {
+            let _ = db::clear_edit_draft(pool, order_id).await;
+            return edit_screen(bot, target, "<b>No changes.</b>", main_menu_keyboard()).await;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(?error, %order_id, "edit dry-run failed");
+            let _ = db::mark_edit_manual_review(pool, order_id).await;
+            return edit_screen(
+                bot,
+                target,
+                "<b>Edit needs manual review.</b>\nContact admin.",
+                main_menu_keyboard(),
+            )
+            .await;
+        }
+    }
+
+    let free_used = db::user_edit_success_count(pool, user_id.0 as i64)
+        .await
+        .unwrap_or(0);
+    if free_used < db::FREE_EDIT_LIMIT {
+        return apply_edit_and_reply(bot, target, &order, config, pool).await;
+    }
+
+    if let Err(error) = db::mark_edit_need_pay(pool, order_id).await {
+        warn!(?error, %order_id, "failed to mark edit need pay");
+        return edit_screen(bot, target, "<b>Edit failed.</b>", main_menu_keyboard()).await;
+    }
+    edit_screen(
+        bot,
+        target,
+        format!(
+            "💳 <b>Edit fee required</b>\nFree edits used: <b>{}</b>\nAmount: <b>{}</b> USDT\nChoose payment chain.",
+            free_used,
+            db::EDIT_PRICE_USDT
+        ),
+        payment_chain_keyboard(),
+    )
+    .await
+}
+
+async fn handle_edit_message(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: Option<&str>,
+    user_id: UserId,
+    config: &TelegramUiConfig,
+    pool: &SqlitePool,
+) -> ResponseResult<bool> {
+    let Some(mut order) = db::get_active_edit_order(pool, user_id.0 as i64)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return Ok(false);
+    };
+    let Some(text) = text else {
+        return Ok(false);
+    };
+
+    if let Some(field) = order.pending_edit_field.clone() {
+        let validation = match field.as_str() {
+            "contract" => order
+                .token_chain
+                .map(|chain| validate_contract_address_for_chain(chain, text))
+                .unwrap_or(Err(
+                    crate::validation::ValidationError::InvalidContractAddress,
+                )),
+            "x" => validate_x_url(text),
+            "telegram" => validate_telegram_url(text),
+            _ => Err(crate::validation::ValidationError::InvalidDomain),
+        };
+        if validation.is_err() {
+            bot.send_message(chat_id, "<b>Invalid value.</b>\nSend a valid value.")
+                .parse_mode(ParseMode::Html)
+                .await?;
+            return Ok(true);
+        }
+        if let Err(error) = db::update_pending_edit_value(pool, order.id, &field, text).await {
+            warn!(?error, order_id = %order.id, field, "failed to save edit value");
+            bot.send_message(chat_id, "<b>Save failed.</b>")
+                .parse_mode(ParseMode::Html)
+                .await?;
+            return Ok(true);
+        }
+        order = db::get_order(pool, order.id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(order);
+        let free_used = db::user_edit_success_count(pool, user_id.0 as i64)
+            .await
+            .unwrap_or(0);
+        bot.send_message(chat_id, edit_order_text(&order, free_used))
+            .parse_mode(ParseMode::Html)
+            .reply_markup(edit_menu_keyboard(order.id))
+            .await?;
+        return Ok(true);
+    }
+
+    if order.edit_status == "need_pay" && looks_like_tx_hash(text) {
+        process_edit_payment_tx(bot, chat_id, user_id, &order, config, pool, text).await?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+async fn dry_run_edit(
+    order: &Order,
+    config: &TelegramUiConfig,
+) -> Result<usize, crate::deployment::DeploymentError> {
+    apply_repo_edit(order, config, true).await
+}
+
+async fn apply_repo_edit(
+    order: &Order,
+    config: &TelegramUiConfig,
+    dry_run: bool,
+) -> Result<usize, crate::deployment::DeploymentError> {
+    let fallback_repo_name = format!("site-{}", &order.id.simple().to_string()[..8]);
+    let repo_name = order
+        .requested_domain
+        .as_deref()
+        .unwrap_or(&fallback_repo_name);
+    replace_repo_text_and_push(RepoTextEditRequest {
+        repo_owner: &config.github_owner,
+        repo_name,
+        github_token: &config.github_token,
+        production_branch: "main",
+        generated_sites_dir: &config.generated_sites_dir,
+        replacements: vec![
+            (
+                order
+                    .contract_address
+                    .as_deref()
+                    .unwrap_or(DEFAULT_CONTRACT_ADDRESS),
+                order
+                    .pending_contract_address
+                    .as_deref()
+                    .unwrap_or(DEFAULT_CONTRACT_ADDRESS),
+            ),
+            (
+                order.x_url.as_deref().unwrap_or(DEFAULT_X_URL),
+                order.pending_x_url.as_deref().unwrap_or(DEFAULT_X_URL),
+            ),
+            (
+                order
+                    .telegram_url
+                    .as_deref()
+                    .unwrap_or(DEFAULT_TELEGRAM_URL),
+                order
+                    .pending_telegram_url
+                    .as_deref()
+                    .unwrap_or(DEFAULT_TELEGRAM_URL),
+            ),
+        ],
+        dry_run,
+    })
+    .await
+}
+
+async fn apply_edit_and_reply(
+    bot: &Bot,
+    target: UiMessage,
+    order: &Order,
+    config: &TelegramUiConfig,
+    pool: &SqlitePool,
+) -> ResponseResult<()> {
+    if let Err(error) = db::mark_edit_applying(pool, order.id).await {
+        warn!(?error, order_id = %order.id, "failed to mark edit applying");
+        return edit_screen(bot, target, "<b>Edit failed.</b>", main_menu_keyboard()).await;
+    }
+    match apply_repo_edit(order, config, false).await {
+        Ok(_) => {
+            let contract = order
+                .pending_contract_address
+                .as_deref()
+                .unwrap_or(DEFAULT_CONTRACT_ADDRESS);
+            let x = order.pending_x_url.as_deref().unwrap_or(DEFAULT_X_URL);
+            let telegram = order
+                .pending_telegram_url
+                .as_deref()
+                .unwrap_or(DEFAULT_TELEGRAM_URL);
+            if let Err(error) =
+                db::mark_edit_success_and_update_fields(pool, order.id, contract, x, telegram).await
+            {
+                warn!(?error, order_id = %order.id, "failed to record successful edit");
+                return edit_screen(
+                    bot,
+                    target,
+                    "<b>Edit pushed, but DB update failed.</b>\nContact admin.",
+                    main_menu_keyboard(),
+                )
+                .await;
+            }
+            edit_screen(
+                bot,
+                target,
+                "✅ <b>Edit pushed.</b>\nCloudflare Pages will update from GitHub.",
+                main_menu_keyboard(),
+            )
+            .await
+        }
+        Err(error) => {
+            warn!(?error, order_id = %order.id, "failed to apply repo edit");
+            let _ = db::mark_edit_manual_review(pool, order.id).await;
+            edit_screen(
+                bot,
+                target,
+                "<b>Edit needs manual review.</b>\nContact admin.",
+                main_menu_keyboard(),
+            )
+            .await
+        }
+    }
+}
+
+async fn process_edit_payment_tx(
+    bot: &Bot,
+    chat_id: ChatId,
+    user_id: UserId,
+    order: &Order,
+    config: &TelegramUiConfig,
+    pool: &SqlitePool,
+    tx_hash: &str,
+) -> ResponseResult<()> {
+    let chain = order.edit_payment_chain.unwrap_or(PaymentChain::Erc20);
+    match db::tx_hash_already_used(pool, chain, tx_hash).await {
+        Ok(true) => {
+            return bot
+                .send_message(chat_id, "<b>TX already used.</b>\nSend a new TX.")
+                .parse_mode(ParseMode::Html)
+                .await
+                .map(|_| ());
+        }
+        Ok(false) => {}
+        Err(error) => warn!(?error, "failed to check edit tx reuse"),
+    }
+
+    if !config.skip_payment_verification {
+        let expected_to_address = payment_address_for_chain(config, chain).trim().to_string();
+        let Some(expires_at) = order.edit_payment_expires_at else {
+            return bot
+                .send_message(
+                    chat_id,
+                    "<b>Payment window missing.</b>\nChoose chain again.",
+                )
+                .parse_mode(ParseMode::Html)
+                .reply_markup(payment_chain_keyboard())
+                .await
+                .map(|_| ());
+        };
+        let verifier = crate::payment::ChainPaymentVerifier::new(
+            config.usdt_erc20_rpc_url.clone(),
+            config.usdt_erc20_contract.clone(),
+            config.usdt_erc20_min_confirmations,
+            config.tron_grid_base_url.clone(),
+            config.tron_grid_api_key.clone(),
+            config.usdt_tron_contract.clone(),
+            config.usdt_tron_min_confirmations,
+            config.solana_rpc_url.clone(),
+            config.usdt_sol_mint.clone(),
+            config.usdt_sol_min_confirmations,
+        );
+        let service = crate::payment::PaymentService::new(verifier);
+        let request = crate::payment::PaymentVerificationRequest {
+            order_id: order.id,
+            chain,
+            tx_hash: tx_hash.to_string(),
+            expected_to_address,
+            required_amount_usdt: rust_decimal::Decimal::from(db::EDIT_PRICE_USDT),
+            payment_started_at: expires_at - chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES),
+            submitted_at: chrono::Utc::now(),
+            expires_at,
+        };
+        if let Err(error) = super::payment::verify_payment_with_retries(&service, request).await {
+            return bot
+                .send_message(
+                    chat_id,
+                    format!(
+                        "❌ <b>Payment not confirmed.</b>\n{}",
+                        html_escape(&payment_error_for_user(&error))
+                    ),
+                )
+                .parse_mode(ParseMode::Html)
+                .await
+                .map(|_| ());
+        }
+    }
+
+    if let Err(error) = db::mark_edit_paid(pool, order.id, chain, tx_hash).await {
+        warn!(?error, order_id = %order.id, "failed to record edit payment");
+        return bot
+            .send_message(chat_id, "<b>Payment record failed.</b>\nContact admin.")
+            .parse_mode(ParseMode::Html)
+            .await
+            .map(|_| ());
+    }
+    let order = db::get_order(pool, order.id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| order.clone());
+    apply_edit_and_send(bot, chat_id, user_id, &order, config, pool).await
+}
+
+async fn apply_edit_and_send(
+    bot: &Bot,
+    chat_id: ChatId,
+    _user_id: UserId,
+    order: &Order,
+    config: &TelegramUiConfig,
+    pool: &SqlitePool,
+) -> ResponseResult<()> {
+    match apply_repo_edit(order, config, false).await {
+        Ok(_) => {
+            let contract = order
+                .pending_contract_address
+                .as_deref()
+                .unwrap_or(DEFAULT_CONTRACT_ADDRESS);
+            let x = order.pending_x_url.as_deref().unwrap_or(DEFAULT_X_URL);
+            let telegram = order
+                .pending_telegram_url
+                .as_deref()
+                .unwrap_or(DEFAULT_TELEGRAM_URL);
+            if let Err(error) =
+                db::mark_edit_success_and_update_fields(pool, order.id, contract, x, telegram).await
+            {
+                warn!(?error, order_id = %order.id, "failed to record successful paid edit");
+                return bot
+                    .send_message(
+                        chat_id,
+                        "<b>Edit pushed, DB update failed.</b>\nContact admin.",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .reply_markup(main_menu_keyboard())
+                    .await
+                    .map(|_| ());
+            }
+            bot.send_message(
+                chat_id,
+                "✅ <b>Edit pushed.</b>\nCloudflare Pages will update from GitHub.",
+            )
+            .parse_mode(ParseMode::Html)
+            .reply_markup(main_menu_keyboard())
+            .await
+            .map(|_| ())
+        }
+        Err(error) => {
+            warn!(?error, order_id = %order.id, "failed to apply paid repo edit");
+            let _ = db::mark_edit_manual_review(pool, order.id).await;
+            bot.send_message(chat_id, "<b>Edit needs manual review.</b>\nContact admin.")
+                .parse_mode(ParseMode::Html)
+                .reply_markup(main_menu_keyboard())
+                .await
+                .map(|_| ())
+        }
+    }
 }
 
 async fn ensure_group_member(
@@ -1038,6 +1689,46 @@ async fn edit_payment_chain_and_ask_tx(
     address: &str,
     pool: &SqlitePool,
 ) -> ResponseResult<()> {
+    if let Ok(Some(edit_order)) = db::get_active_edit_order(pool, user_id.0 as i64).await
+        && edit_order.edit_status == "need_pay"
+    {
+        if address.trim().is_empty() {
+            return edit_screen(
+                bot,
+                target,
+                "<b>Payment address missing.</b>\nContact admin.",
+                main_menu_keyboard(),
+            )
+            .await;
+        }
+        let payment_window = match db::attach_edit_payment_chain(pool, edit_order.id, chain).await {
+            Ok(window) => window,
+            Err(e) => {
+                warn!(?e, order_id = %edit_order.id, "failed to attach edit payment chain");
+                return edit_screen(
+                    bot,
+                    target,
+                    "<b>Payment start failed.</b>\nPlease try again.",
+                    main_menu_keyboard(),
+                )
+                .await;
+            }
+        };
+        return edit_screen(
+            bot,
+            target,
+            super::screens::edit_payment_instruction(
+                edit_order.id,
+                rust_decimal::Decimal::from(db::EDIT_PRICE_USDT),
+                chain,
+                address,
+                &payment_window,
+            ),
+            cancel_keyboard(),
+        )
+        .await;
+    }
+
     let order = match db::get_unpaid_order(pool, user_id.0 as i64).await {
         Ok(Some(order)) => order,
         Ok(None) => {

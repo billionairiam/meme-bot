@@ -81,7 +81,11 @@ fn template_confirmation_text(
 }
 
 fn ask_logo_text() -> &'static str {
-    "🖼 <b>1/7 Logo</b>\nUpload token logo."
+    "🖼 <b>2/8 Logo</b>\nUpload token logo."
+}
+
+fn choose_chain_text() -> &'static str {
+    "⛓ <b>1/8 Chain</b>\nChoose the meme website chain."
 }
 
 async fn status_text(user_id: UserId, pool: &SqlitePool) -> String {
@@ -158,6 +162,21 @@ pub fn payment_instruction(
 ) -> String {
     format!(
         "💳 <b>Pay</b>\nOrder: <code>{order_id}</code>\nAmount: <b>{amount_usdt}</b> USDT\nChain: <b>{}</b>\nAddress:\n<code>{}</code>\n\nExpires: <code>{}</code> UTC\nSend TX hash after payment.",
+        chain.as_str(),
+        html_escape(address),
+        payment_window.expires_at.format("%Y-%m-%d %H:%M:%S")
+    )
+}
+
+pub fn edit_payment_instruction(
+    order_id: uuid::Uuid,
+    amount_usdt: Decimal,
+    chain: PaymentChain,
+    address: &str,
+    payment_window: &db::PaymentWindow,
+) -> String {
+    format!(
+        "💳 <b>Edit Fee</b>\nOrder: <code>{order_id}</code>\nAmount: <b>{amount_usdt}</b> USDT\nChain: <b>{}</b>\nAddress:\n<code>{}</code>\n\nExpires: <code>{}</code> UTC\nSend TX hash after payment.",
         chain.as_str(),
         html_escape(address),
         payment_window.expires_at.format("%Y-%m-%d %H:%M:%S")
@@ -286,8 +305,117 @@ pub(crate) async fn edit_template_confirmation(
     .await
 }
 
-pub(crate) async fn edit_ask_logo(bot: &Bot, target: UiMessage) -> ResponseResult<()> {
-    edit_screen(bot, target, ask_logo_text(), cancel_keyboard()).await
+pub(crate) async fn edit_choose_chain(bot: &Bot, target: UiMessage) -> ResponseResult<()> {
+    edit_screen(bot, target, choose_chain_text(), token_chain_keyboard()).await
+}
+
+pub(crate) async fn show_edit_list(
+    bot: &Bot,
+    chat_id: ChatId,
+    user_id: UserId,
+    pool: &SqlitePool,
+) -> ResponseResult<()> {
+    match db::get_completed_orders(pool, user_id.0 as i64, 10).await {
+        Ok(items) if items.is_empty() => {
+            send_screen(
+                bot,
+                chat_id,
+                "✏️ <b>Edit Website</b>\nNo live websites yet.",
+                main_menu_keyboard(),
+            )
+            .await
+        }
+        Ok(items) => {
+            send_screen(
+                bot,
+                chat_id,
+                "✏️ <b>Edit Website</b>\nChoose a live website.",
+                edit_order_list_keyboard(&items),
+            )
+            .await
+        }
+        Err(error) => {
+            warn!(
+                ?error,
+                user_id = user_id.0 as i64,
+                "failed to load edit list"
+            );
+            send_screen(
+                bot,
+                chat_id,
+                "✏️ <b>Edit Website</b>\nCheck failed. Try later.",
+                main_menu_keyboard(),
+            )
+            .await
+        }
+    }
+}
+
+pub(crate) async fn edit_edit_list(
+    bot: &Bot,
+    target: UiMessage,
+    user_id: UserId,
+    pool: &SqlitePool,
+) -> ResponseResult<()> {
+    match db::get_completed_orders(pool, user_id.0 as i64, 10).await {
+        Ok(items) if items.is_empty() => {
+            edit_screen(
+                bot,
+                target,
+                "✏️ <b>Edit Website</b>\nNo live websites yet.",
+                main_menu_keyboard(),
+            )
+            .await
+        }
+        Ok(items) => {
+            edit_screen(
+                bot,
+                target,
+                "✏️ <b>Edit Website</b>\nChoose a live website.",
+                edit_order_list_keyboard(&items),
+            )
+            .await
+        }
+        Err(error) => {
+            warn!(
+                ?error,
+                user_id = user_id.0 as i64,
+                "failed to load edit list"
+            );
+            edit_screen(
+                bot,
+                target,
+                "✏️ <b>Edit Website</b>\nCheck failed. Try later.",
+                main_menu_keyboard(),
+            )
+            .await
+        }
+    }
+}
+
+pub(crate) fn edit_order_text(order: &Order, free_used: i64) -> String {
+    let pending_contract = order
+        .pending_contract_address
+        .as_deref()
+        .or(order.contract_address.as_deref())
+        .unwrap_or("—");
+    let pending_x = order
+        .pending_x_url
+        .as_deref()
+        .or(order.x_url.as_deref())
+        .unwrap_or("—");
+    let pending_tg = order
+        .pending_telegram_url
+        .as_deref()
+        .or(order.telegram_url.as_deref())
+        .unwrap_or("—");
+    let free_left = (db::FREE_EDIT_LIMIT - free_used).max(0);
+    format!(
+        "✏️ <b>Edit Website</b>\nFree edits left: <b>{free_left}</b>\n\nCA:\n<code>{}</code>\nX:\n<code>{}</code>\nTelegram:\n<code>{}</code>",
+        html_escape(pending_contract),
+        html_escape(pending_x),
+        html_escape(pending_tg)
+    )
 }
 
 pub(crate) async fn show_status(
@@ -378,6 +506,12 @@ pub(crate) async fn continue_order_screen(
     order: &Order,
 ) -> ResponseResult<()> {
     match order.status {
+        OrderStatus::NeedChain => bot
+            .send_message(chat_id, choose_chain_text())
+            .parse_mode(ParseMode::Html)
+            .reply_markup(token_chain_keyboard())
+            .await
+            .map(|_| ()),
         OrderStatus::NeedLogo => bot
             .send_message(chat_id, ask_logo_text())
             .parse_mode(ParseMode::Html)
@@ -387,7 +521,7 @@ pub(crate) async fn continue_order_screen(
         OrderStatus::NeedTicker => bot
             .send_message(
                 chat_id,
-                "🔤 <b>2/7 Ticker</b>\nSend token ticker.\nEg: PEPE",
+                "🔤 <b>3/8 Ticker</b>\nSend token ticker.\nEg: PEPE",
             )
             .parse_mode(ParseMode::Html)
             .reply_markup(cancel_keyboard())
@@ -396,7 +530,7 @@ pub(crate) async fn continue_order_screen(
         OrderStatus::NeedName => bot
             .send_message(
                 chat_id,
-                "🏷 <b>3/7 Token Name</b>\nSend token name. Eg: Pepe Coin",
+                "🏷 <b>4/8 Token Name</b>\nSend token name. Eg: Pepe Coin",
             )
             .parse_mode(ParseMode::Html)
             .reply_markup(cancel_keyboard())
@@ -405,14 +539,14 @@ pub(crate) async fn continue_order_screen(
         OrderStatus::NeedContract => bot
             .send_message(
                 chat_id,
-                "📝 <b>4/7 Contract Address</b>\nPaste contract address or tap Skip.",
+                "📝 <b>5/8 Contract Address</b>\nPaste contract address or tap Skip.",
             )
             .parse_mode(ParseMode::Html)
             .reply_markup(optional_step_keyboard("contract"))
             .await
             .map(|_| ()),
         OrderStatus::NeedXLink => bot
-            .send_message(chat_id, "✕ <b>5/7 X Link</b>\nPaste X link or tap Skip.")
+            .send_message(chat_id, "✕ <b>6/8 X Link</b>\nPaste X link or tap Skip.")
             .parse_mode(ParseMode::Html)
             .reply_markup(optional_step_keyboard("x"))
             .await
@@ -420,7 +554,7 @@ pub(crate) async fn continue_order_screen(
         OrderStatus::NeedTme => bot
             .send_message(
                 chat_id,
-                "📱 <b>6/7 Telegram Link</b>\nPaste TG link or tap Skip.",
+                "📱 <b>7/8 Telegram Link</b>\nPaste TG link or tap Skip.",
             )
             .parse_mode(ParseMode::Html)
             .reply_markup(optional_step_keyboard("telegram"))
@@ -429,7 +563,7 @@ pub(crate) async fn continue_order_screen(
         OrderStatus::NeedDomain => bot
             .send_message(
                 chat_id,
-                "🌐 <b>7/7 Domain</b>\nSend domain name.\nEg: mytoken.xyz",
+                "🌐 <b>8/8 Domain</b>\nSend domain name.\nEg: mytoken.xyz",
             )
             .parse_mode(ParseMode::Html)
             .reply_markup(cancel_keyboard())
