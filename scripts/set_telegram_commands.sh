@@ -45,6 +45,10 @@ curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setMyCommand
       {
         "command": "cancel",
         "description": "Cancel order"
+      },
+      {
+        "command": "edit",
+        "description": "Edit order"
       }
     ]
   }'
