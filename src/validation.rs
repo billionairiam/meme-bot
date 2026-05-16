@@ -22,12 +22,21 @@ pub enum ValidationError {
 pub fn validate_website_input(input: &WebsiteInput) -> Result<(), ValidationError> {
     validate_ticker(&input.token_ticker)?;
     validate_token_name(&input.token_name)?;
-    validate_contract_address(&input.contract_address)?;
-    validate_x_url(&input.x_url)?;
-    validate_telegram_url(&input.telegram_url)?;
-    if let Some(domain) = &input.requested_domain {
-        validate_domain(domain)?;
+    if !input.contract_address.trim().is_empty() {
+        validate_contract_address(&input.contract_address)?;
     }
+    if !input.x_url.trim().is_empty() {
+        validate_x_url(&input.x_url)?;
+    }
+    if !input.telegram_url.trim().is_empty() {
+        validate_telegram_url(&input.telegram_url)?;
+    }
+    validate_domain(
+        input
+            .requested_domain
+            .as_deref()
+            .ok_or(ValidationError::InvalidDomain)?,
+    )?;
     Ok(())
 }
 
@@ -89,6 +98,20 @@ mod tests {
             contract_address: "0x1111111111111111111111111111111111111111".to_string(),
             x_url: "https://x.com/moon".to_string(),
             telegram_url: "https://t.me/moonchat".to_string(),
+            logo_asset_path: "/tmp/logo.png".to_string(),
+            requested_domain: Some("moon.xyz".to_string()),
+        };
+        assert!(validate_website_input(&input).is_ok());
+    }
+
+    #[test]
+    fn allows_optional_coin_fields_to_be_empty() {
+        let input = WebsiteInput {
+            token_ticker: "MOON".to_string(),
+            token_name: "Moon Token".to_string(),
+            contract_address: String::new(),
+            x_url: String::new(),
+            telegram_url: String::new(),
             logo_asset_path: "/tmp/logo.png".to_string(),
             requested_domain: Some("moon.xyz".to_string()),
         };

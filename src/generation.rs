@@ -185,10 +185,7 @@ impl CliGenerationProvider {
         })?;
         let done_file = request.output_dir.join(".agent_done.json");
 
-        let args = render_agent_args(
-            &self.args_template,
-            &prompt,
-        )?;
+        let args = render_agent_args(&self.args_template, &prompt)?;
 
         tracing::info!(
             provider = self.name,
@@ -229,7 +226,10 @@ impl CliGenerationProvider {
     }
 }
 
-fn agent_prompt(request: &SiteGenerationRequest, provider_name: &str) -> Result<String, GenerationError> {
+fn agent_prompt(
+    request: &SiteGenerationRequest,
+    provider_name: &str,
+) -> Result<String, GenerationError> {
     let spec = serde_json::json!({
         "order_id": request.order_id,
         "provider": provider_name,
@@ -262,10 +262,7 @@ fn agent_prompt(request: &SiteGenerationRequest, provider_name: &str) -> Result<
     } else {
         "No logo image is available. Create a text-based or emoji-based logo/token icon that fits the meme theme.".to_string()
     };
-    let dextools_url = format!(
-        "https://www.dextools.io/app/en/token/{}",
-        request.input.contract_address
-    );
+    let dextools_url = optional_dextools_url(&request.input.contract_address);
 
     let template = load_prompt_template(provider_name)?;
 
@@ -293,13 +290,9 @@ fn load_prompt_template(provider_name: &str) -> Result<String, GenerationError> 
     })
 }
 
-fn render_agent_args(
-    args_template: &str,
-    prompt: &str,
-) -> Result<Vec<String>, GenerationError> {
+fn render_agent_args(args_template: &str, prompt: &str) -> Result<Vec<String>, GenerationError> {
     const PROMPT_PLACEHOLDER: &str = "\x1f__PROMPT__\x1f";
-    let rendered = args_template
-        .replace("{prompt}", PROMPT_PLACEHOLDER);
+    let rendered = args_template.replace("{prompt}", PROMPT_PLACEHOLDER);
 
     let mut args: Vec<String> = shell_words::split(&rendered)
         .map_err(|error| GenerationError::Failed(format!("invalid agent args: {error}")))?;
@@ -433,10 +426,7 @@ fn validate_html_entry(
         ));
     }
 
-    let dextools_url = format!(
-        "https://www.dextools.io/app/en/token/{}",
-        request.input.contract_address
-    );
+    let dextools_url = optional_dextools_url(&request.input.contract_address);
     for required in [
         request.input.token_name.as_str(),
         request.input.token_ticker.as_str(),
@@ -444,7 +434,10 @@ fn validate_html_entry(
         request.input.x_url.as_str(),
         request.input.telegram_url.as_str(),
         dextools_url.as_str(),
-    ] {
+    ]
+    .into_iter()
+    .filter(|value| !value.trim().is_empty())
+    {
         if !normalized.contains(&required.to_ascii_lowercase()) {
             return Err(GenerationError::InvalidOutput(format!(
                 "entrypoint is missing required content: {required}"
@@ -453,6 +446,14 @@ fn validate_html_entry(
     }
 
     validate_local_asset_references(output_dir, entry_path, &html)
+}
+
+fn optional_dextools_url(contract_address: &str) -> String {
+    if contract_address.trim().is_empty() {
+        String::new()
+    } else {
+        format!("https://www.dextools.io/app/en/token/{contract_address}")
+    }
 }
 
 fn validate_local_asset_references(
@@ -572,5 +573,45 @@ mod tests {
         let error = validate_agent_output(&request, "test", &dir.path().join(".agent_done.json"))
             .unwrap_err();
         assert!(matches!(error, GenerationError::InvalidOutput(_)));
+    }
+
+    #[test]
+    fn html_validation_allows_missing_optional_coin_fields() {
+        let dir = tempdir().unwrap();
+        let request = SiteGenerationRequest {
+            order_id: Uuid::new_v4(),
+            build_mode: "ai_free".to_string(),
+            template_local_path: None,
+            input: WebsiteInput {
+                token_ticker: "LOGO".to_string(),
+                token_name: "Logo Coin".to_string(),
+                contract_address: String::new(),
+                x_url: String::new(),
+                telegram_url: String::new(),
+                logo_asset_path: "logo.png".to_string(),
+                requested_domain: Some("logocoin.xyz".to_string()),
+            },
+            output_dir: dir.path().to_path_buf(),
+        };
+        let entry_path = dir.path().join("index.html");
+        fs::write(
+            &entry_path,
+            r#"<!doctype html>
+<html>
+  <head><title>Logo Coin</title></head>
+  <body>
+    <main>
+      <h1>Logo Coin</h1>
+      <p>LOGO is a clean meme coin landing page generated from required brand inputs.</p>
+      <section>Hero, about, tokenomics, roadmap, and community sections with polished copy.</section>
+      <section>This page intentionally omits contract and social links because the user skipped them.</section>
+      <footer>This is a meme token. Nothing on this site is financial advice. Do your own research.</footer>
+    </main>
+  </body>
+</html>"#,
+        )
+        .unwrap();
+
+        validate_html_entry(dir.path(), &entry_path, &request).unwrap();
     }
 }

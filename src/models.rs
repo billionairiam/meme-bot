@@ -224,11 +224,11 @@ impl Order {
         Some(WebsiteInput {
             token_ticker: self.token_ticker.clone()?,
             token_name: self.token_name.clone()?,
-            contract_address: self.contract_address.clone()?,
-            x_url: self.x_url.clone()?,
-            telegram_url: self.telegram_url.clone()?,
+            contract_address: self.contract_address.clone().unwrap_or_default(),
+            x_url: self.x_url.clone().unwrap_or_default(),
+            telegram_url: self.telegram_url.clone().unwrap_or_default(),
             logo_asset_path: self.logo_asset_path.clone()?,
-            requested_domain: self.requested_domain.clone(),
+            requested_domain: Some(self.requested_domain.clone()?),
         })
     }
 }
@@ -261,4 +261,47 @@ pub struct Template {
     pub preview_url: Option<String>,
     pub price_tier: Decimal,
     pub enabled: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn website_input_requires_logo_ticker_name_and_domain() {
+        let order = Order {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            status: OrderStatus::NeedPay,
+            build_mode: Some(BuildMode::AiFree),
+            template_id: None,
+            token_ticker: Some("LOGO".to_string()),
+            token_name: Some("Logo Coin".to_string()),
+            contract_address: None,
+            x_url: None,
+            telegram_url: None,
+            logo_asset_path: Some("/tmp/logo.png".to_string()),
+            requested_domain: Some("logocoin.xyz".to_string()),
+            alternative_domains_json: None,
+            site_price_usdt: Decimal::new(50, 0),
+            domain_price_usdt: Decimal::ZERO,
+            total_usdt: Decimal::new(50, 0),
+            payment_chain: None,
+            tx_hash: None,
+            payment_expires_at: None,
+            paid_at: None,
+            attempt_count: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let input = order.website_input().expect("required input is valid");
+        assert_eq!(input.token_ticker, "LOGO");
+        assert_eq!(input.token_name, "Logo Coin");
+        assert_eq!(input.logo_asset_path, "/tmp/logo.png");
+        assert!(input.contract_address.is_empty());
+        assert!(input.x_url.is_empty());
+        assert!(input.telegram_url.is_empty());
+        assert_eq!(input.requested_domain.as_deref(), Some("logocoin.xyz"));
+    }
 }

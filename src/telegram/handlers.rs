@@ -41,7 +41,10 @@ pub(crate) async fn handle_message(
         return show_main_menu(&bot, msg.chat.id, &config).await;
     };
     let user_id = user.id;
-    let current_order = db::get_unpaid_order(&pool, user_id.0 as i64).await.ok().flatten();
+    let current_order = db::get_unpaid_order(&pool, user_id.0 as i64)
+        .await
+        .ok()
+        .flatten();
     let current_step = current_order.as_ref().map(|o| o.status.as_str());
     info!(
         user_id = user_id.0 as i64,
@@ -71,14 +74,7 @@ pub(crate) async fn handle_message(
             "/status" => return show_status(&bot, msg.chat.id, user_id, &pool).await,
             "/history" => return show_history(&bot, msg.chat.id, user_id, &pool).await,
             "/continue" => {
-                return handle_continue_command(
-                    &bot,
-                    msg.chat.id,
-                    user_id,
-                    &pool,
-                    &config,
-                )
-                .await;
+                return handle_continue_command(&bot, msg.chat.id, user_id, &pool, &config).await;
             }
             "/cancel" => {
                 cancel_user_order(&pool, user_id).await;
@@ -113,7 +109,10 @@ pub(crate) async fn handle_callback(
         message_id: message.id(),
     };
     let current_step = {
-        let order = db::get_unpaid_order(&pool, query.from.id.0 as i64).await.ok().flatten();
+        let order = db::get_unpaid_order(&pool, query.from.id.0 as i64)
+            .await
+            .ok()
+            .flatten();
         order.map(|o| o.status.as_str().to_string())
     };
     info!(
@@ -294,15 +293,12 @@ pub(crate) async fn handle_callback(
         }
         Some(data) if data.starts_with("alt_domain:") => {
             let domain = data.trim_start_matches("alt_domain:");
-            handle_alternative_domain_selection(
-                &bot,
-                target,
-                query.from.id,
-                domain,
-                &config,
-                &pool,
-            )
-            .await
+            handle_alternative_domain_selection(&bot, target, query.from.id, domain, &config, &pool)
+                .await
+        }
+        Some(data) if data.starts_with("skip_optional:") => {
+            let field = data.trim_start_matches("skip_optional:");
+            handle_optional_step_skip(&bot, target, query.from.id, field, &pool).await
         }
         Some("alt_domain_custom") => {
             edit_screen(
@@ -351,14 +347,8 @@ async fn start_new_order(
         anyhow::bail!("has pending order");
     }
 
-    let order_id = db::create_order(
-        pool,
-        db_user_id,
-        build_mode,
-        template_id,
-        site_price_usdt,
-    )
-    .await?;
+    let order_id =
+        db::create_order(pool, db_user_id, build_mode, template_id, site_price_usdt).await?;
     info!(
         user_id = telegram_user_id.0 as i64,
         order_id = %order_id,
@@ -442,123 +432,286 @@ async fn handle_order_step(
             match download_telegram_logo(&bot, &file_id, &temp_id).await {
                 Ok(local_path) => {
                     if let Err(e) = db::update_order_field_and_status(
-                        pool, order_id, "logo_asset_path", &local_path, OrderStatus::NeedTicker,
-                    ).await {
+                        pool,
+                        order_id,
+                        "logo_asset_path",
+                        &local_path,
+                        OrderStatus::NeedTicker,
+                    )
+                    .await
+                    {
                         warn!(?e, %order_id, "failed to save logo");
-                        return bot.send_message(msg.chat.id, "❌ Save failed. Try again.")
-                            .parse_mode(ParseMode::Html).await.map(|_| ());
+                        return bot
+                            .send_message(msg.chat.id, "❌ Save failed. Try again.")
+                            .parse_mode(ParseMode::Html)
+                            .await
+                            .map(|_| ());
                     }
                     info!(user_id = user_id.0 as i64, %order_id, logo_path = %local_path, "logo saved");
-                    bot.send_message(msg.chat.id, "✅ Logo saved.\n🔤 <b>2/7 Ticker</b>\nExample: <code>PEPE</code>")
-                        .parse_mode(ParseMode::Html).await.map(|_| ())
+                    bot.send_message(
+                        msg.chat.id,
+                        "✅ Logo saved.\n🔤 <b>2/7 Ticker</b>\nExample: <code>PEPE</code>",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map(|_| ())
                 }
                 Err(e) => {
                     warn!(user_id = user_id.0 as i64, error = %e, "failed to download logo");
-                    bot.send_message(msg.chat.id, "❌ Failed to download logo. Please try uploading again.")
-                        .parse_mode(ParseMode::Html).await.map(|_| ())
+                    bot.send_message(
+                        msg.chat.id,
+                        "❌ Failed to download logo. Please try uploading again.",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map(|_| ())
                 }
             }
         }
         OrderStatus::NeedTicker => {
             let Some(text) = msg.text().map(str::trim) else {
-                return bot.send_message(msg.chat.id, "🔤 <b>2/7 Ticker</b>\nSend ticker.")
-                    .parse_mode(ParseMode::Html).await.map(|_| ());
+                return bot
+                    .send_message(msg.chat.id, "🔤 <b>2/7 Ticker</b>\nSend ticker.")
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map(|_| ());
             };
             let ticker = text.to_ascii_uppercase();
-            if ticker.len() < 2 || ticker.len() > 12 || !ticker.chars().all(|ch| ch.is_ascii_alphanumeric()) {
-                return bot.send_message(msg.chat.id, "<b>Invalid ticker.</b>\nUse 2-12 letters/numbers.")
-                    .parse_mode(ParseMode::Html).await.map(|_| ());
+            if ticker.len() < 2
+                || ticker.len() > 12
+                || !ticker.chars().all(|ch| ch.is_ascii_alphanumeric())
+            {
+                return bot
+                    .send_message(
+                        msg.chat.id,
+                        "<b>Invalid ticker.</b>\nUse 2-12 letters/numbers.",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map(|_| ());
             }
-            if let Err(e) = db::update_order_field_and_status(pool, order_id, "token_ticker", &ticker, OrderStatus::NeedName).await {
+            if let Err(e) = db::update_order_field_and_status(
+                pool,
+                order_id,
+                "token_ticker",
+                &ticker,
+                OrderStatus::NeedName,
+            )
+            .await
+            {
                 warn!(?e, %order_id, "failed to save ticker");
             }
-            bot.send_message(msg.chat.id, "✅ Ticker saved.\n🏷 <b>3/7 Name</b>\nExample: <code>Pepe Coin</code>")
-                .parse_mode(ParseMode::Html).await.map(|_| ())
+            bot.send_message(
+                msg.chat.id,
+                "✅ Ticker saved.\n🏷 <b>3/7 Name</b>\nExample: <code>Pepe Coin</code>",
+            )
+            .parse_mode(ParseMode::Html)
+            .await
+            .map(|_| ())
         }
         OrderStatus::NeedName => {
             let Some(text) = msg.text().map(str::trim) else {
-                return bot.send_message(msg.chat.id, "🏷 <b>3/7 Name</b>\nSend token name.")
-                    .parse_mode(ParseMode::Html).await.map(|_| ());
+                return bot
+                    .send_message(msg.chat.id, "🏷 <b>3/7 Name</b>\nSend token name.")
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map(|_| ());
             };
             if text.len() < 2 || text.len() > 48 {
-                return bot.send_message(msg.chat.id, "<b>Invalid name.</b>\nUse 2-48 characters.")
-                    .parse_mode(ParseMode::Html).await.map(|_| ());
+                return bot
+                    .send_message(msg.chat.id, "<b>Invalid name.</b>\nUse 2-48 characters.")
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map(|_| ());
             }
-            if let Err(e) = db::update_order_field_and_status(pool, order_id, "token_name", text, OrderStatus::NeedContract).await {
+            if let Err(e) = db::update_order_field_and_status(
+                pool,
+                order_id,
+                "token_name",
+                text,
+                OrderStatus::NeedContract,
+            )
+            .await
+            {
                 warn!(?e, %order_id, "failed to save token name");
             }
-            bot.send_message(msg.chat.id, "✅ Name saved.\n🔗 <b>4/7 Contract</b>\nSend contract address.")
-                .parse_mode(ParseMode::Html).await.map(|_| ())
+            bot.send_message(
+                msg.chat.id,
+                "✅ Name saved.\n🔗 <b>4/7 Contract</b>\nSend contract address or tap Skip.",
+            )
+            .parse_mode(ParseMode::Html)
+            .reply_markup(optional_step_keyboard("contract"))
+            .await
+            .map(|_| ())
         }
         OrderStatus::NeedContract => {
             let Some(text) = msg.text().map(str::trim) else {
-                return bot.send_message(msg.chat.id, "🔗 <b>4/7 Contract</b>\nSend contract address.")
-                    .parse_mode(ParseMode::Html).await.map(|_| ());
+                return bot
+                    .send_message(
+                        msg.chat.id,
+                        "🔗 <b>4/7 Contract</b>\nSend contract address or tap Skip.",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .reply_markup(optional_step_keyboard("contract"))
+                    .await
+                    .map(|_| ());
             };
             if validate_contract_address(text).is_err() {
-                return bot.send_message(msg.chat.id, "<b>Invalid contract.</b>\nSend EVM, TRON, or SOL address.")
-                    .parse_mode(ParseMode::Html).await.map(|_| ());
+                return bot
+                    .send_message(
+                        msg.chat.id,
+                        "<b>Invalid contract.</b>\nSend EVM, TRON, or SOL address, or tap Skip.",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .reply_markup(optional_step_keyboard("contract"))
+                    .await
+                    .map(|_| ());
             }
-            if let Err(e) = db::update_order_field_and_status(pool, order_id, "contract_address", text, OrderStatus::NeedXLink).await {
+            if let Err(e) = db::update_order_field_and_status(
+                pool,
+                order_id,
+                "contract_address",
+                text,
+                OrderStatus::NeedXLink,
+            )
+            .await
+            {
                 warn!(?e, %order_id, "failed to save contract");
             }
-            bot.send_message(msg.chat.id, "✅ Contract saved.\n✕ <b>5/7 X</b>\n<code>https://x.com/yourproject</code>")
-                .parse_mode(ParseMode::Html).await.map(|_| ())
+            bot.send_message(
+                msg.chat.id,
+                "✅ Contract saved.\n✕ <b>5/7 X</b>\n<code>https://x.com/yourproject</code>\nSend X link or tap Skip.",
+            )
+            .parse_mode(ParseMode::Html)
+            .reply_markup(optional_step_keyboard("x"))
+            .await
+            .map(|_| ())
         }
         OrderStatus::NeedXLink => {
             let Some(text) = msg.text().map(str::trim) else {
-                return bot.send_message(msg.chat.id, "✕ <b>5/7 X</b>\nSend X link.")
-                    .parse_mode(ParseMode::Html).await.map(|_| ());
+                return bot
+                    .send_message(msg.chat.id, "✕ <b>5/7 X</b>\nSend X link or tap Skip.")
+                    .parse_mode(ParseMode::Html)
+                    .reply_markup(optional_step_keyboard("x"))
+                    .await
+                    .map(|_| ());
             };
             if validate_x_url(text).is_err() {
-                return bot.send_message(msg.chat.id, "<b>Invalid X link.</b>\nUse <code>https://x.com/username</code>")
-                    .parse_mode(ParseMode::Html).await.map(|_| ());
+                return bot
+                    .send_message(
+                        msg.chat.id,
+                        "<b>Invalid X link.</b>\nUse <code>https://x.com/username</code>, or tap Skip.",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .reply_markup(optional_step_keyboard("x"))
+                    .await
+                    .map(|_| ());
             }
-            if let Err(e) = db::update_order_field_and_status(pool, order_id, "x_url", text, OrderStatus::NeedTme).await {
+            if let Err(e) = db::update_order_field_and_status(
+                pool,
+                order_id,
+                "x_url",
+                text,
+                OrderStatus::NeedTme,
+            )
+            .await
+            {
                 warn!(?e, %order_id, "failed to save x_url");
             }
-            bot.send_message(msg.chat.id, "✅ X saved.\n💬 <b>6/7 Telegram</b>\n<code>https://t.me/yourgroup</code>")
-                .parse_mode(ParseMode::Html).await.map(|_| ())
+            bot.send_message(
+                msg.chat.id,
+                "✅ X saved.\n💬 <b>6/7 Telegram</b>\n<code>https://t.me/yourgroup</code>\nSend Telegram link or tap Skip.",
+            )
+            .parse_mode(ParseMode::Html)
+            .reply_markup(optional_step_keyboard("telegram"))
+            .await
+            .map(|_| ())
         }
         OrderStatus::NeedTme => {
             let Some(text) = msg.text().map(str::trim) else {
-                return bot.send_message(msg.chat.id, "💬 <b>6/7 Telegram</b>\nSend Telegram link.")
-                    .parse_mode(ParseMode::Html).await.map(|_| ());
+                return bot
+                    .send_message(
+                        msg.chat.id,
+                        "💬 <b>6/7 Telegram</b>\nSend Telegram link or tap Skip.",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .reply_markup(optional_step_keyboard("telegram"))
+                    .await
+                    .map(|_| ());
             };
             if validate_telegram_url(text).is_err() {
-                return bot.send_message(msg.chat.id, "<b>Invalid Telegram link.</b>\nUse <code>https://t.me/yourgroup</code>")
-                    .parse_mode(ParseMode::Html).await.map(|_| ());
+                return bot
+                    .send_message(
+                        msg.chat.id,
+                        "<b>Invalid Telegram link.</b>\nUse <code>https://t.me/yourgroup</code>, or tap Skip.",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .reply_markup(optional_step_keyboard("telegram"))
+                    .await
+                    .map(|_| ());
             }
-            if let Err(e) = db::update_order_field_and_status(pool, order_id, "telegram_url", text, OrderStatus::NeedDomain).await {
+            if let Err(e) = db::update_order_field_and_status(
+                pool,
+                order_id,
+                "telegram_url",
+                text,
+                OrderStatus::NeedDomain,
+            )
+            .await
+            {
                 warn!(?e, %order_id, "failed to save telegram_url");
             }
-            bot.send_message(msg.chat.id, "✅ Telegram saved.\n🌐 <b>7/7 Domain</b>\nExample: <code>pepe.xyz</code>")
-                .parse_mode(ParseMode::Html).await.map(|_| ())
+            bot.send_message(
+                msg.chat.id,
+                "✅ Telegram saved.\n🌐 <b>7/7 Domain</b>\nExample: <code>pepe.xyz</code>",
+            )
+            .parse_mode(ParseMode::Html)
+            .await
+            .map(|_| ())
         }
         OrderStatus::NeedDomain => {
             let Some(text) = msg.text().map(str::trim) else {
-                return bot.send_message(msg.chat.id, "🌐 <b>7/7 Domain</b>\nSend domain.")
-                    .parse_mode(ParseMode::Html).await.map(|_| ());
+                return bot
+                    .send_message(msg.chat.id, "🌐 <b>7/7 Domain</b>\nSend domain.")
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map(|_| ());
             };
             let domain = normalize_domain(text);
             if validate_domain(&domain).is_err() {
-                return bot.send_message(msg.chat.id, "<b>Invalid domain.</b>\nTry .com, .xyz, .fun, or .site.")
-                    .parse_mode(ParseMode::Html).await.map(|_| ());
+                return bot
+                    .send_message(
+                        msg.chat.id,
+                        "<b>Invalid domain.</b>\nTry .com, .xyz, .fun, or .site.",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map(|_| ());
             }
             handle_domain_step(&bot, msg.chat.id, user_id, &order, &domain, &config, pool).await
         }
         OrderStatus::NeedPay => {
             let Some(text) = msg.text().map(str::trim) else {
-                return bot.send_message(msg.chat.id, "💳 <b>Payment</b>\nChoose a chain or paste TX hash.")
+                return bot
+                    .send_message(
+                        msg.chat.id,
+                        "💳 <b>Payment</b>\nChoose a chain or paste TX hash.",
+                    )
                     .parse_mode(ParseMode::Html)
                     .reply_markup(payment_chain_keyboard())
-                    .await.map(|_| ());
+                    .await
+                    .map(|_| ());
             };
             if !looks_like_tx_hash(text) {
-                return bot.send_message(msg.chat.id, "💳 <b>Payment</b>\nChoose a chain or paste TX hash.")
+                return bot
+                    .send_message(
+                        msg.chat.id,
+                        "💳 <b>Payment</b>\nChoose a chain or paste TX hash.",
+                    )
                     .parse_mode(ParseMode::Html)
                     .reply_markup(payment_chain_keyboard())
-                    .await.map(|_| ());
+                    .await
+                    .map(|_| ());
             }
             let chain = order.payment_chain.unwrap_or(PaymentChain::Erc20);
             process_payment_tx_context(PaymentTxProcess {
@@ -575,10 +728,14 @@ async fn handle_order_step(
             .await
         }
         OrderStatus::PaidAndGenerating => bot
-            .send_message(msg.chat.id, "⚙️ <b>Generating...</b>\nYour website is being created.")
+            .send_message(
+                msg.chat.id,
+                "⚙️ <b>Generating...</b>\nYour website is being created.",
+            )
             .parse_mode(ParseMode::Html)
             .reply_markup(status_keyboard())
-            .await.map(|_| ()),
+            .await
+            .map(|_| ()),
         _ => show_main_menu(&bot, msg.chat.id, &config).await,
     }
 }
@@ -597,10 +754,20 @@ async fn handle_domain_step(
     if config.skip_domain_purchase {
         warn!(user_id = user_id.0 as i64, %domain, "SKIP_DOMAIN_PURCHASE: accepting domain without quote");
         let total = order.site_price_usdt;
-        if let Err(e) = db::set_order_domain_pricing(pool, order_id, rust_decimal::Decimal::ZERO, total).await {
+        if let Err(e) =
+            db::set_order_domain_pricing(pool, order_id, rust_decimal::Decimal::ZERO, total).await
+        {
             warn!(?e, %order_id, "failed to set domain pricing");
         }
-        if let Err(e) = db::update_order_field_and_status(pool, order_id, "requested_domain", domain, OrderStatus::NeedPay).await {
+        if let Err(e) = db::update_order_field_and_status(
+            pool,
+            order_id,
+            "requested_domain",
+            domain,
+            OrderStatus::NeedPay,
+        )
+        .await
+        {
             warn!(?e, %order_id, "failed to update domain/status");
         }
         return bot.send_message(
@@ -619,21 +786,41 @@ async fn handle_domain_step(
         config.api_service_base_url.as_deref(),
         config.api_service_api_key.as_deref(),
     ) else {
-        return bot.send_message(chat_id, "❌ Domain service is not configured. Contact admin.")
-            .parse_mode(ParseMode::Html).await.map(|_| ());
+        return bot
+            .send_message(
+                chat_id,
+                "❌ Domain service is not configured. Contact admin.",
+            )
+            .parse_mode(ParseMode::Html)
+            .await
+            .map(|_| ());
     };
     let registrar: Box<dyn DomainRegistrar> = Box::new(HttpClientDomainRegistrar::new(
-        base_url.to_string(), api_key.to_string(),
+        base_url.to_string(),
+        api_key.to_string(),
     ));
     match quote_domain_with_retries(registrar.as_ref(), domain).await {
         Ok(quote) if quote.available && !quote.is_premium => {
             let total = order.site_price_usdt + quote.price_usd;
-            if let Err(e) = db::set_order_domain_pricing(pool, order_id, quote.price_usd, total).await {
+            if let Err(e) =
+                db::set_order_domain_pricing(pool, order_id, quote.price_usd, total).await
+            {
                 warn!(?e, %order_id, "failed to set domain pricing");
-                return bot.send_message(chat_id, "<b>Quote save failed.</b>\nPlease try again.")
-                    .parse_mode(ParseMode::Html).await.map(|_| ());
+                return bot
+                    .send_message(chat_id, "<b>Quote save failed.</b>\nPlease try again.")
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map(|_| ());
             }
-            if let Err(e) = db::update_order_field_and_status(pool, order_id, "requested_domain", &quote.domain, OrderStatus::NeedPay).await {
+            if let Err(e) = db::update_order_field_and_status(
+                pool,
+                order_id,
+                "requested_domain",
+                &quote.domain,
+                OrderStatus::NeedPay,
+            )
+            .await
+            {
                 warn!(?e, %order_id, "failed to update domain/status");
             }
             info!(user_id = user_id.0 as i64, %order_id, domain = %quote.domain, %total, "domain accepted, ready for payment");
@@ -651,16 +838,23 @@ async fn handle_domain_step(
         Ok(_) | Err(_) => {
             info!(user_id = user_id.0 as i64, %domain, "domain unavailable; checking alternatives");
             let tld = domain.rsplit_once('.').map(|(_, t)| t).unwrap_or("");
-            let base_name = domain.rsplit_once('.').map(|(name, _)| name).unwrap_or(domain);
+            let base_name = domain
+                .rsplit_once('.')
+                .map(|(name, _)| name)
+                .unwrap_or(domain);
             let alternatives = check_alternative_domains(registrar.as_ref(), base_name, tld).await;
 
             if alternatives.is_empty() {
                 bot.send_message(chat_id, "<b>Domain unavailable.</b>\nSend another domain.")
-                    .parse_mode(ParseMode::Html).await.map(|_| ())
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map(|_| ())
             } else {
                 // Store alternatives in DB
                 if let Ok(json) = serde_json::to_string(&alternatives) {
-                    let _ = db::update_order_field(pool, order_id, "alternative_domains_json", &json).await;
+                    let _ =
+                        db::update_order_field(pool, order_id, "alternative_domains_json", &json)
+                            .await;
                 }
                 bot.send_message(
                     chat_id,
@@ -668,10 +862,99 @@ async fn handle_domain_step(
                 )
                 .parse_mode(ParseMode::Html)
                 .reply_markup(alternative_domains_keyboard(&alternatives))
-                .await.map(|_| ())
+                .await
+                .map(|_| ())
             }
         }
     }
+}
+
+async fn handle_optional_step_skip(
+    bot: &Bot,
+    target: UiMessage,
+    user_id: UserId,
+    field: &str,
+    pool: &SqlitePool,
+) -> ResponseResult<()> {
+    let order = match db::get_unpaid_order(pool, user_id.0 as i64).await {
+        Ok(Some(order)) => order,
+        Ok(None) => {
+            return edit_screen(
+                bot,
+                target,
+                "<b>No active order.</b>\nUse /create.",
+                main_menu_keyboard(),
+            )
+            .await;
+        }
+        Err(e) => {
+            warn!(
+                ?e,
+                user_id = user_id.0 as i64,
+                "failed to load order for optional skip"
+            );
+            return edit_screen(
+                bot,
+                target,
+                "<b>Error.</b>\nTry again.",
+                main_menu_keyboard(),
+            )
+            .await;
+        }
+    };
+
+    let (expected_status, db_field, next_status, next_text, next_keyboard) = match field {
+        "contract" => (
+            OrderStatus::NeedContract,
+            "contract_address",
+            OrderStatus::NeedXLink,
+            "⏭ Contract skipped.\n✕ <b>5/7 X</b>\nSend X link or tap Skip.",
+            optional_step_keyboard("x"),
+        ),
+        "x" => (
+            OrderStatus::NeedXLink,
+            "x_url",
+            OrderStatus::NeedTme,
+            "⏭ X skipped.\n💬 <b>6/7 Telegram</b>\nSend Telegram link or tap Skip.",
+            optional_step_keyboard("telegram"),
+        ),
+        "telegram" => (
+            OrderStatus::NeedTme,
+            "telegram_url",
+            OrderStatus::NeedDomain,
+            "⏭ Telegram skipped.\n🌐 <b>7/7 Domain</b>\nExample: <code>pepe.xyz</code>",
+            cancel_keyboard(),
+        ),
+        other => {
+            warn!(field = other, "unknown optional skip field");
+            return edit_screen(bot, target, "<b>Unknown action.</b>", main_menu_keyboard()).await;
+        }
+    };
+
+    if order.status != expected_status {
+        return edit_screen(
+            bot,
+            target,
+            "<b>This step is no longer active.</b>\nUse /continue.",
+            main_menu_keyboard(),
+        )
+        .await;
+    }
+
+    if let Err(e) =
+        db::update_order_field_and_status(pool, order.id, db_field, "", next_status).await
+    {
+        warn!(?e, order_id = %order.id, field, "failed to skip optional field");
+        return edit_screen(
+            bot,
+            target,
+            "<b>Save failed.</b>\nPlease try again.",
+            cancel_keyboard(),
+        )
+        .await;
+    }
+
+    edit_screen(bot, target, next_text, next_keyboard).await
 }
 
 async fn ensure_group_member(
@@ -733,7 +1016,11 @@ async fn handle_continue_command(
             .await
             .map(|_| ()),
         Err(error) => {
-            warn!(?error, user_id = user_id.0 as i64, "failed to load pending order");
+            warn!(
+                ?error,
+                user_id = user_id.0 as i64,
+                "failed to load pending order"
+            );
             bot.send_message(chat_id, "<b>Check failed.</b>\nTry later.")
                 .parse_mode(ParseMode::Html)
                 .reply_markup(main_menu_keyboard())
@@ -754,20 +1041,48 @@ async fn edit_payment_chain_and_ask_tx(
     let order = match db::get_unpaid_order(pool, user_id.0 as i64).await {
         Ok(Some(order)) => order,
         Ok(None) => {
-            return edit_screen(bot, target, "<b>No active order.</b>\nUse /create.", main_menu_keyboard()).await;
+            return edit_screen(
+                bot,
+                target,
+                "<b>No active order.</b>\nUse /create.",
+                main_menu_keyboard(),
+            )
+            .await;
         }
         Err(e) => {
-            warn!(?e, user_id = user_id.0 as i64, "failed to load order for payment chain");
-            return edit_screen(bot, target, "<b>Error.</b>\nTry again.", main_menu_keyboard()).await;
+            warn!(
+                ?e,
+                user_id = user_id.0 as i64,
+                "failed to load order for payment chain"
+            );
+            return edit_screen(
+                bot,
+                target,
+                "<b>Error.</b>\nTry again.",
+                main_menu_keyboard(),
+            )
+            .await;
         }
     };
 
     if order.status != OrderStatus::NeedPay {
-        return edit_screen(bot, target, "<b>Payment not ready.</b>\nComplete all steps first.", cancel_keyboard()).await;
+        return edit_screen(
+            bot,
+            target,
+            "<b>Payment not ready.</b>\nComplete all steps first.",
+            cancel_keyboard(),
+        )
+        .await;
     }
 
     if address.trim().is_empty() {
-        return edit_screen(bot, target, "<b>Payment address missing.</b>\nContact admin.", main_menu_keyboard()).await;
+        return edit_screen(
+            bot,
+            target,
+            "<b>Payment address missing.</b>\nContact admin.",
+            main_menu_keyboard(),
+        )
+        .await;
     }
 
     let order_id = order.id;
@@ -787,7 +1102,13 @@ async fn edit_payment_chain_and_ask_tx(
         }
         Err(e) => {
             warn!(?e, %order_id, "failed to attach payment chain");
-            return edit_screen(bot, target, "<b>Payment start failed.</b>\nPlease try again.", main_menu_keyboard()).await;
+            return edit_screen(
+                bot,
+                target,
+                "<b>Payment start failed.</b>\nPlease try again.",
+                main_menu_keyboard(),
+            )
+            .await;
         }
     };
 
@@ -811,18 +1132,40 @@ async fn handle_alternative_domain_selection(
     let order = match db::get_unpaid_order(pool, user_id.0 as i64).await {
         Ok(Some(order)) => order,
         Ok(None) => {
-            return edit_screen(bot, target, "<b>No active order.</b>\nUse /create.", main_menu_keyboard()).await;
+            return edit_screen(
+                bot,
+                target,
+                "<b>No active order.</b>\nUse /create.",
+                main_menu_keyboard(),
+            )
+            .await;
         }
         Err(e) => {
-            warn!(?e, user_id = user_id.0 as i64, "failed to load order for alt domain");
-            return edit_screen(bot, target, "<b>Error.</b>\nTry again.", main_menu_keyboard()).await;
+            warn!(
+                ?e,
+                user_id = user_id.0 as i64,
+                "failed to load order for alt domain"
+            );
+            return edit_screen(
+                bot,
+                target,
+                "<b>Error.</b>\nTry again.",
+                main_menu_keyboard(),
+            )
+            .await;
         }
     };
 
-    let alternatives = parse_alternative_domains(order.alternative_domains_json.as_deref())
-        .unwrap_or_default();
+    let alternatives =
+        parse_alternative_domains(order.alternative_domains_json.as_deref()).unwrap_or_default();
     let Some(quote) = alternatives.iter().find(|q| q.domain == domain).cloned() else {
-        return edit_screen(bot, target, "<b>Domain expired.</b>\nSend a new domain.", main_menu_keyboard()).await;
+        return edit_screen(
+            bot,
+            target,
+            "<b>Domain expired.</b>\nSend a new domain.",
+            main_menu_keyboard(),
+        )
+        .await;
     };
 
     let order_id = order.id;
@@ -830,9 +1173,23 @@ async fn handle_alternative_domain_selection(
 
     if let Err(e) = db::set_order_domain_pricing(pool, order_id, quote.price_usd, total).await {
         warn!(?e, %order_id, "failed to set domain pricing for alt domain");
-        return edit_screen(bot, target, "<b>Quote save failed.</b>\nPlease try again.", main_menu_keyboard()).await;
+        return edit_screen(
+            bot,
+            target,
+            "<b>Quote save failed.</b>\nPlease try again.",
+            main_menu_keyboard(),
+        )
+        .await;
     }
-    if let Err(e) = db::update_order_field_and_status(pool, order_id, "requested_domain", domain, OrderStatus::NeedPay).await {
+    if let Err(e) = db::update_order_field_and_status(
+        pool,
+        order_id,
+        "requested_domain",
+        domain,
+        OrderStatus::NeedPay,
+    )
+    .await
+    {
         warn!(?e, %order_id, "failed to update domain/status for alt domain");
     }
     // Clear stored alternatives

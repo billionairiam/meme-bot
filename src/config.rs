@@ -20,7 +20,6 @@ pub struct Config {
     pub database_url: Option<String>,
     pub telegram_bot_token: String,
     pub telegram_required_group_id: String,
-    pub template_catalog_url: String,
     pub template_preview_domain: String,
     pub template_preview_base_url: String,
     pub admin_contact: String,
@@ -109,8 +108,6 @@ impl Config {
             telegram_bot_token: env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default(),
             telegram_required_group_id: env::var("TELEGRAM_REQUIRED_GROUP_ID")
                 .unwrap_or_else(|_| "@MeMe_Web_Support".to_string()),
-            template_catalog_url: env::var("TEMPLATE_CATALOG_URL")
-                .unwrap_or_else(|_| "https://example.com/templates".to_string()),
             template_preview_domain: env::var("TEMPLATE_PREVIEW_DOMAIN")
                 .unwrap_or_else(|_| "web".to_string()),
             template_preview_base_url: env::var("TEMPLATE_PREVIEW_BASE_URL")

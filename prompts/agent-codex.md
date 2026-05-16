@@ -14,13 +14,13 @@ Do not ask questions. Do not wait for confirmation. Make the best creative decis
 - Ticker: ${ticker}
 - Contract: `{contract}`
 
-Required links:
+Optional links. Empty values mean the user chose not to provide that item:
 
 - X / Twitter: {x_url}
 - Telegram: {tg_url}
 - DEXTools: {dextools_url}
 
-Use the exact URLs provided.
+Use the exact URLs provided when they are non-empty. Do not invent missing contract addresses, social links, DEX links, or domains.
 
 ## Logo-Driven Design
 
@@ -130,11 +130,12 @@ This is a meme token. Nothing on this website is financial advice. Always do you
 
 Include:
 
-* contract address display
-* copy contract button
-* X / Twitter link
-* Telegram link
-* DEXTools link
+* token name
+* ticker display
+* contract address display and copy contract button only if a contract is provided
+* X / Twitter link only if provided
+* Telegram link only if provided
+* DEXTools link only if provided
 * responsive mobile design
 * proper title / description / viewport metadata
 * Open Graph image using `assets/og-image.png`

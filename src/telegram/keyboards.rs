@@ -115,6 +115,16 @@ pub(crate) fn cancel_keyboard() -> InlineKeyboardMarkup {
     )]])
 }
 
+pub(crate) fn optional_step_keyboard(skip_target: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![InlineKeyboardButton::callback(
+            "⏭ Skip",
+            format!("skip_optional:{skip_target}"),
+        )],
+        vec![InlineKeyboardButton::callback("🛑 Cancel Order", "cancel")],
+    ])
+}
+
 pub(crate) fn alternative_domains_keyboard(
     alternatives: &[crate::domain::DomainQuote],
 ) -> InlineKeyboardMarkup {

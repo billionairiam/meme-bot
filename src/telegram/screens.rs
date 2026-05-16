@@ -56,7 +56,7 @@ pub(crate) async fn clear_screen_keyboard(bot: &Bot, target: UiMessage) -> Respo
 fn main_menu_text(config: &TelegramUiConfig) -> String {
     format!(
         "🚀 <b>Auto Meme Web Bot</b>\nCreate meme websites.\n\nTemplates: {}",
-        html_escape(&config.template_catalog_url)
+        html_escape(&config.template_preview_base_url)
     )
 }
 
@@ -385,7 +385,10 @@ pub(crate) async fn continue_order_screen(
             .await
             .map(|_| ()),
         OrderStatus::NeedTicker => bot
-            .send_message(chat_id, "🔤 <b>2/7 Ticker</b>\nSend token ticker. Eg: PEPE")
+            .send_message(
+                chat_id,
+                "🔤 <b>2/7 Ticker</b>\nSend token ticker.\nEg: PEPE",
+            )
             .parse_mode(ParseMode::Html)
             .reply_markup(cancel_keyboard())
             .await
@@ -402,28 +405,25 @@ pub(crate) async fn continue_order_screen(
         OrderStatus::NeedContract => bot
             .send_message(
                 chat_id,
-                "📝 <b>4/7 Contract Address</b>\nPaste contract address.",
+                "📝 <b>4/7 Contract Address</b>\nPaste contract address or tap Skip.",
             )
             .parse_mode(ParseMode::Html)
-            .reply_markup(cancel_keyboard())
+            .reply_markup(optional_step_keyboard("contract"))
             .await
             .map(|_| ()),
         OrderStatus::NeedXLink => bot
-            .send_message(
-                chat_id,
-                "🐦 <b>5/7 X (Twitter) Link</b>\nPaste X link or send '-' to skip.",
-            )
+            .send_message(chat_id, "✕ <b>5/7 X Link</b>\nPaste X link or tap Skip.")
             .parse_mode(ParseMode::Html)
-            .reply_markup(cancel_keyboard())
+            .reply_markup(optional_step_keyboard("x"))
             .await
             .map(|_| ()),
         OrderStatus::NeedTme => bot
             .send_message(
                 chat_id,
-                "📱 <b>6/7 Telegram Link</b>\nPaste TG link or send '-' to skip.",
+                "📱 <b>6/7 Telegram Link</b>\nPaste TG link or tap Skip.",
             )
             .parse_mode(ParseMode::Html)
-            .reply_markup(cancel_keyboard())
+            .reply_markup(optional_step_keyboard("telegram"))
             .await
             .map(|_| ()),
         OrderStatus::NeedDomain => bot
@@ -442,19 +442,28 @@ pub(crate) async fn continue_order_screen(
             .await
             .map(|_| ()),
         OrderStatus::PaidAndGenerating => bot
-            .send_message(chat_id, "⚙️ <b>Generating...</b>\nYour website is being created.")
+            .send_message(
+                chat_id,
+                "⚙️ <b>Generating...</b>\nYour website is being created.",
+            )
             .parse_mode(ParseMode::Html)
             .reply_markup(status_keyboard())
             .await
             .map(|_| ()),
         OrderStatus::Done => bot
-            .send_message(chat_id, "✅ <b>Done!</b>\nYour website is live. Check /history.")
+            .send_message(
+                chat_id,
+                "✅ <b>Done!</b>\nYour website is live. Check /history.",
+            )
             .parse_mode(ParseMode::Html)
             .reply_markup(main_menu_keyboard())
             .await
             .map(|_| ()),
         _ => bot
-            .send_message(chat_id, format!("📊 Order status: {}", order.status.display_label()))
+            .send_message(
+                chat_id,
+                format!("📊 Order status: {}", order.status.display_label()),
+            )
             .parse_mode(ParseMode::Html)
             .reply_markup(main_menu_keyboard())
             .await
