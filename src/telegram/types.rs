@@ -1,5 +1,9 @@
+use std::sync::Arc;
+
 use rust_decimal::Decimal;
 use teloxide::types::{ChatId, MessageId};
+
+use crate::config::Config;
 
 pub(crate) const EXTERNAL_STEP_MAX_ATTEMPTS: usize = 3;
 
@@ -32,8 +36,6 @@ impl TemplateOption {
     }
 
     pub(crate) fn price(&self, prices: &[Decimal]) -> Decimal {
-        // Template IDs are "template_01", "template_02", etc.
-        // Parse the number to find the index.
         let index = self
             .id
             .strip_prefix("template_")
@@ -70,42 +72,13 @@ pub(crate) struct UiMessage {
     pub message_id: MessageId,
 }
 
+/// Telegram-specific config that wraps `Arc<Config>` to avoid duplicating fields.
+/// Implements `Deref<Target = Config>` so all `Config` fields are accessible directly.
 #[derive(Clone)]
 pub struct TelegramUiConfig {
-    pub required_group: Option<RequiredGroup>,
-    pub generation_primary_provider: crate::config::GenerationProviderName,
-    pub agent_timeout_seconds: u64,
-    pub gemini_agent_command: String,
-    pub gemini_agent_args: String,
-    pub codex_agent_command: String,
-    pub codex_agent_args: String,
-    pub generated_sites_dir: String,
-    pub api_service_base_url: Option<String>,
-    pub api_service_api_key: Option<String>,
-    pub github_owner: String,
-    pub github_token: String,
-    pub template_preview_base_url: String,
-    pub template_preview_domain: String,
+    config: Arc<Config>,
     pub template_options: Vec<TemplateOption>,
-    pub admin_contact: String,
-    pub template_prices_usdt: Vec<Decimal>,
-    pub ai_creation_price_usdt: Decimal,
-    pub usdt_erc20_address: String,
-    pub usdt_tron_address: String,
-    pub usdt_sol_address: String,
-    pub usdt_erc20_rpc_url: String,
-    pub usdt_erc20_contract: String,
-    pub usdt_erc20_min_confirmations: u64,
-    pub tron_grid_base_url: String,
-    pub tron_grid_api_key: Option<String>,
-    pub usdt_tron_contract: String,
-    pub usdt_tron_min_confirmations: u64,
-    pub solana_rpc_url: String,
-    pub usdt_sol_mint: String,
-    pub usdt_sol_min_confirmations: u64,
-    pub auto_purchase_after_tx: bool,
-    pub skip_payment_verification: bool,
-    pub skip_domain_purchase: bool,
+    pub required_group: Option<RequiredGroup>,
 }
 
 #[derive(Clone)]
@@ -114,47 +87,25 @@ pub enum RequiredGroup {
     Username(String),
 }
 
+impl std::ops::Deref for TelegramUiConfig {
+    type Target = Config;
+    fn deref(&self) -> &Config {
+        &self.config
+    }
+}
+
 impl TelegramUiConfig {
-    pub fn from_config(config: &crate::config::Config) -> Self {
+    pub fn new(config: Arc<Config>) -> Self {
+        let template_options = build_template_options(
+            &config.template_preview_domain,
+            &config.template_preview_base_url,
+            config.template_prices_usdt.len(),
+        );
+        let required_group = parse_required_group(&config.telegram_required_group_id);
         Self {
-            required_group: parse_required_group(&config.telegram_required_group_id),
-            generation_primary_provider: config.generation_primary_provider,
-            agent_timeout_seconds: config.agent_timeout_seconds,
-            gemini_agent_command: config.gemini_agent_command.clone(),
-            gemini_agent_args: config.gemini_agent_args.clone(),
-            codex_agent_command: config.codex_agent_command.clone(),
-            codex_agent_args: config.codex_agent_args.clone(),
-            generated_sites_dir: config.generated_sites_dir.clone(),
-            api_service_base_url: config.api_service_base_url.clone(),
-            api_service_api_key: config.api_service_api_key.clone(),
-            github_owner: config.github_owner.clone(),
-            github_token: config.github_token.clone(),
-            template_preview_base_url: config.template_preview_base_url.clone(),
-            template_preview_domain: config.template_preview_domain.clone(),
-            template_options: build_template_options(
-                &config.template_preview_domain,
-                &config.template_preview_base_url,
-                config.template_prices_usdt.len(),
-            ),
-            admin_contact: config.admin_contact.clone(),
-            template_prices_usdt: config.template_prices_usdt.clone(),
-            ai_creation_price_usdt: config.ai_creation_price_usdt,
-            usdt_erc20_address: config.usdt_erc20_address.clone(),
-            usdt_tron_address: config.usdt_tron_address.clone(),
-            usdt_sol_address: config.usdt_sol_address.clone(),
-            usdt_erc20_rpc_url: config.usdt_erc20_rpc_url.clone(),
-            usdt_erc20_contract: config.usdt_erc20_contract.clone(),
-            usdt_erc20_min_confirmations: config.usdt_erc20_min_confirmations,
-            tron_grid_base_url: config.tron_grid_base_url.clone(),
-            tron_grid_api_key: config.tron_grid_api_key.clone(),
-            usdt_tron_contract: config.usdt_tron_contract.clone(),
-            usdt_tron_min_confirmations: config.usdt_tron_min_confirmations,
-            solana_rpc_url: config.solana_rpc_url.clone(),
-            usdt_sol_mint: config.usdt_sol_mint.clone(),
-            usdt_sol_min_confirmations: config.usdt_sol_min_confirmations,
-            auto_purchase_after_tx: config.auto_purchase_after_tx,
-            skip_payment_verification: config.skip_payment_verification,
-            skip_domain_purchase: config.skip_domain_purchase,
+            config,
+            template_options,
+            required_group,
         }
     }
 

@@ -117,18 +117,7 @@ impl<'a> PaymentTxProcess<'a> {
                     .map(|_| ());
             }
 
-            let verifier = ChainPaymentVerifier::new(
-                config.usdt_erc20_rpc_url.clone(),
-                config.usdt_erc20_contract.clone(),
-                config.usdt_erc20_min_confirmations,
-                config.tron_grid_base_url.clone(),
-                config.tron_grid_api_key.clone(),
-                config.usdt_tron_contract.clone(),
-                config.usdt_tron_min_confirmations,
-                config.solana_rpc_url.clone(),
-                config.usdt_sol_mint.clone(),
-                config.usdt_sol_min_confirmations,
-            );
+            let verifier = ChainPaymentVerifier::from_config(config);
             let service = PaymentService::new(verifier);
             let tx_submitted_at = chrono::Utc::now();
 
@@ -218,45 +207,44 @@ impl<'a> PaymentTxProcess<'a> {
             .ok()
             .flatten()
             .and_then(|o| o.requested_domain);
-        if let Some(ref domain) = domain {
-            if let (Some(base_url), Some(api_key)) = (
-                config.api_service_base_url.as_deref(),
-                config.api_service_api_key.as_deref(),
-            ) {
-                let deployer = crate::api_client::HttpClientPagesDeployer::new(
-                    base_url.to_string(),
-                    api_key.to_string(),
-                );
-                info!(domain = %domain, order_id = %order_id, "creating cloudflare zone for domain");
-                match deployer.create_zone(domain).await {
-                    Ok(zone) => {
-                        info!(
-                            domain = %domain,
-                            zone_id = %zone.zone_id,
-                            nameservers = ?zone.nameservers,
-                            "zone created/found, setting nameservers"
-                        );
-                        if let Err(e) = deployer.set_nameservers(domain, &zone.nameservers).await {
-                            warn!(domain = %domain, error = %e, "failed to set nameservers");
-                            let _ = bot.send_message(
+        if let (Some(domain), Some(base_url), Some(api_key)) = (
+            &domain,
+            config.api_service_base_url.as_deref(),
+            config.api_service_api_key.as_deref(),
+        ) {
+            let deployer = crate::api_client::HttpClientPagesDeployer::new(
+                base_url.to_string(),
+                api_key.to_string(),
+            );
+            info!(domain = %domain, order_id = %order_id, "creating cloudflare zone for domain");
+            match deployer.create_zone(domain).await {
+                Ok(zone) => {
+                    info!(
+                        domain = %domain,
+                        zone_id = %zone.zone_id,
+                        nameservers = ?zone.nameservers,
+                        "zone created/found, setting nameservers"
+                    );
+                    if let Err(e) = deployer.set_nameservers(domain, &zone.nameservers).await {
+                        warn!(domain = %domain, error = %e, "failed to set nameservers");
+                        let _ = bot.send_message(
                             chat_id,
                             "⚠️ <b>Domain nameserver setup failed.</b>\nYour site will still be generated. Contact admin to fix domain binding.",
                         )
                         .parse_mode(ParseMode::Html)
                         .await;
-                        } else {
-                            info!(domain = %domain, "nameservers set successfully");
-                        }
+                    } else {
+                        info!(domain = %domain, "nameservers set successfully");
                     }
-                    Err(e) => {
-                        warn!(domain = %domain, error = %e, "failed to create cloudflare zone");
-                        let _ = bot.send_message(
+                }
+                Err(e) => {
+                    warn!(domain = %domain, error = %e, "failed to create cloudflare zone");
+                    let _ = bot.send_message(
                         chat_id,
                         "⚠️ <b>Domain zone setup failed.</b>\nYour site will still be generated. Contact admin to fix domain binding.",
                     )
                     .parse_mode(ParseMode::Html)
                     .await;
-                    }
                 }
             }
         }

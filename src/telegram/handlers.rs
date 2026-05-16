@@ -221,7 +221,7 @@ pub(crate) async fn handle_callback(
                     Screens::new(&bot).edit_choose_chain(target).await
                 }
                 Err(error) => {
-                    let msg = if format!("{error:#}").contains("pending order") {
+                    let msg = if error.to_string().contains("pending order") {
                         warn!(
                             ?error,
                             user_id = query.from.id.0 as i64,
@@ -333,7 +333,7 @@ pub(crate) async fn handle_callback(
                             Screens::new(&bot).edit_choose_chain(target).await
                         }
                         Err(error) => {
-                            let msg = if format!("{error:#}").contains("pending order") {
+                            let msg = if error.to_string().contains("pending order") {
                                 warn!(
                                     ?error,
                                     user_id = query.from.id.0 as i64,
@@ -1579,18 +1579,7 @@ async fn process_edit_payment_tx(
                 .await
                 .map(|_| ());
         };
-        let verifier = crate::payment::ChainPaymentVerifier::new(
-            config.usdt_erc20_rpc_url.clone(),
-            config.usdt_erc20_contract.clone(),
-            config.usdt_erc20_min_confirmations,
-            config.tron_grid_base_url.clone(),
-            config.tron_grid_api_key.clone(),
-            config.usdt_tron_contract.clone(),
-            config.usdt_tron_min_confirmations,
-            config.solana_rpc_url.clone(),
-            config.usdt_sol_mint.clone(),
-            config.usdt_sol_min_confirmations,
-        );
+        let verifier = crate::payment::ChainPaymentVerifier::from_config(config);
         let service = crate::payment::PaymentService::new(verifier);
         let request = crate::payment::PaymentVerificationRequest {
             order_id: order.id,

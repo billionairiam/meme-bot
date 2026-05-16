@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -21,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
         info!("meme-bot env file not found; using process environment only");
     }
 
-    let config = Config::from_env()?;
+    let config = Arc::new(Config::from_env()?);
     if config.skip_payment_verification {
         warn!(
             "⚠️  SKIP_PAYMENT_VERIFICATION is enabled — all TX hashes will be accepted without on-chain verification"
@@ -78,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
     let (notification_tx, mut notification_rx) =
         mpsc::unbounded_channel::<meme_bot::queue::UserNotification>();
 
-    let app = App::new(config.clone(), pool.clone());
+    let app = App::new(Arc::clone(&config), pool.clone());
     let queue = app.build_queue(Some(notification_tx));
 
     let notify_bot = if config.telegram_bot_token.trim().is_empty() {
@@ -89,8 +90,9 @@ async fn main() -> anyhow::Result<()> {
         Some(bot)
     };
 
+    let bot_config = Arc::clone(&config);
     let telegram_handle = tokio::spawn(async move {
-        if let Err(e) = run_bot(config, pool).await {
+        if let Err(e) = run_bot(bot_config, pool).await {
             error!(?e, "telegram bot exited");
         }
     });

@@ -6,6 +6,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
+    config::Config,
     db::{OrderStore, WebsiteStore},
     deployment::{DeploymentRequest, SiteDeployer},
     generation::{GenerationError, GenerationRouter, SiteGenerationRequest},
@@ -22,11 +23,8 @@ pub struct UserNotification {
 }
 
 pub struct GenerationQueueConfig {
-    pub max_concurrency: usize,
+    pub config: Arc<Config>,
     pub worker_id: String,
-    pub repo_owner: String,
-    pub github_token: String,
-    pub generated_sites_dir: String,
 }
 
 pub struct GenerationQueue {
@@ -35,9 +33,7 @@ pub struct GenerationQueue {
     websites: WebsiteStore,
     router: Arc<GenerationRouter>,
     deployer: Option<Arc<dyn SiteDeployer>>,
-    repo_owner: String,
-    github_token: String,
-    generated_sites_dir: String,
+    config: Arc<Config>,
     semaphore: Arc<Semaphore>,
     lock_mutex: Arc<Mutex<()>>,
     worker_id: String,
@@ -49,7 +45,7 @@ impl GenerationQueue {
         pool: SqlitePool,
         router: Arc<GenerationRouter>,
         deployer: Option<Arc<dyn SiteDeployer>>,
-        config: GenerationQueueConfig,
+        queue_config: GenerationQueueConfig,
         notification_tx: Option<mpsc::UnboundedSender<UserNotification>>,
     ) -> Self {
         Self {
@@ -58,12 +54,12 @@ impl GenerationQueue {
             pool,
             router,
             deployer,
-            repo_owner: config.repo_owner,
-            github_token: config.github_token,
-            generated_sites_dir: config.generated_sites_dir,
-            semaphore: Arc::new(Semaphore::new(config.max_concurrency.max(1))),
+            semaphore: Arc::new(Semaphore::new(
+                queue_config.config.generation_max_concurrency.max(1),
+            )),
             lock_mutex: Arc::new(Mutex::new(())),
-            worker_id: config.worker_id,
+            config: queue_config.config,
+            worker_id: queue_config.worker_id,
             notification_tx,
         }
     }
@@ -105,7 +101,7 @@ impl GenerationQueue {
             return Ok(());
         };
 
-        let request = build_generation_request(&order, &input, &self.generated_sites_dir);
+        let request = build_generation_request(&order, &input, &self.config.generated_sites_dir);
 
         info!(
             order_id = %order_id,
@@ -137,8 +133,8 @@ impl GenerationQueue {
                 }
 
                 if let Some(deployer) = &self.deployer {
-                    let deployment_request =
-                        request.deployment_request(&self.repo_owner, &self.github_token);
+                    let deployment_request = request
+                        .deployment_request(&self.config.github_owner, &self.config.github_token);
                     info!(
                         order_id = %order_id,
                         repo_name = %deployment_request.repo_name,

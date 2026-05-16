@@ -51,7 +51,7 @@ async fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(8080);
     let bind_addr = env::var("API_SERVICE_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let nc_config = namecheap_config_from_env();
+    let nc_config = Arc::new(namecheap_config_from_env());
     let cf_account_id = env::var("CLOUDFLARE_ACCOUNT_ID").unwrap_or_default();
     let cf_api_token = env::var("CLOUDFLARE_API_TOKEN").unwrap_or_default();
 
@@ -63,7 +63,7 @@ async fn main() {
     }
 
     let state = Arc::new(AppState {
-        registrar: NamecheapRegistrar::new(nc_config.clone()),
+        registrar: NamecheapRegistrar::new(Arc::clone(&nc_config)),
         nc_dns: NamecheapDnsProvisioner::new(nc_config),
         cf: CloudflarePagesClient::new(cf_account_id, cf_api_token),
         api_key,

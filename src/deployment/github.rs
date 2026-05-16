@@ -264,7 +264,7 @@ pub(crate) async fn replace_repo_text_and_push(
     );
 
     if !request.dry_run {
-        run_git(&site_dir, &["checkout", &request.production_branch], &[]).await?;
+        run_git(&site_dir, &["checkout", request.production_branch], &[]).await?;
     }
 
     let changed_files = apply_text_replacements(&site_dir, &request.replacements, request.dry_run)?;

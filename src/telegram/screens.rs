@@ -108,17 +108,20 @@ async fn status_text(user_id: UserId, pool: &SqlitePool) -> String {
             "📊 <b>Order Status</b>\nNo active order. Use /create.".to_string()
         }
         Ok(orders) => {
-            let mut lines = vec!["📊 <b>Order Status</b>".to_string()];
+            use std::fmt::Write;
+            let mut text = String::from("📊 <b>Order Status</b>");
             for order in &orders {
-                lines.push(format!(
-                    "• {} · {} USDT · {} · {}",
+                write!(
+                    text,
+                    "\n• {} · {} USDT · {} · {}",
                     order.status.display_label(),
                     order.total_usdt,
                     order.payment_chain.map(|c| c.as_str()).unwrap_or("—"),
                     order.requested_domain.as_deref().unwrap_or("—"),
-                ));
+                )
+                .unwrap();
             }
-            lines.join("\n")
+            text
         }
         Err(_) => "📊 <b>Order Status</b>\nCheck failed. Try later.".to_string(),
     }
@@ -129,7 +132,8 @@ async fn history_text(user_id: UserId, pool: &SqlitePool) -> String {
     match orders.get_completed(user_id.0 as i64, 10).await {
         Ok(items) if items.is_empty() => "🧾 <b>History</b>\nNo completed orders.".to_string(),
         Ok(items) => {
-            let mut lines = vec!["🧾 <b>Completed Orders</b>".to_string()];
+            use std::fmt::Write;
+            let mut text = String::from("🧾 <b>Completed Orders</b>");
             for (index, item) in items.iter().enumerate() {
                 let domain = item
                     .custom_domain
@@ -142,16 +146,18 @@ async fn history_text(user_id: UserId, pool: &SqlitePool) -> String {
                     .paid_at
                     .map(|value| value.format("%Y-%m-%d").to_string())
                     .unwrap_or_else(|| "—".to_string());
-                lines.push(format!(
-                    "{}. {} · {} USDT · {} · {}",
+                write!(
+                    text,
+                    "\n{}. {} · {} USDT · {} · {}",
                     index + 1,
                     html_escape(domain),
                     item.total_usdt,
                     chain,
                     paid_at
-                ));
+                )
+                .unwrap();
             }
-            lines.join("\n")
+            text
         }
         Err(error) => {
             warn!(

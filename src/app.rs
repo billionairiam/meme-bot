@@ -13,12 +13,12 @@ use crate::{
 };
 
 pub struct App {
-    config: Config,
+    config: Arc<Config>,
     pool: Pool,
 }
 
 impl App {
-    pub fn new(config: Config, pool: Pool) -> Self {
+    pub fn new(config: Arc<Config>, pool: Pool) -> Self {
         Self { config, pool }
     }
 
@@ -67,11 +67,8 @@ impl App {
             router,
             deployer,
             GenerationQueueConfig {
-                max_concurrency: self.config.generation_max_concurrency,
+                config: Arc::clone(&self.config),
                 worker_id: "worker-1".to_string(),
-                repo_owner: self.config.github_owner.clone(),
-                github_token: self.config.github_token.clone(),
-                generated_sites_dir: self.config.generated_sites_dir.clone(),
             },
             notification_tx,
         )

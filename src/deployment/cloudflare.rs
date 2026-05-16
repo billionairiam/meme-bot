@@ -514,15 +514,15 @@ impl CloudflarePagesClient {
                 .await
                 .map_err(|e| DeploymentError::DomainBind(format!("parse dns list: {e}")))?;
             let records = body.get("result").and_then(|r| r.as_array());
-            if let Some(records) = records {
-                if records.iter().any(|r| {
+            if records.is_some_and(|records| {
+                records.iter().any(|r| {
                     r.get("content")
                         .and_then(|c| c.as_str())
                         .is_some_and(|c| c == pages_target)
-                }) {
-                    info!(domain = %domain, target = %pages_target, "CNAME record already exists");
-                    return Ok(());
-                }
+                })
+            }) {
+                info!(domain = %domain, target = %pages_target, "CNAME record already exists");
+                return Ok(());
             }
         }
 

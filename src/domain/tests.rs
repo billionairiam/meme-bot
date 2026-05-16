@@ -1,4 +1,5 @@
 use std::str::FromStr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
@@ -479,7 +480,7 @@ fn sandbox_contact_config() -> NamecheapContactConfig {
 #[ignore]
 async fn real_sandbox_quote_available_domain() {
     let config = sandbox_config().expect("Namecheap API credentials not set in env");
-    let registrar = NamecheapRegistrar::new(config);
+    let registrar = NamecheapRegistrar::new(Arc::new(config));
     let quote = registrar
         .quote(&DomainQuoteRequest {
             domain: "test-meme-bot-2026.xyz".to_string(),
@@ -496,7 +497,7 @@ async fn real_sandbox_quote_available_domain() {
 #[ignore]
 async fn real_sandbox_quote_dot_com_pricing() {
     let config = sandbox_config().expect("Namecheap API credentials not set in env");
-    let registrar = NamecheapRegistrar::new(config);
+    let registrar = NamecheapRegistrar::new(Arc::new(config));
     let quote = registrar
         .quote(&DomainQuoteRequest {
             domain: "test-meme-bot-2026.com".to_string(),
@@ -512,7 +513,7 @@ async fn real_sandbox_quote_dot_com_pricing() {
 #[ignore]
 async fn real_sandbox_quote_multiple_tlds() {
     let config = sandbox_config().expect("Namecheap API credentials not set in env");
-    let registrar = NamecheapRegistrar::new(config);
+    let registrar = NamecheapRegistrar::new(Arc::new(config));
     for (domain, expected_tld) in [
         ("test-meme.xyz", "xyz"),
         ("test-meme.site", "site"),
@@ -542,7 +543,7 @@ async fn real_sandbox_missing_api_config() {
         sandbox: true,
         contact: sandbox_contact_config(),
     };
-    let registrar = NamecheapRegistrar::new(config);
+    let registrar = NamecheapRegistrar::new(Arc::new(config));
     let err = registrar
         .quote(&DomainQuoteRequest {
             domain: "test.xyz".to_string(),
@@ -573,7 +574,7 @@ async fn real_sandbox_purchase_domain() {
         return;
     }
 
-    let registrar = NamecheapRegistrar::new(config);
+    let registrar = NamecheapRegistrar::new(Arc::new(config));
     let result = registrar
         .purchase(&DomainPurchaseRequest {
             domain: "test-meme-bot-sandbox.xyz".to_string(),
@@ -610,7 +611,7 @@ async fn real_sandbox_purchase_missing_contact_rejected() {
         email: String::new(),
         organization: None,
     };
-    let registrar = NamecheapRegistrar::new(config);
+    let registrar = NamecheapRegistrar::new(Arc::new(config));
     let err = registrar
         .purchase(&DomainPurchaseRequest {
             domain: "test-meme.xyz".to_string(),
@@ -631,7 +632,7 @@ async fn real_sandbox_purchase_missing_contact_rejected() {
 #[ignore]
 async fn real_sandbox_set_nameservers() {
     let config = sandbox_config().expect("Namecheap API credentials not set in env");
-    let provisioner = NamecheapDnsProvisioner::new(config);
+    let provisioner = NamecheapDnsProvisioner::new(Arc::new(config));
     let result = provisioner
         .set_namecheap_nameservers(
             "test-meme.xyz",

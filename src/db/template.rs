@@ -19,14 +19,13 @@ impl TemplateStore {
         let mut tx = self.pool.begin().await?;
         let mut changed = 0;
 
-        for index in 0..prices.len() {
+        for (index, &price) in prices.iter().enumerate() {
             let number = index + 1;
             let number = Self::format_template_number(number);
             let template_id = format!("template_{number}");
             let name = format!("{number}.{preview_domain}");
             let local_path = template_id.clone();
             let preview_url = format!("{}/{}", preview_base_url.trim_end_matches('/'), number);
-            let price = prices[index];
 
             let result = sqlx::query(
                 r#"

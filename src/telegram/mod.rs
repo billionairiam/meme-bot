@@ -19,7 +19,7 @@ pub use types::{TelegramUiConfig, TemplateOption};
 use handlers::{handle_callback, handle_message};
 use helpers::configured_proxy;
 
-pub async fn run_bot(config: Config, pool: SqlitePool) -> anyhow::Result<()> {
+pub async fn run_bot(config: Arc<Config>, pool: SqlitePool) -> anyhow::Result<()> {
     if config.telegram_bot_token.trim().is_empty() {
         anyhow::bail!("TELEGRAM_BOT_TOKEN is required to run the Telegram bot");
     }
@@ -42,7 +42,7 @@ pub async fn run_bot(config: Config, pool: SqlitePool) -> anyhow::Result<()> {
         )
     })?;
 
-    let ui_config = Arc::new(TelegramUiConfig::from_config(&config));
+    let ui_config = Arc::new(TelegramUiConfig::new(config));
     let handler = dptree::entry()
         .branch(Update::filter_message().endpoint(handle_message))
         .branch(Update::filter_callback_query().endpoint(handle_callback));

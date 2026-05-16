@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use reqwest::Client;
 use rust_decimal::Decimal;
@@ -19,12 +21,12 @@ pub(super) fn icann_fee() -> Decimal {
 // ---- Shared Namecheap API transport ----
 
 pub(super) struct NamecheapApiClient {
-    config: NamecheapConfig,
+    pub(super) config: Arc<NamecheapConfig>,
     client: Client,
 }
 
 impl NamecheapApiClient {
-    pub(super) fn new(config: NamecheapConfig) -> Self {
+    pub(super) fn new(config: Arc<NamecheapConfig>) -> Self {
         Self {
             config,
             client: Client::new(),
@@ -106,7 +108,7 @@ pub struct NamecheapRegistrar {
 }
 
 impl NamecheapRegistrar {
-    pub fn new(config: NamecheapConfig) -> Self {
+    pub fn new(config: Arc<NamecheapConfig>) -> Self {
         Self {
             api: NamecheapApiClient::new(config),
         }
