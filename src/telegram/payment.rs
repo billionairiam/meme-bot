@@ -14,8 +14,8 @@ use crate::{
     },
 };
 
-use super::helpers::{html_escape, payment_address_for_chain, payment_error_for_user};
-use super::keyboards::status_keyboard;
+use super::helpers::{html_escape, payment_error_for_user};
+use super::keyboards::Keyboards;
 use super::types::{EXTERNAL_STEP_MAX_ATTEMPTS, TelegramUiConfig};
 
 pub(crate) struct PaymentTxProcess<'a> {
@@ -30,253 +30,253 @@ pub(crate) struct PaymentTxProcess<'a> {
     pub tx_hash: &'a str,
 }
 
-pub(crate) async fn process_payment_tx_context(
-    request: PaymentTxProcess<'_>,
-) -> ResponseResult<()> {
-    let PaymentTxProcess {
-        bot,
-        chat_id,
-        user_id,
-        config,
-        pool,
-        order_id,
-        chain,
-        amount_usdt,
-        tx_hash,
-    } = request;
-    let orders = db::OrderStore::new(pool.clone());
-    info!(
-        user_id = user_id.0 as i64,
-        order_id = %order_id,
-        chain = chain.as_str(),
-        required_amount_usdt = %amount_usdt,
-        "payment tx submitted; starting verification"
-    );
-
-    // Check if already paid
-    if let Ok(Some(order)) = orders.get(order_id).await
-        && (order.status == crate::models::OrderStatus::PaidAndGenerating
-            || order.status == crate::models::OrderStatus::Done)
-    {
+impl<'a> PaymentTxProcess<'a> {
+    pub(crate) async fn process(self) -> ResponseResult<()> {
+        let PaymentTxProcess {
+            bot,
+            chat_id,
+            user_id,
+            config,
+            pool,
+            order_id,
+            chain,
+            amount_usdt,
+            tx_hash,
+        } = self;
+        let orders = db::OrderStore::new(pool.clone());
         info!(
             user_id = user_id.0 as i64,
             order_id = %order_id,
-            "payment tx ignored because order is already paid"
+            chain = chain.as_str(),
+            required_amount_usdt = %amount_usdt,
+            "payment tx submitted; starting verification"
         );
-        return bot
-            .send_message(chat_id, "<b>Payment confirmed.</b>\nWebsite is queued.")
-            .parse_mode(ParseMode::Html)
-            .reply_markup(status_keyboard())
-            .await
-            .map(|_| ());
-    }
 
-    match orders.tx_hash_already_used(chain, tx_hash).await {
-        Ok(true) => {
-            warn!(
-                user_id = user_id.0 as i64,
-                order_id = %order_id,
-                chain = chain.as_str(),
-                "reused tx rejected"
-            );
-            return bot
-                .send_message(chat_id, "<b>TX already used.</b>\nSend a new TX.")
-                .parse_mode(ParseMode::Html)
-                .await
-                .map(|_| ());
-        }
-        Ok(false) => {
+        // Check if already paid
+        if let Ok(Some(order)) = orders.get(order_id).await
+            && (order.status == crate::models::OrderStatus::PaidAndGenerating
+                || order.status == crate::models::OrderStatus::Done)
+        {
             info!(
                 user_id = user_id.0 as i64,
                 order_id = %order_id,
-                chain = chain.as_str(),
-                "tx reuse check passed"
+                "payment tx ignored because order is already paid"
             );
-        }
-        Err(error) => warn!(?error, "failed to check tx reuse"),
-    }
-
-    let outcome = if config.skip_payment_verification {
-        warn!(
-            order_id = %order_id,
-            chain = chain.as_str(),
-            "SKIP_PAYMENT_VERIFICATION is enabled — accepting tx without on-chain check"
-        );
-        PaymentVerificationOutcome {
-            observed_amount_usdt: amount_usdt,
-            observed_to_address: payment_address_for_chain(config, chain).trim().to_string(),
-            confirmations: Some(999),
-            confirmed_at: chrono::Utc::now(),
-        }
-    } else {
-        let expected_to_address = payment_address_for_chain(config, chain).trim().to_string();
-        if expected_to_address.is_empty() {
             return bot
-                .send_message(chat_id, "<b>Payment address missing.</b>\nContact admin.")
+                .send_message(chat_id, "<b>Payment confirmed.</b>\nWebsite is queued.")
                 .parse_mode(ParseMode::Html)
+                .reply_markup(Keyboards::status())
                 .await
                 .map(|_| ());
         }
 
-        let verifier = ChainPaymentVerifier::new(
-            config.usdt_erc20_rpc_url.clone(),
-            config.usdt_erc20_contract.clone(),
-            config.usdt_erc20_min_confirmations,
-            config.tron_grid_base_url.clone(),
-            config.tron_grid_api_key.clone(),
-            config.usdt_tron_contract.clone(),
-            config.usdt_tron_min_confirmations,
-            config.solana_rpc_url.clone(),
-            config.usdt_sol_mint.clone(),
-            config.usdt_sol_min_confirmations,
-        );
-        let service = PaymentService::new(verifier);
-        let tx_submitted_at = chrono::Utc::now();
-
-        // Reconstruct payment window from order
-        let order = orders.get(order_id).await.ok().flatten();
-        let payment_expires_at = order
-            .as_ref()
-            .and_then(|o| o.payment_expires_at)
-            .unwrap_or_else(|| {
-                warn!(order_id = %order_id, "payment_expires_at is NULL, using now + window");
-                chrono::Utc::now() + chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES)
-            });
-        let payment_started_at =
-            payment_expires_at - chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES);
-
-        let verify_request = PaymentVerificationRequest {
-            order_id,
-            chain,
-            tx_hash: tx_hash.to_string(),
-            expected_to_address,
-            required_amount_usdt: amount_usdt,
-            payment_started_at,
-            submitted_at: tx_submitted_at,
-            expires_at: payment_expires_at,
-        };
-        let verification = verify_payment_with_retries(&service, verify_request).await;
-
-        match verification {
-            Ok(outcome) => {
-                info!(
-                    user_id = user_id.0 as i64,
-                    order_id = %order_id,
-                    chain = chain.as_str(),
-                    observed_amount_usdt = %outcome.observed_amount_usdt,
-                    confirmations = outcome.confirmations.map(|value| value as i64),
-                    confirmed_at = %outcome.confirmed_at,
-                    "payment verified on chain"
-                );
-                outcome
-            }
-            Err(error) => {
+        match orders.tx_hash_already_used(chain, tx_hash).await {
+            Ok(true) => {
                 warn!(
                     user_id = user_id.0 as i64,
                     order_id = %order_id,
                     chain = chain.as_str(),
-                    error = %error,
-                    "payment verification failed"
+                    "reused tx rejected"
                 );
                 return bot
-                    .send_message(
-                        chat_id,
-                        format!(
-                            "❌ <b>Payment not confirmed.</b>\n{}",
-                            html_escape(&payment_error_for_user(&error))
-                        ),
-                    )
+                    .send_message(chat_id, "<b>TX already used.</b>\nSend a new TX.")
                     .parse_mode(ParseMode::Html)
                     .await
                     .map(|_| ());
             }
+            Ok(false) => {
+                info!(
+                    user_id = user_id.0 as i64,
+                    order_id = %order_id,
+                    chain = chain.as_str(),
+                    "tx reuse check passed"
+                );
+            }
+            Err(error) => warn!(?error, "failed to check tx reuse"),
         }
-    };
 
-    // Mark order as paid — this transitions to paid_and_generating.
-    // The queue worker will pick it up automatically.
-    if let Err(error) = orders.mark_paid(order_id, chain, tx_hash).await {
-        warn!(?error, order_id = %order_id, "failed to mark order paid");
-        return bot
-            .send_message(chat_id, "⚠️ <b>Payment record failed.</b>\nContact admin.")
-            .parse_mode(ParseMode::Html)
-            .await
-            .map(|_| ());
-    }
-    info!(
-        user_id = user_id.0 as i64,
-        order_id = %order_id,
-        chain = chain.as_str(),
-        observed_amount_usdt = %outcome.observed_amount_usdt,
-        "payment recorded and order marked paid"
-    );
-
-    // Bind domain to Cloudflare: create zone + set nameservers.
-    // This runs early so the zone can propagate while the site is being generated.
-    let domain = orders
-        .get(order_id)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|o| o.requested_domain);
-    if let Some(ref domain) = domain {
-        if let (Some(base_url), Some(api_key)) = (
-            config.api_service_base_url.as_deref(),
-            config.api_service_api_key.as_deref(),
-        ) {
-            let deployer = crate::api_client::HttpClientPagesDeployer::new(
-                base_url.to_string(),
-                api_key.to_string(),
+        let outcome = if config.skip_payment_verification {
+            warn!(
+                order_id = %order_id,
+                chain = chain.as_str(),
+                "SKIP_PAYMENT_VERIFICATION is enabled — accepting tx without on-chain check"
             );
-            info!(domain = %domain, order_id = %order_id, "creating cloudflare zone for domain");
-            match deployer.create_zone(domain).await {
-                Ok(zone) => {
+            PaymentVerificationOutcome {
+                observed_amount_usdt: amount_usdt,
+                observed_to_address: config.payment_address_for_chain(chain).trim().to_string(),
+                confirmations: Some(999),
+                confirmed_at: chrono::Utc::now(),
+            }
+        } else {
+            let expected_to_address = config.payment_address_for_chain(chain).trim().to_string();
+            if expected_to_address.is_empty() {
+                return bot
+                    .send_message(chat_id, "<b>Payment address missing.</b>\nContact admin.")
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map(|_| ());
+            }
+
+            let verifier = ChainPaymentVerifier::new(
+                config.usdt_erc20_rpc_url.clone(),
+                config.usdt_erc20_contract.clone(),
+                config.usdt_erc20_min_confirmations,
+                config.tron_grid_base_url.clone(),
+                config.tron_grid_api_key.clone(),
+                config.usdt_tron_contract.clone(),
+                config.usdt_tron_min_confirmations,
+                config.solana_rpc_url.clone(),
+                config.usdt_sol_mint.clone(),
+                config.usdt_sol_min_confirmations,
+            );
+            let service = PaymentService::new(verifier);
+            let tx_submitted_at = chrono::Utc::now();
+
+            // Reconstruct payment window from order
+            let order = orders.get(order_id).await.ok().flatten();
+            let payment_expires_at = order
+                .as_ref()
+                .and_then(|o| o.payment_expires_at)
+                .unwrap_or_else(|| {
+                    warn!(order_id = %order_id, "payment_expires_at is NULL, using now + window");
+                    chrono::Utc::now() + chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES)
+                });
+            let payment_started_at =
+                payment_expires_at - chrono::Duration::minutes(db::PAYMENT_WINDOW_MINUTES);
+
+            let verify_request = PaymentVerificationRequest {
+                order_id,
+                chain,
+                tx_hash: tx_hash.to_string(),
+                expected_to_address,
+                required_amount_usdt: amount_usdt,
+                payment_started_at,
+                submitted_at: tx_submitted_at,
+                expires_at: payment_expires_at,
+            };
+            let verification = verify_payment_with_retries(&service, verify_request).await;
+
+            match verification {
+                Ok(outcome) => {
                     info!(
-                        domain = %domain,
-                        zone_id = %zone.zone_id,
-                        nameservers = ?zone.nameservers,
-                        "zone created/found, setting nameservers"
+                        user_id = user_id.0 as i64,
+                        order_id = %order_id,
+                        chain = chain.as_str(),
+                        observed_amount_usdt = %outcome.observed_amount_usdt,
+                        confirmations = outcome.confirmations.map(|value| value as i64),
+                        confirmed_at = %outcome.confirmed_at,
+                        "payment verified on chain"
                     );
-                    if let Err(e) = deployer.set_nameservers(domain, &zone.nameservers).await {
-                        warn!(domain = %domain, error = %e, "failed to set nameservers");
-                        let _ = bot.send_message(
+                    outcome
+                }
+                Err(error) => {
+                    warn!(
+                        user_id = user_id.0 as i64,
+                        order_id = %order_id,
+                        chain = chain.as_str(),
+                        error = %error,
+                        "payment verification failed"
+                    );
+                    return bot
+                        .send_message(
+                            chat_id,
+                            format!(
+                                "❌ <b>Payment not confirmed.</b>\n{}",
+                                html_escape(&payment_error_for_user(&error))
+                            ),
+                        )
+                        .parse_mode(ParseMode::Html)
+                        .await
+                        .map(|_| ());
+                }
+            }
+        };
+
+        // Mark order as paid — this transitions to paid_and_generating.
+        // The queue worker will pick it up automatically.
+        if let Err(error) = orders.mark_paid(order_id, chain, tx_hash).await {
+            warn!(?error, order_id = %order_id, "failed to mark order paid");
+            return bot
+                .send_message(chat_id, "⚠️ <b>Payment record failed.</b>\nContact admin.")
+                .parse_mode(ParseMode::Html)
+                .await
+                .map(|_| ());
+        }
+        info!(
+            user_id = user_id.0 as i64,
+            order_id = %order_id,
+            chain = chain.as_str(),
+            observed_amount_usdt = %outcome.observed_amount_usdt,
+            "payment recorded and order marked paid"
+        );
+
+        // Bind domain to Cloudflare: create zone + set nameservers.
+        // This runs early so the zone can propagate while the site is being generated.
+        let domain = orders
+            .get(order_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|o| o.requested_domain);
+        if let Some(ref domain) = domain {
+            if let (Some(base_url), Some(api_key)) = (
+                config.api_service_base_url.as_deref(),
+                config.api_service_api_key.as_deref(),
+            ) {
+                let deployer = crate::api_client::HttpClientPagesDeployer::new(
+                    base_url.to_string(),
+                    api_key.to_string(),
+                );
+                info!(domain = %domain, order_id = %order_id, "creating cloudflare zone for domain");
+                match deployer.create_zone(domain).await {
+                    Ok(zone) => {
+                        info!(
+                            domain = %domain,
+                            zone_id = %zone.zone_id,
+                            nameservers = ?zone.nameservers,
+                            "zone created/found, setting nameservers"
+                        );
+                        if let Err(e) = deployer.set_nameservers(domain, &zone.nameservers).await {
+                            warn!(domain = %domain, error = %e, "failed to set nameservers");
+                            let _ = bot.send_message(
                             chat_id,
                             "⚠️ <b>Domain nameserver setup failed.</b>\nYour site will still be generated. Contact admin to fix domain binding.",
                         )
                         .parse_mode(ParseMode::Html)
                         .await;
-                    } else {
-                        info!(domain = %domain, "nameservers set successfully");
+                        } else {
+                            info!(domain = %domain, "nameservers set successfully");
+                        }
                     }
-                }
-                Err(e) => {
-                    warn!(domain = %domain, error = %e, "failed to create cloudflare zone");
-                    let _ = bot.send_message(
+                    Err(e) => {
+                        warn!(domain = %domain, error = %e, "failed to create cloudflare zone");
+                        let _ = bot.send_message(
                         chat_id,
                         "⚠️ <b>Domain zone setup failed.</b>\nYour site will still be generated. Contact admin to fix domain binding.",
                     )
                     .parse_mode(ParseMode::Html)
                     .await;
+                    }
                 }
             }
         }
-    }
 
-    bot.send_message(
-        chat_id,
-        format!(
-            "✅ <b>Payment confirmed.</b>\nPaid: {} USDT. Confirmations: {}.\nWebsite queued.",
-            outcome.observed_amount_usdt,
-            outcome
-                .confirmations
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "confirmed".to_string())
-        ),
-    )
-    .parse_mode(ParseMode::Html)
-    .reply_markup(status_keyboard())
-    .await
-    .map(|_| ())
+        bot.send_message(
+            chat_id,
+            format!(
+                "✅ <b>Payment confirmed.</b>\nPaid: {} USDT. Confirmations: {}.\nWebsite queued.",
+                outcome.observed_amount_usdt,
+                outcome
+                    .confirmations
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "confirmed".to_string())
+            ),
+        )
+        .parse_mode(ParseMode::Html)
+        .reply_markup(Keyboards::status())
+        .await
+        .map(|_| ())
+    }
 }
 
 pub(crate) async fn verify_payment_with_retries<V>(

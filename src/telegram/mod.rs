@@ -14,7 +14,6 @@ use tracing::info;
 
 use crate::config::Config;
 
-pub use screens::payment_instruction;
 pub use types::{TelegramUiConfig, TemplateOption};
 
 use handlers::{handle_callback, handle_message};

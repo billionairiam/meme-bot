@@ -23,6 +23,37 @@ impl TemplateOption {
             preview_url: format!("{}/{number}", preview_base_url.trim_end_matches('/')),
         }
     }
+
+    pub(crate) fn find(options: &[TemplateOption], template_id: &str) -> Option<TemplateOption> {
+        options
+            .iter()
+            .find(|template| template.id == template_id)
+            .cloned()
+    }
+
+    pub(crate) fn price(&self, prices: &[Decimal]) -> Decimal {
+        // Template IDs are "template_01", "template_02", etc.
+        // Parse the number to find the index.
+        let index = self
+            .id
+            .strip_prefix("template_")
+            .and_then(|n| n.parse::<usize>().ok())
+            .map(|n| n.saturating_sub(1))
+            .unwrap_or(0);
+        prices.get(index).copied().unwrap_or(Decimal::ZERO)
+    }
+
+    pub(crate) fn price_by_id(
+        options: &[TemplateOption],
+        template_id: &str,
+        prices: &[Decimal],
+    ) -> Decimal {
+        let index = options
+            .iter()
+            .position(|template| template.id == template_id)
+            .unwrap_or(0);
+        prices.get(index).copied().unwrap_or(Decimal::ZERO)
+    }
 }
 
 pub(crate) fn format_template_number(template_number: usize) -> String {
@@ -124,6 +155,14 @@ impl TelegramUiConfig {
             auto_purchase_after_tx: config.auto_purchase_after_tx,
             skip_payment_verification: config.skip_payment_verification,
             skip_domain_purchase: config.skip_domain_purchase,
+        }
+    }
+
+    pub(crate) fn payment_address_for_chain(&self, chain: crate::models::PaymentChain) -> &str {
+        match chain {
+            crate::models::PaymentChain::Erc20 => &self.usdt_erc20_address,
+            crate::models::PaymentChain::Tron => &self.usdt_tron_address,
+            crate::models::PaymentChain::Sol => &self.usdt_sol_address,
         }
     }
 }

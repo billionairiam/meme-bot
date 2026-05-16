@@ -50,42 +50,6 @@ pub(crate) fn parse_template_deep_link(text: &str) -> Option<&str> {
         .or_else(|| text.trim().strip_prefix("/start=tpl_"))
 }
 
-pub(crate) fn find_template(
-    options: &[super::types::TemplateOption],
-    template_id: &str,
-) -> Option<super::types::TemplateOption> {
-    options
-        .iter()
-        .find(|template| template.id == template_id)
-        .cloned()
-}
-
-pub(crate) fn template_price(
-    options: &[super::types::TemplateOption],
-    template_id: &str,
-    prices: &[rust_decimal::Decimal],
-) -> rust_decimal::Decimal {
-    let index = options
-        .iter()
-        .position(|template| template.id == template_id)
-        .unwrap_or(0);
-    prices
-        .get(index)
-        .copied()
-        .unwrap_or(rust_decimal::Decimal::ZERO)
-}
-
-pub(crate) fn payment_address_for_chain(
-    config: &super::types::TelegramUiConfig,
-    chain: crate::models::PaymentChain,
-) -> &str {
-    match chain {
-        crate::models::PaymentChain::Erc20 => &config.usdt_erc20_address,
-        crate::models::PaymentChain::Tron => &config.usdt_tron_address,
-        crate::models::PaymentChain::Sol => &config.usdt_sol_address,
-    }
-}
-
 pub(crate) fn payment_error_for_user(error: &crate::payment::PaymentVerificationError) -> String {
     use crate::payment::PaymentVerificationError;
     match error {
