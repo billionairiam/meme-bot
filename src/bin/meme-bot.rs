@@ -53,6 +53,15 @@ async fn main() -> anyhow::Result<()> {
     meme_bot::db::normalize_sqlite_uuid_storage(&pool)
         .await
         .context("normalize sqlite uuid storage")?;
+    let synced_templates = meme_bot::db::sync_template_catalog(
+        &pool,
+        &config.template_preview_domain,
+        &config.template_preview_base_url,
+        &config.template_prices_usdt,
+    )
+    .await
+    .context("sync template catalog")?;
+    info!(synced_templates, "template catalog synced");
 
     match meme_bot::db::reset_generating_orders_on_startup(&pool).await {
         Ok(0) => {}

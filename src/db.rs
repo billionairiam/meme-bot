@@ -156,6 +156,29 @@ pub async fn create_order(
     template_id: Option<&str>,
     site_price_usdt: Decimal,
 ) -> anyhow::Result<Uuid> {
+    let mut tx = pool.begin().await?;
+
+    if let Some(template_id) = template_id {
+        sqlx::query(
+            r#"
+            INSERT INTO templates (
+                id, template_id, name, local_path, price_tier, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(template_id) DO UPDATE SET
+                price_tier = EXCLUDED.price_tier,
+                updated_at = datetime('now')
+            "#,
+        )
+        .bind(uuid_value(Uuid::new_v4()))
+        .bind(template_id)
+        .bind(template_id)
+        .bind(template_id)
+        .bind(site_price_usdt.to_string())
+        .execute(&mut *tx)
+        .await?;
+    }
+
     let id = Uuid::new_v4();
     let row = sqlx::query(
         r#"
@@ -173,10 +196,68 @@ pub async fn create_order(
     .bind(template_id)
     .bind(site_price_usdt.to_string())
     .bind(site_price_usdt.to_string())
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
 
-    uuid_from_row(&row, "id")
+    let id = uuid_from_row(&row, "id")?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+pub async fn sync_template_catalog(
+    pool: &SqlitePool,
+    preview_domain: &str,
+    preview_base_url: &str,
+    prices: &[Decimal],
+) -> anyhow::Result<u64> {
+    let mut tx = pool.begin().await?;
+    let mut changed = 0;
+
+    for index in 0..prices.len() {
+        let number = index + 1;
+        let number = format_template_number(number);
+        let template_id = format!("template_{number}");
+        let name = format!("{number}.{preview_domain}");
+        let local_path = template_id.clone();
+        let preview_url = format!("{}/{}", preview_base_url.trim_end_matches('/'), number);
+        let price = prices[index];
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO templates (
+                id, template_id, name, local_path, preview_url, price_tier, enabled, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'))
+            ON CONFLICT(template_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                local_path = EXCLUDED.local_path,
+                preview_url = EXCLUDED.preview_url,
+                price_tier = EXCLUDED.price_tier,
+                enabled = 1,
+                updated_at = datetime('now')
+            "#,
+        )
+        .bind(uuid_value(Uuid::new_v4()))
+        .bind(&template_id)
+        .bind(&name)
+        .bind(&local_path)
+        .bind(&preview_url)
+        .bind(price.to_string())
+        .execute(&mut *tx)
+        .await?;
+        changed += result.rows_affected();
+    }
+
+    tx.commit().await?;
+    Ok(changed)
+}
+
+fn format_template_number(template_number: usize) -> String {
+    if template_number < 100 {
+        format!("{template_number:02}")
+    } else {
+        template_number.to_string()
+    }
 }
 
 /// Check if user has an unpaid (wizard/payment) order.
@@ -1420,6 +1501,99 @@ mod tests {
 
         let active = get_active_orders(&pool, 101).await.unwrap();
         assert!(active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn template_order_seeds_template_before_insert() {
+        let pool = test_pool().await;
+        let user_id = upsert_user(&pool, 151, Some("template_user"), None, None, true)
+            .await
+            .unwrap();
+        let order_id = create_order(
+            &pool,
+            user_id,
+            BuildMode::Template,
+            Some("template_01"),
+            Decimal::new(30, 0),
+        )
+        .await
+        .unwrap();
+
+        let order = get_order(&pool, order_id).await.unwrap().unwrap();
+        assert_eq!(order.template_id.as_deref(), Some("template_01"));
+
+        let row = sqlx::query("SELECT price_tier FROM templates WHERE template_id = ?")
+            .bind("template_01")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<String, _>("price_tier"), "30");
+    }
+
+    #[tokio::test]
+    async fn sync_template_catalog_updates_prices_from_config() {
+        let pool = test_pool().await;
+        sync_template_catalog(
+            &pool,
+            "web",
+            "https://memewebs.xyz",
+            &[
+                Decimal::new(30, 0),
+                Decimal::new(40, 0),
+                Decimal::new(50, 0),
+            ],
+        )
+        .await
+        .unwrap();
+        sync_template_catalog(
+            &pool,
+            "web",
+            "https://memewebs.xyz",
+            &[
+                Decimal::new(35, 0),
+                Decimal::new(45, 0),
+                Decimal::new(55, 0),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let row = sqlx::query(
+            "SELECT name, preview_url, price_tier FROM templates WHERE template_id = ?",
+        )
+        .bind("template_02")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.get::<String, _>("name"), "02.web");
+        assert_eq!(
+            row.get::<String, _>("preview_url"),
+            "https://memewebs.xyz/02"
+        );
+        assert_eq!(row.get::<String, _>("price_tier"), "45");
+    }
+
+    #[tokio::test]
+    async fn sync_template_catalog_scales_past_99_templates() {
+        let pool = test_pool().await;
+        let prices = vec![Decimal::new(30, 0); 100];
+        sync_template_catalog(&pool, "web", "https://memewebs.xyz", &prices)
+            .await
+            .unwrap();
+
+        let row = sqlx::query(
+            "SELECT template_id, name, preview_url FROM templates WHERE template_id = ?",
+        )
+        .bind("template_100")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.get::<String, _>("template_id"), "template_100");
+        assert_eq!(row.get::<String, _>("name"), "100.web");
+        assert_eq!(
+            row.get::<String, _>("preview_url"),
+            "https://memewebs.xyz/100"
+        );
     }
 
     #[tokio::test]

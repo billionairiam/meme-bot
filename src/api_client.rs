@@ -6,7 +6,7 @@ use serde::Deserialize;
 use tokio::time::sleep;
 use tracing::{error, info};
 
-use crate::deployment::cloudflare::{publish_dir_from_site_dir, ZONE_POLL_INTERVAL};
+use crate::deployment::cloudflare::{ZONE_POLL_INTERVAL, publish_dir_from_site_dir};
 use crate::deployment::github::{ensure_github_repo, git_output, push_site_to_github};
 use crate::deployment::{DeploymentError, DeploymentRequest, DeploymentResult, SiteDeployer};
 use crate::domain::{

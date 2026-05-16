@@ -60,17 +60,6 @@ pub(crate) fn find_template(
         .cloned()
 }
 
-pub(crate) fn template_number(
-    options: &[super::types::TemplateOption],
-    template_id: &str,
-) -> usize {
-    options
-        .iter()
-        .position(|template| template.id == template_id)
-        .map(|index| index + 1)
-        .unwrap_or(0)
-}
-
 pub(crate) fn template_price(
     options: &[super::types::TemplateOption],
     template_id: &str,

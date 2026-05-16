@@ -527,9 +527,8 @@ impl CloudflarePagesClient {
         }
 
         // Create the CNAME record
-        let create_url = format!(
-            "https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
-        );
+        let create_url =
+            format!("https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records");
         let resp = self
             .client
             .post(&create_url)

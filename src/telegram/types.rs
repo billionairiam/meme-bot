@@ -16,11 +16,20 @@ impl TemplateOption {
         preview_domain: &str,
         preview_base_url: &str,
     ) -> Self {
+        let number = format_template_number(template_number);
         Self {
-            id: format!("template_{template_number:02}"),
-            name: format!("{template_number:02}.{preview_domain}"),
-            preview_url: format!("{preview_base_url}/{template_number:02}"),
+            id: format!("template_{number}"),
+            name: format!("{number}.{preview_domain}"),
+            preview_url: format!("{}/{number}", preview_base_url.trim_end_matches('/')),
         }
+    }
+}
+
+pub(crate) fn format_template_number(template_number: usize) -> String {
+    if template_number < 100 {
+        format!("{template_number:02}")
+    } else {
+        template_number.to_string()
     }
 }
 
@@ -94,6 +103,7 @@ impl TelegramUiConfig {
             template_options: build_template_options(
                 &config.template_preview_domain,
                 &config.template_preview_base_url,
+                config.template_prices_usdt.len(),
             ),
             admin_contact: config.admin_contact.clone(),
             template_prices_usdt: config.template_prices_usdt.clone(),
@@ -118,8 +128,12 @@ impl TelegramUiConfig {
     }
 }
 
-fn build_template_options(preview_domain: &str, preview_base_url: &str) -> Vec<TemplateOption> {
-    (1..=12)
+fn build_template_options(
+    preview_domain: &str,
+    preview_base_url: &str,
+    template_count: usize,
+) -> Vec<TemplateOption> {
+    (1..=template_count)
         .map(|n| TemplateOption::new(n, preview_domain, preview_base_url))
         .collect()
 }

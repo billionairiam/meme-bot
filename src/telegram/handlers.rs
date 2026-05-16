@@ -158,6 +158,13 @@ pub(crate) async fn handle_callback(
             .await
         }
         Some("template_mode") => edit_template_mode(&bot, target, &config).await,
+        Some(data) if data.starts_with("tpl_page:") => {
+            let page = data
+                .trim_start_matches("tpl_page:")
+                .parse::<usize>()
+                .unwrap_or(0);
+            edit_template_mode_page(&bot, target, &config, page).await
+        }
         Some("ai_mode") => {
             clear_screen_keyboard(&bot, target).await?;
             match start_new_order(

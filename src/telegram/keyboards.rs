@@ -2,8 +2,10 @@ use rust_decimal::Decimal;
 use teloxide::types::InlineKeyboardButton;
 use teloxide::types::InlineKeyboardMarkup;
 
-use super::helpers::{template_number, template_price};
+use super::helpers::template_price;
 use super::types::TemplateOption;
+
+pub(crate) const TEMPLATE_PAGE_SIZE: usize = 12;
 
 pub(crate) fn main_menu_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
@@ -66,19 +68,53 @@ pub(crate) fn template_keyboard(
     options: &[TemplateOption],
     prices: &[Decimal],
 ) -> InlineKeyboardMarkup {
+    template_keyboard_page(options, prices, 0)
+}
+
+pub(crate) fn template_keyboard_page(
+    options: &[TemplateOption],
+    prices: &[Decimal],
+    page: usize,
+) -> InlineKeyboardMarkup {
     let mut rows = Vec::new();
-    for chunk in options.chunks(2) {
+    let page_count = options.len().div_ceil(TEMPLATE_PAGE_SIZE).max(1);
+    let page = page.min(page_count - 1);
+    let start = page * TEMPLATE_PAGE_SIZE;
+    let end = (start + TEMPLATE_PAGE_SIZE).min(options.len());
+
+    for chunk in options[start..end].chunks(2) {
         let mut row = Vec::new();
         for template in chunk {
-            let number = template_number(options, &template.id);
             let price = template_price(options, &template.id, prices);
             row.push(InlineKeyboardButton::callback(
-                format!("{number:02}. {} · {}U", template.name, price),
+                format!("{} · {}U", template.name, price),
                 format!("select_tpl:{}", template.id),
             ));
         }
         rows.push(row);
     }
+
+    if page_count > 1 {
+        let mut nav = Vec::new();
+        if page > 0 {
+            nav.push(InlineKeyboardButton::callback(
+                "⬅ Prev",
+                format!("tpl_page:{}", page - 1),
+            ));
+        }
+        nav.push(InlineKeyboardButton::callback(
+            format!("{}/{}", page + 1, page_count),
+            format!("tpl_page:{page}"),
+        ));
+        if page + 1 < page_count {
+            nav.push(InlineKeyboardButton::callback(
+                "Next ➡",
+                format!("tpl_page:{}", page + 1),
+            ));
+        }
+        rows.push(nav);
+    }
+
     rows.push(vec![InlineKeyboardButton::callback("⬅ Back", "create")]);
     InlineKeyboardMarkup::new(rows)
 }

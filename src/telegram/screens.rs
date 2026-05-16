@@ -234,11 +234,20 @@ pub(crate) async fn edit_template_mode(
     target: UiMessage,
     config: &TelegramUiConfig,
 ) -> ResponseResult<()> {
+    edit_template_mode_page(bot, target, config, 0).await
+}
+
+pub(crate) async fn edit_template_mode_page(
+    bot: &Bot,
+    target: UiMessage,
+    config: &TelegramUiConfig,
+    page: usize,
+) -> ResponseResult<()> {
     edit_screen(
         bot,
         target,
         template_mode_text(),
-        template_keyboard(&config.template_options, &config.template_prices_usdt),
+        template_keyboard_page(&config.template_options, &config.template_prices_usdt, page),
     )
     .await
 }
