@@ -335,10 +335,6 @@ impl OrderStore {
         }
     }
 
-    // ============================================================
-    // Order status query (for /status)
-    // ============================================================
-
     /// Get all active orders for a user (not done/cancelled).
     pub async fn get_active(&self, telegram_user_id: i64) -> anyhow::Result<Vec<Order>> {
         let rows = sqlx::query(
@@ -723,10 +719,6 @@ impl OrderStore {
     .await?;
         Ok(())
     }
-
-    // ============================================================
-    // Generation queue (operates directly on orders table)
-    // ============================================================
 
     /// Lock the next `paid_and_generating` order for generation processing.
     /// Returns the order with all fields needed for generation.

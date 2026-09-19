@@ -25,42 +25,29 @@ async fn legacy_pool() -> SqlitePool {
 async fn seed_legacy_rows(pool: &SqlitePool) {
     sqlx::raw_sql(
         r#"
-        INSERT INTO users (id, telegram_user_id, is_group_member)
-        VALUES ('11111111-1111-4111-8111-111111111111', 42, 1);
-
+        INSERT INTO users (id, telegram_user_id, is_group_member) VALUES
+            ('11111111-1111-4111-8111-111111111111', 42, 1);
         INSERT INTO templates (id, template_id, name, local_path, price_tier)
-        VALUES ('22222222-2222-4222-8222-222222222222', 'template_01',
-                'Legacy', 'template_01', '200');
-
-        INSERT INTO orders (
-            id, user_id, status, build_mode, site_price_usdt, domain_price_usdt,
-            total_usdt, locked_by, locked_at, attempt_count
-        ) VALUES (
+        VALUES ('22222222-2222-4222-8222-222222222222', 'template_01', 'Legacy', 'template_01', '200');
+        INSERT INTO orders (id, user_id, status, build_mode, site_price_usdt,
+            domain_price_usdt, total_usdt, locked_by, locked_at, attempt_count) VALUES (
             'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
             '11111111-1111-4111-8111-111111111111',
             'paid_and_generating', 'ai_free', '50', '0', '50',
-            'ai-worker', '2026-09-19 00:00:00', 1
-        );
-
-        INSERT INTO orders (
-            id, user_id, status, build_mode, template_id, site_price_usdt,
-            domain_price_usdt, total_usdt, payment_chain, tx_hash, locked_by,
-            locked_at, attempt_count
-        ) VALUES (
+            'ai-worker', '2026-09-19 00:00:00', 1);
+        INSERT INTO orders (id, user_id, status, build_mode, template_id,
+            site_price_usdt, domain_price_usdt, total_usdt, payment_chain,
+            tx_hash, locked_by, locked_at, attempt_count) VALUES (
             'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
             '11111111-1111-4111-8111-111111111111',
             'need_pay', 'template', 'template_01', '200', '5', '205',
-            'tron', 'unfinished-tx', 'legacy-worker', '2026-09-19 01:00:00', 2
-        );
-
-        INSERT INTO orders (
-            id, user_id, status, build_mode, template_id, token_chain,
+            'tron', 'unfinished-tx', 'legacy-worker', '2026-09-19 01:00:00', 2);
+        INSERT INTO orders (id, user_id, status, build_mode, template_id, token_chain,
             token_ticker, token_name, contract_address, x_url, telegram_url,
             logo_asset_path, requested_domain, site_price_usdt,
             domain_price_usdt, total_usdt, payment_chain, tx_hash, paid_at,
             pending_contract_address, edit_status, edit_payment_chain,
-            edit_tx_hash, edit_success_count, attempt_count, created_at, updated_at
-        ) VALUES (
+            edit_tx_hash, edit_success_count, attempt_count, created_at, updated_at) VALUES (
             'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
             '11111111-1111-4111-8111-111111111111',
             'done', 'template', 'template_01', 'eth', 'DONE', 'Done Token',
@@ -69,24 +56,16 @@ async fn seed_legacy_rows(pool: &SqlitePool) {
             'done.example', '200', '10', '210', 'erc20', 'done-tx',
             '2026-09-19 02:00:00', '0x2222222222222222222222222222222222222222',
             'need_pay', 'sol', 'edit-tx', 3, 2,
-            '2026-09-18 22:00:00', '2026-09-19 03:00:00'
-        );
-
-        INSERT INTO orders (
-            id, user_id, status, build_mode, template_id, site_price_usdt,
-            domain_price_usdt, total_usdt
-        ) VALUES (
+            '2026-09-18 22:00:00', '2026-09-19 03:00:00');
+        INSERT INTO orders (id, user_id, status, build_mode, template_id,
+            site_price_usdt, domain_price_usdt, total_usdt) VALUES (
             'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
             '11111111-1111-4111-8111-111111111111',
-            'cancelled', 'template', 'template_01', '200', '0', '200'
-        );
-
-        INSERT INTO websites (
-            id, user_id, order_id, token_chain, token_ticker, token_name,
+            'cancelled', 'template', 'template_01', '200', '0', '200');
+        INSERT INTO websites (id, user_id, order_id, token_chain, token_ticker, token_name,
             contract_address, x_url, telegram_url, logo_asset_path,
             requested_domain, github_repo_url, cloudflare_pages_url,
-            custom_domain, generation_provider_used
-        ) VALUES (
+            custom_domain, generation_provider_used) VALUES (
             'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
             '11111111-1111-4111-8111-111111111111',
             'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
@@ -94,8 +73,7 @@ async fn seed_legacy_rows(pool: &SqlitePool) {
             '0x1111111111111111111111111111111111111111',
             'https://x.com/done', 'https://t.me/done', '/logos/done.png',
             'done.example', 'https://github.com/example/done',
-            'https://done.pages.dev', 'done.example', 'gemini'
-        );
+            'https://done.pages.dev', 'done.example', 'gemini');
         "#,
     )
     .execute(pool)

@@ -117,10 +117,6 @@ impl DbStores {
     }
 }
 
-// ============================================================
-// Helpers
-// ============================================================
-
 fn parse_db_datetime(value: &str) -> anyhow::Result<DateTime<Utc>> {
     if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
         return Ok(parsed.with_timezone(&Utc));
@@ -132,10 +128,6 @@ fn parse_db_datetime(value: &str) -> anyhow::Result<DateTime<Utc>> {
 fn parse_decimal_or_zero(value: &str) -> Decimal {
     Decimal::from_str_exact(value).unwrap_or_default()
 }
-
-// ============================================================
-// Tests
-// ============================================================
 
 #[cfg(test)]
 mod tests {
