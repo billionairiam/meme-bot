@@ -4,15 +4,16 @@ use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use uuid::Uuid;
 
 use crate::deployment::DeploymentResult;
-use crate::models::{BuildMode, Order, OrderStatus, PaymentChain, TokenChain, WebsiteInput};
+use crate::models::{Order, OrderStatus, PaymentChain, TokenChain, WebsiteInput};
 
 mod order;
-mod template;
 mod user;
 mod website;
 
+#[cfg(test)]
+mod migration_tests;
+
 pub use order::{EDIT_PRICE_USDT, FREE_EDIT_LIMIT, OrderStore, OrderWithWebsite, PaymentWindow};
-pub use template::TemplateStore;
 pub use user::UserStore;
 pub use website::WebsiteStore;
 
@@ -22,7 +23,6 @@ pub const ASSET_COLLECTION_TIMEOUT_MINUTES: i64 = 60;
 #[derive(Clone)]
 pub struct DbStores {
     pub users: UserStore,
-    pub templates: TemplateStore,
     pub orders: OrderStore,
     pub websites: WebsiteStore,
 }
@@ -31,7 +31,6 @@ impl DbStores {
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             users: UserStore::new(pool.clone()),
-            templates: TemplateStore::new(pool.clone()),
             orders: OrderStore::new(pool.clone()),
             websites: WebsiteStore::new(pool),
         }
@@ -79,7 +78,6 @@ impl DbStores {
             ("websites", "order_id"),
             ("orders", "id"),
             ("orders", "user_id"),
-            ("templates", "id"),
             ("users", "id"),
         ];
 
@@ -223,7 +221,7 @@ mod tests {
             .await
             .unwrap();
         let order_id = OrderStore::new(pool.clone())
-            .create(user_id, BuildMode::AiFree, None, Decimal::new(50, 0))
+            .create(user_id, Decimal::new(50, 0))
             .await
             .unwrap();
 
@@ -241,105 +239,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn template_order_seeds_template_before_insert() {
-        let pool = test_pool().await;
-        let user_id = UserStore::new(pool.clone())
-            .upsert(151, Some("template_user"), None, None, true)
-            .await
-            .unwrap();
-        let order_id = OrderStore::new(pool.clone())
-            .create(
-                user_id,
-                BuildMode::Template,
-                Some("template_01"),
-                Decimal::new(30, 0),
-            )
-            .await
-            .unwrap();
-
-        let order = OrderStore::new(pool.clone())
-            .get(order_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(order.template_id.as_deref(), Some("template_01"));
-
-        let row = sqlx::query("SELECT price_tier FROM templates WHERE template_id = ?")
-            .bind("template_01")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(row.get::<String, _>("price_tier"), "30");
-    }
-
-    #[tokio::test]
-    async fn sync_template_catalog_updates_prices_from_config() {
-        let pool = test_pool().await;
-        TemplateStore::new(pool.clone())
-            .sync_catalog(
-                "web",
-                "https://memewebs.xyz",
-                &[
-                    Decimal::new(30, 0),
-                    Decimal::new(40, 0),
-                    Decimal::new(50, 0),
-                ],
-            )
-            .await
-            .unwrap();
-        TemplateStore::new(pool.clone())
-            .sync_catalog(
-                "web",
-                "https://memewebs.xyz",
-                &[
-                    Decimal::new(35, 0),
-                    Decimal::new(45, 0),
-                    Decimal::new(55, 0),
-                ],
-            )
-            .await
-            .unwrap();
-
-        let row = sqlx::query(
-            "SELECT name, preview_url, price_tier FROM templates WHERE template_id = ?",
-        )
-        .bind("template_02")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(row.get::<String, _>("name"), "02.web");
-        assert_eq!(
-            row.get::<String, _>("preview_url"),
-            "https://memewebs.xyz/02"
-        );
-        assert_eq!(row.get::<String, _>("price_tier"), "45");
-    }
-
-    #[tokio::test]
-    async fn sync_template_catalog_scales_past_99_templates() {
-        let pool = test_pool().await;
-        let prices = vec![Decimal::new(30, 0); 100];
-        TemplateStore::new(pool.clone())
-            .sync_catalog("web", "https://memewebs.xyz", &prices)
-            .await
-            .unwrap();
-
-        let row = sqlx::query(
-            "SELECT template_id, name, preview_url FROM templates WHERE template_id = ?",
-        )
-        .bind("template_100")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(row.get::<String, _>("template_id"), "template_100");
-        assert_eq!(row.get::<String, _>("name"), "100.web");
-        assert_eq!(
-            row.get::<String, _>("preview_url"),
-            "https://memewebs.xyz/100"
-        );
-    }
-
-    #[tokio::test]
     async fn order_wizard_flow() {
         let pool = test_pool().await;
         let user_id = UserStore::new(pool.clone())
@@ -347,7 +246,7 @@ mod tests {
             .await
             .unwrap();
         let order_id = OrderStore::new(pool.clone())
-            .create(user_id, BuildMode::AiFree, None, Decimal::new(50, 0))
+            .create(user_id, Decimal::new(50, 0))
             .await
             .unwrap();
 
@@ -387,7 +286,7 @@ mod tests {
             .await
             .unwrap();
         let order_id = OrderStore::new(pool.clone())
-            .create(user_id, BuildMode::AiFree, None, Decimal::new(50, 0))
+            .create(user_id, Decimal::new(50, 0))
             .await
             .unwrap();
         OrderStore::new(pool.clone())
@@ -419,7 +318,7 @@ mod tests {
             .await
             .unwrap();
         let order_id = OrderStore::new(pool.clone())
-            .create(user_id, BuildMode::AiFree, None, Decimal::new(50, 0))
+            .create(user_id, Decimal::new(50, 0))
             .await
             .unwrap();
         OrderStore::new(pool.clone())

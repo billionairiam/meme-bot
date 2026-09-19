@@ -106,8 +106,8 @@ async fn full_quote_purchase_flow_available_domain() {
         })
         .await
         .unwrap();
-    assert_eq!(quote.available, true);
-    assert_eq!(quote.is_premium, false);
+    assert!(quote.available);
+    assert!(!quote.is_premium);
     assert_eq!(quote.price_usd, Decimal::from_str("9.99").unwrap());
     assert_eq!(quote.tld, "xyz");
 
@@ -132,7 +132,7 @@ async fn quote_unavailable_domain() {
         })
         .await
         .unwrap();
-    assert_eq!(quote.available, false);
+    assert!(!quote.available);
     assert_eq!(quote.price_usd, Decimal::ZERO);
 }
 
@@ -145,8 +145,8 @@ async fn quote_premium_domain_rejected() {
         })
         .await
         .unwrap();
-    assert_eq!(quote.available, true);
-    assert_eq!(quote.is_premium, true);
+    assert!(quote.available);
+    assert!(quote.is_premium);
     assert_eq!(quote.price_usd, Decimal::from_str("2500.00").unwrap());
 }
 
@@ -200,8 +200,8 @@ fn parses_domain_check_attrs() {
     let attrs = NamecheapXml::new(xml)
         .first_tag_attrs("DomainCheckResult")
         .unwrap();
-    assert_eq!(attrs.bool("Available").unwrap(), true);
-    assert_eq!(attrs.bool("IsPremiumName").unwrap(), false);
+    assert!(attrs.bool("Available").unwrap());
+    assert!(!attrs.bool("IsPremiumName").unwrap());
 }
 
 #[test]
@@ -284,7 +284,7 @@ fn parses_domain_create_result() {
     let attrs = NamecheapXml::new(xml)
         .first_tag_attrs("DomainCreateResult")
         .unwrap();
-    assert_eq!(attrs.bool("Registered").unwrap(), true);
+    assert!(attrs.bool("Registered").unwrap());
     assert_eq!(attrs.get("OrderID").unwrap(), "123");
     assert_eq!(attrs.get("TransactionID").unwrap(), "456");
     assert_eq!(
@@ -299,7 +299,7 @@ fn parses_not_registered_result() {
     let attrs = NamecheapXml::new(xml)
         .first_tag_attrs("DomainCreateResult")
         .unwrap();
-    assert_eq!(attrs.bool("Registered").unwrap(), false);
+    assert!(!attrs.bool("Registered").unwrap());
 }
 
 #[test]
@@ -308,8 +308,8 @@ fn parses_premium_domain_check() {
     let attrs = NamecheapXml::new(xml)
         .first_tag_attrs("DomainCheckResult")
         .unwrap();
-    assert_eq!(attrs.bool("Available").unwrap(), true);
-    assert_eq!(attrs.bool("IsPremiumName").unwrap(), true);
+    assert!(attrs.bool("Available").unwrap());
+    assert!(attrs.bool("IsPremiumName").unwrap());
     assert_eq!(
         attrs.decimal("PremiumRegistrationPrice").unwrap(),
         Decimal::from_str("2500.00").unwrap()
@@ -337,23 +337,20 @@ fn parses_domain_get_info_owner_result() {
 
 #[test]
 fn attr_bool_accepts_truthy_values() {
-    assert_eq!(
+    assert!(
         NamecheapXml::parse_attrs(r#"<Tag Test="yes" />"#)
             .bool("Test")
-            .unwrap(),
-        true
+            .unwrap()
     );
-    assert_eq!(
+    assert!(
         NamecheapXml::parse_attrs(r#"<Tag Test="1" />"#)
             .bool("Test")
-            .unwrap(),
-        true
+            .unwrap()
     );
-    assert_eq!(
+    assert!(
         NamecheapXml::parse_attrs(r#"<Tag Test="TRUE" />"#)
             .bool("Test")
-            .unwrap(),
-        true
+            .unwrap()
     );
 }
 
@@ -404,7 +401,7 @@ fn parses_dns_set_custom_result() {
     let attrs = NamecheapXml::new(xml)
         .first_tag_attrs("DomainDNSSetCustomResult")
         .unwrap();
-    assert_eq!(attrs.bool("Updated").unwrap(), true);
+    assert!(attrs.bool("Updated").unwrap());
 }
 
 #[test]
@@ -413,7 +410,7 @@ fn rejects_dns_set_custom_not_updated() {
     let attrs = NamecheapXml::new(xml)
         .first_tag_attrs("DomainDNSSetCustomResult")
         .unwrap();
-    assert_eq!(attrs.bool("Updated").unwrap(), false);
+    assert!(!attrs.bool("Updated").unwrap());
 }
 
 #[test]

@@ -21,7 +21,7 @@ Telegram user
     | Bot API
     v
 meme-bot
-    |-- SQLite orders/users/websites/templates
+    |-- SQLite orders/users/websites
     |-- USDT payment verification
     |-- Gemini/Codex/Claude CLI generation
     |-- GitHub repo creation + push
@@ -72,16 +72,19 @@ mem-bot/
 
 ## Data Model
 
-The SQLite schema is in `migrations/0001_init.sql`.
+The current SQLite schema is the ordered migration set under `migrations/`.
 
 | Table | Purpose |
 |-------|---------|
 | `users` | Telegram user identity and membership state |
-| `templates` | Template catalog rows |
 | `orders` | Order wizard state, edit state, pricing, payment data, and queue lock fields |
 | `websites` | Completed website/deployment records |
 
 The order lifecycle is represented by one `orders.status` value, such as `need_chain`, `need_logo`, `need_pay`, `paid_and_generating`, `need_manual_review`, `done`, or `cancelled`.
+
+When deploying migration `0002`, stop both binaries, copy `db.sqlite3` to
+`db.sqlite3.pre-0002`, deploy both new binaries, then start them. To roll back,
+stop both binaries and restore that copy before starting the old binaries.
 
 ## Bot Workflow
 
@@ -162,9 +165,6 @@ Important variables in `.env.meme-bot`:
 |----------|-------|
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token |
 | `TELEGRAM_REQUIRED_GROUP_ID` | Group/channel membership gate |
-| `TEMPLATE_PRICES_USDT` | Legacy internal catalog pricing; public template service is fixed at 200 USDT |
-| `TEMPLATE_PREVIEW_DOMAIN` | Legacy numbered preview suffix used by catalog synchronization |
-| `TEMPLATE_PREVIEW_BASE_URL` | Legacy catalog preview base URL; Telegram always links to `memewebs.store` |
 | `AI_CREATION_PRICE_USDT` | AI-generated site price |
 | `USDT_ERC20_ADDRESS` / `USDT_TRON_ADDRESS` / `USDT_SOL_ADDRESS` | Receiving addresses |
 | `USDT_ERC20_RPC_URL` / `TRON_GRID_BASE_URL` / `SOLANA_RPC_URL` | Payment verification providers |
@@ -172,7 +172,6 @@ Important variables in `.env.meme-bot`:
 | `GENERATION_MAX_CONCURRENCY` | Queue concurrency limit |
 | `AGENT_TIMEOUT_SECONDS` | External agent timeout |
 | `GENERATED_SITES_DIR` | Output root for generated websites |
-| `LOCAL_TEMPLATES_DIR` | Local template source root |
 | `GITHUB_OWNER` / `GITHUB_TOKEN` | GitHub owner/token used by the bot |
 | `API_SERVICE_BASE_URL` / `API_SERVICE_API_KEY` | API server connection for domain/DNS/Pages operations |
 | `AUTO_PURCHASE_AFTER_TX` | Continue fulfillment after payment confirmation |

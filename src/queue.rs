@@ -106,7 +106,6 @@ impl GenerationQueue {
         info!(
             order_id = %order_id,
             output_dir = %request.output_dir.display(),
-            build_mode = %request.build_mode,
             domain = input.requested_domain.as_deref().unwrap_or("<none>"),
             "starting site generation"
         );
@@ -327,11 +326,6 @@ fn build_generation_request(
     let output_dir = std::path::Path::new(generated_sites_dir).join(dir_name);
     SiteGenerationRequest {
         order_id: order.id,
-        build_mode: order
-            .build_mode
-            .map(|m| m.as_str().to_string())
-            .unwrap_or_else(|| "ai_free".to_string()),
-        template_local_path: order.template_id.clone(),
         input: input.clone(),
         output_dir,
     }
@@ -379,7 +373,7 @@ fn project_name_from_repo_name(repo_name: &str) -> String {
 mod tests {
     use uuid::Uuid;
 
-    use crate::models::{BuildMode, OrderStatus, TokenChain};
+    use crate::models::{OrderStatus, TokenChain};
 
     use super::build_generation_request;
 
@@ -389,8 +383,6 @@ mod tests {
             id: Uuid::new_v4(),
             user_id: Uuid::new_v4(),
             status: OrderStatus::PaidAndGenerating,
-            build_mode: Some(BuildMode::AiFree),
-            template_id: None,
             token_chain: Some(TokenChain::Eth),
             token_ticker: Some("AAA".to_string()),
             token_name: Some("AAA BBB".to_string()),

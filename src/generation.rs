@@ -22,8 +22,6 @@ const AGENT_PROMPT_FILE_NAME: &str = "agent-prompt.md";
 #[derive(Clone, Debug)]
 pub struct SiteGenerationRequest {
     pub order_id: Uuid,
-    pub build_mode: String,
-    pub template_local_path: Option<String>,
     pub input: WebsiteInput,
     pub output_dir: PathBuf,
 }
@@ -163,9 +161,8 @@ async fn run_cli_provider(
 ) -> Result<SiteGenerationResult, GenerationError> {
     let prompt = agent_prompt(request, provider.name)?;
     let prompt_file = request.output_dir.join(AGENT_PROMPT_FILE_NAME);
-    fs::write(&prompt_file, &prompt).map_err(|error| {
-        GenerationError::Failed(format!("write agent prompt failed: {error}"))
-    })?;
+    fs::write(&prompt_file, &prompt)
+        .map_err(|error| GenerationError::Failed(format!("write agent prompt failed: {error}")))?;
     let done_file = request.output_dir.join(".agent_done.json");
     match fs::remove_file(&done_file) {
         Ok(()) => {}
@@ -224,8 +221,6 @@ fn agent_prompt(
     let spec = serde_json::json!({
         "order_id": request.order_id,
         "provider": provider_name,
-        "build_mode": request.build_mode,
-        "template_local_path": request.template_local_path,
         "input": request.input,
         "output_dir": request.output_dir,
         "done_file": request.output_dir.join(".agent_done.json"),
@@ -524,8 +519,6 @@ mod tests {
     fn test_request(output_dir: PathBuf) -> SiteGenerationRequest {
         SiteGenerationRequest {
             order_id: Uuid::new_v4(),
-            build_mode: "template".to_string(),
-            template_local_path: None,
             input: WebsiteInput {
                 token_chain: TokenChain::Eth,
                 token_ticker: "MOON".to_string(),
@@ -575,8 +568,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let request = SiteGenerationRequest {
             order_id: Uuid::new_v4(),
-            build_mode: "ai_free".to_string(),
-            template_local_path: None,
             input: WebsiteInput {
                 token_chain: TokenChain::Eth,
                 token_ticker: "LOGO".to_string(),

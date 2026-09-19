@@ -253,19 +253,6 @@ impl<'a> Screens<'a> {
         .await
     }
 
-    pub(crate) async fn show_template_mode(
-        &self,
-        chat_id: ChatId,
-        config: &TelegramUiConfig,
-    ) -> ResponseResult<()> {
-        self.send_screen(
-            chat_id,
-            template_mode_text(&config.admin_contact),
-            Keyboards::template_contact(),
-        )
-        .await
-    }
-
     pub(crate) async fn edit_choose_chain(&self, target: UiMessage) -> ResponseResult<()> {
         self.edit_screen(target, choose_chain_text(), Keyboards::token_chain())
             .await

@@ -56,17 +56,6 @@ async fn main() -> anyhow::Result<()> {
         .normalize_sqlite_uuid_storage()
         .await
         .context("normalize sqlite uuid storage")?;
-    let synced_templates = stores
-        .templates
-        .sync_catalog(
-            &config.template_preview_domain,
-            &config.template_preview_base_url,
-            &config.template_prices_usdt,
-        )
-        .await
-        .context("sync template catalog")?;
-    info!(synced_templates, "template catalog synced");
-
     match stores.orders.reset_generating_on_startup().await {
         Ok(0) => {}
         Ok(count) => info!(

@@ -44,12 +44,6 @@ pub(crate) fn html_escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-pub(crate) fn parse_template_deep_link(text: &str) -> Option<&str> {
-    text.trim()
-        .strip_prefix("/start tpl_")
-        .or_else(|| text.trim().strip_prefix("/start=tpl_"))
-}
-
 pub(crate) fn payment_error_for_user(error: &crate::payment::PaymentVerificationError) -> String {
     use crate::payment::PaymentVerificationError;
     match error {

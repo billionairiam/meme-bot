@@ -20,10 +20,7 @@ pub struct Config {
     pub database_url: Option<String>,
     pub telegram_bot_token: String,
     pub telegram_required_group_id: String,
-    pub template_preview_domain: String,
-    pub template_preview_base_url: String,
     pub admin_contact: String,
-    pub template_prices_usdt: Vec<Decimal>,
     pub ai_creation_price_usdt: Decimal,
     pub usdt_erc20_address: String,
     pub usdt_tron_address: String,
@@ -48,7 +45,6 @@ pub struct Config {
     pub claude_agent_command: String,
     pub claude_agent_args: String,
     pub generated_sites_dir: String,
-    pub local_templates_dir: String,
     pub github_owner: String,
     pub github_token: String,
     pub api_service_base_url: Option<String>,
@@ -108,14 +104,7 @@ impl Config {
             telegram_bot_token: env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default(),
             telegram_required_group_id: env::var("TELEGRAM_REQUIRED_GROUP_ID")
                 .unwrap_or_else(|_| "@MeMe_Web_Support".to_string()),
-            template_preview_domain: env::var("TEMPLATE_PREVIEW_DOMAIN")
-                .unwrap_or_else(|_| "web".to_string()),
-            template_preview_base_url: env::var("TEMPLATE_PREVIEW_BASE_URL")
-                .unwrap_or_else(|_| "https://memewebs.store".to_string()),
             admin_contact: env::var("ADMIN_CONTACT").unwrap_or_else(|_| "@admin".to_string()),
-            template_prices_usdt: parse_template_prices(
-                &env::var("TEMPLATE_PRICES_USDT").unwrap_or_default(),
-            )?,
             ai_creation_price_usdt: env::var("AI_CREATION_PRICE_USDT")
                 .unwrap_or_else(|_| "50".to_string())
                 .parse()
@@ -177,8 +166,6 @@ impl Config {
             }),
             generated_sites_dir: env::var("GENERATED_SITES_DIR")
                 .unwrap_or_else(|_| "./generated-sites".to_string()),
-            local_templates_dir: env::var("LOCAL_TEMPLATES_DIR")
-                .unwrap_or_else(|_| "./templates".to_string()),
             github_owner: env::var("GITHUB_OWNER").unwrap_or_default(),
             github_token: env::var("GITHUB_TOKEN").unwrap_or_default(),
             api_service_base_url: env::var("API_SERVICE_BASE_URL")
@@ -212,34 +199,4 @@ fn parse_provider(value: &str) -> Result<GenerationProviderName> {
         "claude" => Ok(GenerationProviderName::Claude),
         other => anyhow::bail!("unsupported generation provider: {other}"),
     }
-}
-
-const DEFAULT_TEMPLATE_PRICES: &[i64] = &[200; 12];
-
-fn parse_template_prices(value: &str) -> Result<Vec<Decimal>> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Ok(DEFAULT_TEMPLATE_PRICES
-            .iter()
-            .map(|p| Decimal::from(*p))
-            .collect());
-    }
-    trimmed
-        .split(',')
-        .enumerate()
-        .map(|(i, part)| {
-            let part = part.trim();
-            if part.is_empty() {
-                anyhow::bail!(
-                    "TEMPLATE_PRICES_USDT position {} is empty, expected a number",
-                    i + 1
-                );
-            }
-            part.parse::<i64>()
-                .with_context(|| {
-                    format!("parse TEMPLATE_PRICES_USDT position {}: \"{part}\"", i + 1)
-                })
-                .map(Decimal::from)
-        })
-        .collect()
 }

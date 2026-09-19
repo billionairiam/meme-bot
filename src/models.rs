@@ -5,30 +5,6 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BuildMode {
-    Template,
-    AiFree,
-}
-
-impl BuildMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Template => "template",
-            Self::AiFree => "ai_free",
-        }
-    }
-
-    pub fn from_db(value: &str) -> Option<Self> {
-        match value {
-            "template" => Some(Self::Template),
-            "ai_free" => Some(Self::AiFree),
-            _ => None,
-        }
-    }
-}
-
 /// Single status field for order lifecycle. Replaces the old payment_status +
 /// site_status + generation_jobs.status combination.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -235,8 +211,6 @@ pub struct Order {
     pub id: Uuid,
     pub user_id: Uuid,
     pub status: OrderStatus,
-    pub build_mode: Option<BuildMode>,
-    pub template_id: Option<String>,
     // wizard assets
     pub token_chain: Option<TokenChain>,
     pub token_ticker: Option<String>,
@@ -320,16 +294,6 @@ pub struct Website {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug)]
-pub struct Template {
-    pub template_id: String,
-    pub name: String,
-    pub local_path: String,
-    pub preview_url: Option<String>,
-    pub price_tier: Decimal,
-    pub enabled: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,8 +304,6 @@ mod tests {
             id: Uuid::new_v4(),
             user_id: Uuid::new_v4(),
             status: OrderStatus::NeedPay,
-            build_mode: Some(BuildMode::AiFree),
-            template_id: None,
             token_chain: Some(TokenChain::Eth),
             token_ticker: Some("LOGO".to_string()),
             token_name: Some("Logo Coin".to_string()),

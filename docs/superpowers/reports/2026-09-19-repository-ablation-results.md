@@ -31,6 +31,21 @@ commands unchanged so the measurements remain comparable.
 Results are appended only after a batch passes its required checks. A rejected
 candidate is recorded with the reason it was reverted.
 
+### Batch 1 — legacy template removal
+
+| Metric | Observed | Change from baseline |
+|---|---:|---:|
+| Rust and migration lines | 11,645 | +22 |
+| Structs, enums, and traits | 75 | -3 |
+| Public symbols | 192 | -8 |
+| Direct dependencies | 23 | 0 |
+| Listed tests | 62 | -3 |
+
+Verification: migration preservation and rollback tests pass; the complete test
+suite passes with 55 passed and 7 ignored; strict Clippy and both binary builds
+pass. The intentional line increase comes from explicit migration preservation
+coverage. Retained: yes.
+
 ## Deployment
 
 Before deploying migration 0002, stop both binaries and copy `db.sqlite3` to

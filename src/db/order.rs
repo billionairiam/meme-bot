@@ -11,59 +11,22 @@ impl OrderStore {
     }
     /// Create a new order in need_chain status. Fails if user already has an
     /// unpaid order (need_logo ~ need_pay).
-    pub async fn create(
-        &self,
-        user_id: Uuid,
-        build_mode: BuildMode,
-        template_id: Option<&str>,
-        site_price_usdt: Decimal,
-    ) -> anyhow::Result<Uuid> {
-        let mut tx = self.pool.begin().await?;
-
-        if let Some(template_id) = template_id {
-            sqlx::query(
-                r#"
-            INSERT INTO templates (
-                id, template_id, name, local_path, price_tier, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, datetime('now'))
-            ON CONFLICT(template_id) DO UPDATE SET
-                price_tier = EXCLUDED.price_tier,
-                updated_at = datetime('now')
-            "#,
-            )
-            .bind(uuid_value(Uuid::new_v4()))
-            .bind(template_id)
-            .bind(template_id)
-            .bind(template_id)
-            .bind(site_price_usdt.to_string())
-            .execute(&mut *tx)
-            .await?;
-        }
-
+    pub async fn create(&self, user_id: Uuid, site_price_usdt: Decimal) -> anyhow::Result<Uuid> {
         let id = Uuid::new_v4();
         let row = sqlx::query(
             r#"
-        INSERT INTO orders (
-            id, user_id, build_mode, template_id, status,
-            site_price_usdt, total_usdt
-        )
-        VALUES (?, ?, ?, ?, 'need_chain', ?, ?)
+        INSERT INTO orders (id, user_id, status, site_price_usdt, total_usdt)
+        VALUES (?, ?, 'need_chain', ?, ?)
         RETURNING id
         "#,
         )
         .bind(uuid_value(id))
         .bind(uuid_value(user_id))
-        .bind(build_mode.as_str())
-        .bind(template_id)
         .bind(site_price_usdt.to_string())
         .bind(site_price_usdt.to_string())
-        .fetch_one(&mut *tx)
+        .fetch_one(&self.pool)
         .await?;
-
-        let id = uuid_from_row(&row, "id")?;
-        tx.commit().await?;
-        Ok(id)
+        uuid_from_row(&row, "id")
     }
     /// Check if user has an unpaid (wizard/payment) order.
     pub async fn has_unpaid(&self, telegram_user_id: i64) -> anyhow::Result<bool> {
@@ -952,17 +915,10 @@ impl OrderStore {
         let status = OrderStatus::from_db(&status_str)
             .ok_or_else(|| anyhow::anyhow!("unknown order status: {status_str}"))?;
 
-        let build_mode = row
-            .get::<Option<String>, _>("build_mode")
-            .as_deref()
-            .and_then(BuildMode::from_db);
-
         Ok(Order {
             id: uuid_from_row(row, "id")?,
             user_id: uuid_from_row(row, "user_id")?,
             status,
-            build_mode,
-            template_id: row.get("template_id"),
             token_chain: row
                 .get::<Option<String>, _>("token_chain")
                 .as_deref()

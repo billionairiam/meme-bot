@@ -10,7 +10,7 @@ use crate::{
     db,
     deployment::github::{RepoTextEditRequest, replace_repo_text_and_push},
     domain::DomainRegistrar,
-    models::{BuildMode, Order, OrderStatus, PaymentChain, TokenChain},
+    models::{Order, OrderStatus, PaymentChain, TokenChain},
     validation::{
         DEFAULT_CONTRACT_ADDRESS, DEFAULT_TELEGRAM_URL, DEFAULT_X_URL,
         validate_contract_address_for_chain, validate_domain, validate_telegram_url,
@@ -31,12 +31,6 @@ fn users(pool: &SqlitePool) -> db::UserStore {
 
 fn orders(pool: &SqlitePool) -> db::OrderStore {
     db::OrderStore::new(pool.clone())
-}
-
-fn is_legacy_template_callback(data: &str) -> bool {
-    data.starts_with("tpl_page:")
-        || data.starts_with("select_tpl:")
-        || data.starts_with("confirm_tpl:")
 }
 
 pub(crate) async fn handle_message(
@@ -76,12 +70,6 @@ pub(crate) async fn handle_message(
     expire_stale_orders_for_user(&pool, user_id).await;
 
     if let Some(text) = msg.text() {
-        if parse_template_deep_link(text).is_some() {
-            return Screens::new(&bot)
-                .show_template_mode(msg.chat.id, &config)
-                .await;
-        }
-
         match text.trim() {
             "/start" | "/help" => {
                 return Screens::new(&bot)
@@ -177,9 +165,6 @@ pub(crate) async fn handle_callback(
                 .await
         }
         Some("template_mode") => Screens::new(&bot).edit_template_mode(target, &config).await,
-        Some(data) if is_legacy_template_callback(data) => {
-            Screens::new(&bot).edit_template_mode(target, &config).await
-        }
         Some("ai_mode") => {
             Screens::new(&bot).clear_screen_keyboard(target).await?;
             match start_new_order(
@@ -188,8 +173,6 @@ pub(crate) async fn handle_callback(
                 query.from.username.as_deref(),
                 Some(query.from.first_name.as_str()),
                 query.from.last_name.as_deref(),
-                BuildMode::AiFree,
-                None,
                 config.ai_creation_price_usdt,
             )
             .await
@@ -198,7 +181,6 @@ pub(crate) async fn handle_callback(
                     info!(
                         user_id = query.from.id.0 as i64,
                         order_id = %order_id,
-                        build_mode = "ai_free",
                         "new order created"
                     );
                     Screens::new(&bot).edit_choose_chain(target).await
@@ -360,8 +342,6 @@ async fn start_new_order(
     username: Option<&str>,
     first_name: Option<&str>,
     last_name: Option<&str>,
-    build_mode: BuildMode,
-    template_id: Option<&str>,
     site_price_usdt: rust_decimal::Decimal,
 ) -> anyhow::Result<uuid::Uuid> {
     let db_user_id = users(pool)
@@ -378,9 +358,7 @@ async fn start_new_order(
         anyhow::bail!("has pending order");
     }
 
-    let order_id = orders(pool)
-        .create(db_user_id, build_mode, template_id, site_price_usdt)
-        .await?;
+    let order_id = orders(pool).create(db_user_id, site_price_usdt).await?;
     info!(
         user_id = telegram_user_id.0 as i64,
         order_id = %order_id,
@@ -1868,39 +1846,4 @@ async fn handle_alternative_domain_selection(
         Keyboards::payment_chain(),
     )
     .await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{is_legacy_template_callback, parse_template_deep_link};
-
-    #[test]
-    fn legacy_template_callbacks_route_to_contact_screen() {
-        for callback in [
-            "tpl_page:1",
-            "select_tpl:template_01",
-            "confirm_tpl:template_01",
-        ] {
-            assert!(
-                is_legacy_template_callback(callback),
-                "{callback} must not reach template checkout"
-            );
-        }
-
-        assert!(!is_legacy_template_callback("ai_mode"));
-        assert!(!is_legacy_template_callback("template_mode"));
-    }
-
-    #[test]
-    fn legacy_template_deep_links_are_recognized_for_contact_redirect() {
-        assert_eq!(
-            parse_template_deep_link("/start tpl_template_01"),
-            Some("template_01")
-        );
-        assert_eq!(
-            parse_template_deep_link("/start=tpl_template_01"),
-            Some("template_01")
-        );
-        assert_eq!(parse_template_deep_link("/start"), None);
-    }
 }
