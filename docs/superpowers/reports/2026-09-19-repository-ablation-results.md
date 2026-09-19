@@ -60,6 +60,11 @@ Removed `App` and `GenerationQueueConfig`. Queue construction now has one fewer
 forwarding call layer: `main` calls `GenerationQueue::new` directly. The full
 test suite and the `meme-bot` build pass. Retained: yes.
 
+The keyboard namespace candidate also passed: replacing `Keyboards` with module
+functions reduced the batch totals to 11,595 lines, 72 declared types, and 186
+public symbols, with dependency and test counts unchanged. All keyboard,
+screen, and full-suite tests pass. Retained: yes.
+
 ## Deployment
 
 Before deploying migration 0002, stop both binaries and copy `db.sqlite3` to

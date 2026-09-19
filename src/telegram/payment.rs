@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::helpers::{html_escape, payment_error_for_user};
-use super::keyboards::Keyboards;
+use super::keyboards;
 use super::types::{EXTERNAL_STEP_MAX_ATTEMPTS, TelegramUiConfig};
 
 pub(crate) struct PaymentTxProcess<'a> {
@@ -65,7 +65,7 @@ impl<'a> PaymentTxProcess<'a> {
             return bot
                 .send_message(chat_id, "<b>Payment confirmed.</b>\nWebsite is queued.")
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::status())
+                .reply_markup(keyboards::status())
                 .await
                 .map(|_| ());
         }
@@ -260,7 +260,7 @@ impl<'a> PaymentTxProcess<'a> {
             ),
         )
         .parse_mode(ParseMode::Html)
-        .reply_markup(Keyboards::status())
+        .reply_markup(keyboards::status())
         .await
         .map(|_| ())
     }

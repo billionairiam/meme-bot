@@ -8,7 +8,7 @@ use crate::db;
 use crate::models::{Order, OrderStatus, PaymentChain};
 
 use super::helpers::{html_escape, is_message_not_modified};
-use super::keyboards::Keyboards;
+use super::keyboards;
 use super::types::{TEMPLATE_PRICE_USDT, TEMPLATE_SITE_URL, TelegramUiConfig, UiMessage};
 
 pub(crate) struct Screens<'a> {
@@ -201,7 +201,7 @@ impl<'a> Screens<'a> {
         chat_id: ChatId,
         config: &TelegramUiConfig,
     ) -> ResponseResult<()> {
-        self.send_screen(chat_id, main_menu_text(config), Keyboards::main_menu())
+        self.send_screen(chat_id, main_menu_text(config), keyboards::main_menu())
             .await
     }
 
@@ -210,7 +210,7 @@ impl<'a> Screens<'a> {
         target: UiMessage,
         config: &TelegramUiConfig,
     ) -> ResponseResult<()> {
-        self.edit_screen(target, main_menu_text(config), Keyboards::main_menu())
+        self.edit_screen(target, main_menu_text(config), keyboards::main_menu())
             .await
     }
 
@@ -222,7 +222,7 @@ impl<'a> Screens<'a> {
         self.send_screen(
             chat_id,
             create_menu_text(),
-            Keyboards::create_mode(ai_creation_price_usdt),
+            keyboards::create_mode(ai_creation_price_usdt),
         )
         .await
     }
@@ -235,7 +235,7 @@ impl<'a> Screens<'a> {
         self.edit_screen(
             target,
             create_menu_text(),
-            Keyboards::create_mode(ai_creation_price_usdt),
+            keyboards::create_mode(ai_creation_price_usdt),
         )
         .await
     }
@@ -248,13 +248,13 @@ impl<'a> Screens<'a> {
         self.edit_screen(
             target,
             template_mode_text(&config.admin_contact),
-            Keyboards::template_contact(),
+            keyboards::template_contact(),
         )
         .await
     }
 
     pub(crate) async fn edit_choose_chain(&self, target: UiMessage) -> ResponseResult<()> {
-        self.edit_screen(target, choose_chain_text(), Keyboards::token_chain())
+        self.edit_screen(target, choose_chain_text(), keyboards::token_chain())
             .await
     }
 
@@ -270,7 +270,7 @@ impl<'a> Screens<'a> {
                 self.send_screen(
                     chat_id,
                     "✏️ <b>Edit Website</b>\nNo live websites yet.",
-                    Keyboards::main_menu(),
+                    keyboards::main_menu(),
                 )
                 .await
             }
@@ -278,7 +278,7 @@ impl<'a> Screens<'a> {
                 self.send_screen(
                     chat_id,
                     "✏️ <b>Edit Website</b>\nChoose a live website.",
-                    Keyboards::edit_order_list(&items),
+                    keyboards::edit_order_list(&items),
                 )
                 .await
             }
@@ -291,7 +291,7 @@ impl<'a> Screens<'a> {
                 self.send_screen(
                     chat_id,
                     "✏️ <b>Edit Website</b>\nCheck failed. Try later.",
-                    Keyboards::main_menu(),
+                    keyboards::main_menu(),
                 )
                 .await
             }
@@ -310,7 +310,7 @@ impl<'a> Screens<'a> {
                 self.edit_screen(
                     target,
                     "✏️ <b>Edit Website</b>\nNo live websites yet.",
-                    Keyboards::main_menu(),
+                    keyboards::main_menu(),
                 )
                 .await
             }
@@ -318,7 +318,7 @@ impl<'a> Screens<'a> {
                 self.edit_screen(
                     target,
                     "✏️ <b>Edit Website</b>\nChoose a live website.",
-                    Keyboards::edit_order_list(&items),
+                    keyboards::edit_order_list(&items),
                 )
                 .await
             }
@@ -331,7 +331,7 @@ impl<'a> Screens<'a> {
                 self.edit_screen(
                     target,
                     "✏️ <b>Edit Website</b>\nCheck failed. Try later.",
-                    Keyboards::main_menu(),
+                    keyboards::main_menu(),
                 )
                 .await
             }
@@ -372,7 +372,7 @@ impl<'a> Screens<'a> {
         self.send_screen(
             chat_id,
             status_text(user_id, pool).await,
-            Keyboards::main_menu(),
+            keyboards::main_menu(),
         )
         .await
     }
@@ -386,7 +386,7 @@ impl<'a> Screens<'a> {
         self.send_screen(
             chat_id,
             history_text(user_id, pool).await,
-            Keyboards::main_menu(),
+            keyboards::main_menu(),
         )
         .await
     }
@@ -400,7 +400,7 @@ impl<'a> Screens<'a> {
         self.edit_screen(
             target,
             status_text(user_id, pool).await,
-            Keyboards::main_menu(),
+            keyboards::main_menu(),
         )
         .await
     }
@@ -414,13 +414,13 @@ impl<'a> Screens<'a> {
         self.edit_screen(
             target,
             history_text(user_id, pool).await,
-            Keyboards::main_menu(),
+            keyboards::main_menu(),
         )
         .await
     }
 
     pub(crate) async fn edit_payment_chain_menu(&self, target: UiMessage) -> ResponseResult<()> {
-        self.edit_screen(target, payment_chain_text(), Keyboards::payment_chain())
+        self.edit_screen(target, payment_chain_text(), keyboards::payment_chain())
             .await
     }
 
@@ -435,7 +435,7 @@ impl<'a> Screens<'a> {
                 "👤 <b>Contact admin</b>\n{}",
                 html_escape(&config.admin_contact)
             ),
-            Keyboards::main_menu(),
+            keyboards::main_menu(),
         )
         .await
     }
@@ -451,14 +451,14 @@ impl<'a> Screens<'a> {
                 .bot
                 .send_message(chat_id, choose_chain_text())
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::token_chain())
+                .reply_markup(keyboards::token_chain())
                 .await
                 .map(|_| ()),
             OrderStatus::NeedLogo => self
                 .bot
                 .send_message(chat_id, ask_logo_text())
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::cancel())
+                .reply_markup(keyboards::cancel())
                 .await
                 .map(|_| ()),
             OrderStatus::NeedTicker => self
@@ -468,7 +468,7 @@ impl<'a> Screens<'a> {
                     "🔤 <b>3/8 Ticker</b>\nSend token ticker.\nEg: PEPE",
                 )
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::cancel())
+                .reply_markup(keyboards::cancel())
                 .await
                 .map(|_| ()),
             OrderStatus::NeedName => self
@@ -478,7 +478,7 @@ impl<'a> Screens<'a> {
                     "🏷 <b>4/8 Token Name</b>\nSend token name. Eg: Pepe Coin",
                 )
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::cancel())
+                .reply_markup(keyboards::cancel())
                 .await
                 .map(|_| ()),
             OrderStatus::NeedContract => self
@@ -488,14 +488,14 @@ impl<'a> Screens<'a> {
                     "📝 <b>5/8 Contract Address</b>\nPaste contract address or tap Skip.",
                 )
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::optional_step("contract"))
+                .reply_markup(keyboards::optional_step("contract"))
                 .await
                 .map(|_| ()),
             OrderStatus::NeedXLink => self
                 .bot
                 .send_message(chat_id, "✕ <b>6/8 X Link</b>\nPaste X link or tap Skip.")
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::optional_step("x"))
+                .reply_markup(keyboards::optional_step("x"))
                 .await
                 .map(|_| ()),
             OrderStatus::NeedTme => self
@@ -505,7 +505,7 @@ impl<'a> Screens<'a> {
                     "📱 <b>7/8 Telegram Link</b>\nPaste TG link or tap Skip.",
                 )
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::optional_step("telegram"))
+                .reply_markup(keyboards::optional_step("telegram"))
                 .await
                 .map(|_| ()),
             OrderStatus::NeedDomain => self
@@ -515,14 +515,14 @@ impl<'a> Screens<'a> {
                     "🌐 <b>8/8 Domain</b>\nSend domain name.\nEg: mytoken.xyz",
                 )
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::cancel())
+                .reply_markup(keyboards::cancel())
                 .await
                 .map(|_| ()),
             OrderStatus::NeedPay => self
                 .bot
                 .send_message(chat_id, payment_chain_text())
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::payment_chain())
+                .reply_markup(keyboards::payment_chain())
                 .await
                 .map(|_| ()),
             OrderStatus::PaidAndGenerating => self
@@ -532,7 +532,7 @@ impl<'a> Screens<'a> {
                     "⚙️ <b>Generating...</b>\nYour website is being created.",
                 )
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::status())
+                .reply_markup(keyboards::status())
                 .await
                 .map(|_| ()),
             OrderStatus::Done => self
@@ -542,7 +542,7 @@ impl<'a> Screens<'a> {
                     "✅ <b>Done!</b>\nYour website is live. Check /history.",
                 )
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::main_menu())
+                .reply_markup(keyboards::main_menu())
                 .await
                 .map(|_| ()),
             _ => self
@@ -552,7 +552,7 @@ impl<'a> Screens<'a> {
                     format!("📊 Order status: {}", order.status.display_label()),
                 )
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::main_menu())
+                .reply_markup(keyboards::main_menu())
                 .await
                 .map(|_| ()),
         }

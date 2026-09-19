@@ -20,7 +20,7 @@ use crate::{
 
 use super::domain_flow::DomainFlow;
 use super::helpers::*;
-use super::keyboards::Keyboards;
+use super::keyboards;
 use super::payment::PaymentTxProcess;
 use super::screens::Screens;
 use super::types::*;
@@ -104,7 +104,7 @@ pub(crate) async fn handle_message(
                 return bot
                     .send_message(msg.chat.id, "<b>Order cancelled.</b>")
                     .parse_mode(ParseMode::Html)
-                    .reply_markup(Keyboards::main_menu())
+                    .reply_markup(keyboards::main_menu())
                     .await
                     .map(|_| ());
             }
@@ -202,7 +202,7 @@ pub(crate) async fn handle_callback(
                         "<b>Start failed.</b>\nPlease try again."
                     };
                     Screens::new(&bot)
-                        .edit_screen(target, msg, Keyboards::main_menu())
+                        .edit_screen(target, msg, keyboards::main_menu())
                         .await
                 }
             }
@@ -322,14 +322,14 @@ pub(crate) async fn handle_callback(
                 .edit_screen(
                     target,
                     "✏️ <b>Domain</b>\nExample: <code>pepe.xyz</code>",
-                    Keyboards::cancel(),
+                    keyboards::cancel(),
                 )
                 .await
         }
         Some("cancel") => {
             cancel_user_order(&pool, query.from.id).await;
             Screens::new(&bot)
-                .edit_screen(target, "🛑 <b>Order cancelled</b>", Keyboards::main_menu())
+                .edit_screen(target, "🛑 <b>Order cancelled</b>", keyboards::main_menu())
                 .await
         }
         _ => Screens::new(&bot).edit_main_menu(target, &config).await,
@@ -442,7 +442,7 @@ async fn handle_order_step(
                 "⛓ <b>1/8 Chain</b>\nChoose the meme website chain.",
             )
             .parse_mode(ParseMode::Html)
-            .reply_markup(Keyboards::token_chain())
+            .reply_markup(keyboards::token_chain())
             .await
             .map(|_| ()),
         OrderStatus::NeedLogo => {
@@ -556,7 +556,7 @@ async fn handle_order_step(
                 "✅ Name saved.\n🔗 <b>5/8 Contract</b>\nSend contract address or tap Skip.",
             )
             .parse_mode(ParseMode::Html)
-            .reply_markup(Keyboards::optional_step("contract"))
+            .reply_markup(keyboards::optional_step("contract"))
             .await
             .map(|_| ())
         }
@@ -568,7 +568,7 @@ async fn handle_order_step(
                         "🔗 <b>5/8 Contract</b>\nSend contract address or tap Skip.",
                     )
                     .parse_mode(ParseMode::Html)
-                    .reply_markup(Keyboards::optional_step("contract"))
+                    .reply_markup(keyboards::optional_step("contract"))
                     .await
                     .map(|_| ());
             };
@@ -576,7 +576,7 @@ async fn handle_order_step(
                 return bot
                     .send_message(msg.chat.id, "⛓ <b>Chain missing.</b>\nUse /continue.")
                     .parse_mode(ParseMode::Html)
-                    .reply_markup(Keyboards::token_chain())
+                    .reply_markup(keyboards::token_chain())
                     .await
                     .map(|_| ());
             };
@@ -587,7 +587,7 @@ async fn handle_order_step(
                         "<b>Invalid contract.</b>\nSend a contract for the selected chain, or tap Skip.",
                     )
                     .parse_mode(ParseMode::Html)
-                    .reply_markup(Keyboards::optional_step("contract"))
+                    .reply_markup(keyboards::optional_step("contract"))
                     .await
                     .map(|_| ());
             }
@@ -602,7 +602,7 @@ async fn handle_order_step(
                 "✅ Contract saved.\n✕ <b>6/8 X</b>\n<code>https://x.com/yourproject</code>\nSend X link or tap Skip.",
             )
             .parse_mode(ParseMode::Html)
-            .reply_markup(Keyboards::optional_step("x"))
+            .reply_markup(keyboards::optional_step("x"))
             .await
             .map(|_| ())
         }
@@ -611,7 +611,7 @@ async fn handle_order_step(
                 return bot
                     .send_message(msg.chat.id, "✕ <b>6/8 X</b>\nSend X link or tap Skip.")
                     .parse_mode(ParseMode::Html)
-                    .reply_markup(Keyboards::optional_step("x"))
+                    .reply_markup(keyboards::optional_step("x"))
                     .await
                     .map(|_| ());
             };
@@ -622,7 +622,7 @@ async fn handle_order_step(
                         "<b>Invalid X link.</b>\nUse <code>https://x.com/username</code>, or tap Skip.",
                     )
                     .parse_mode(ParseMode::Html)
-                    .reply_markup(Keyboards::optional_step("x"))
+                    .reply_markup(keyboards::optional_step("x"))
                     .await
                     .map(|_| ());
             }
@@ -637,7 +637,7 @@ async fn handle_order_step(
                 "✅ X saved.\n💬 <b>7/8 Telegram</b>\n<code>https://t.me/yourgroup</code>\nSend Telegram link or tap Skip.",
             )
             .parse_mode(ParseMode::Html)
-            .reply_markup(Keyboards::optional_step("telegram"))
+            .reply_markup(keyboards::optional_step("telegram"))
             .await
             .map(|_| ())
         }
@@ -649,7 +649,7 @@ async fn handle_order_step(
                         "💬 <b>7/8 Telegram</b>\nSend Telegram link or tap Skip.",
                     )
                     .parse_mode(ParseMode::Html)
-                    .reply_markup(Keyboards::optional_step("telegram"))
+                    .reply_markup(keyboards::optional_step("telegram"))
                     .await
                     .map(|_| ());
             };
@@ -660,7 +660,7 @@ async fn handle_order_step(
                         "<b>Invalid Telegram link.</b>\nUse <code>https://t.me/yourgroup</code>, or tap Skip.",
                     )
                     .parse_mode(ParseMode::Html)
-                    .reply_markup(Keyboards::optional_step("telegram"))
+                    .reply_markup(keyboards::optional_step("telegram"))
                     .await
                     .map(|_| ());
             }
@@ -707,7 +707,7 @@ async fn handle_order_step(
                         "💳 <b>Payment</b>\nChoose a chain or paste TX hash.",
                     )
                     .parse_mode(ParseMode::Html)
-                    .reply_markup(Keyboards::payment_chain())
+                    .reply_markup(keyboards::payment_chain())
                     .await
                     .map(|_| ());
             };
@@ -718,7 +718,7 @@ async fn handle_order_step(
                         "💳 <b>Payment</b>\nChoose a chain or paste TX hash.",
                     )
                     .parse_mode(ParseMode::Html)
-                    .reply_markup(Keyboards::payment_chain())
+                    .reply_markup(keyboards::payment_chain())
                     .await
                     .map(|_| ());
             }
@@ -743,7 +743,7 @@ async fn handle_order_step(
                 "⚙️ <b>Generating...</b>\nYour website is being created.",
             )
             .parse_mode(ParseMode::Html)
-            .reply_markup(Keyboards::status())
+            .reply_markup(keyboards::status())
             .await
             .map(|_| ()),
         _ => {
@@ -788,7 +788,7 @@ async fn handle_domain_step(
             ),
         )
         .parse_mode(ParseMode::Html)
-        .reply_markup(Keyboards::payment_chain())
+        .reply_markup(keyboards::payment_chain())
         .await.map(|_| ());
     }
 
@@ -846,7 +846,7 @@ async fn handle_domain_step(
                 ),
             )
             .parse_mode(ParseMode::Html)
-            .reply_markup(Keyboards::payment_chain())
+            .reply_markup(keyboards::payment_chain())
             .await.map(|_| ())
         }
         Ok(_) | Err(_) => {
@@ -877,7 +877,7 @@ async fn handle_domain_step(
                     format!("🔍 <b>{} is taken.</b>\nChoose one:", html_escape(domain)),
                 )
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::alternative_domains(&alternatives))
+                .reply_markup(keyboards::alternative_domains(&alternatives))
                 .await
                 .map(|_| ())
             }
@@ -899,7 +899,7 @@ async fn handle_optional_step_skip(
                 .edit_screen(
                     target,
                     "<b>No active order.</b>\nUse /create.",
-                    Keyboards::main_menu(),
+                    keyboards::main_menu(),
                 )
                 .await;
         }
@@ -910,7 +910,7 @@ async fn handle_optional_step_skip(
                 "failed to load order for optional skip"
             );
             return Screens::new(bot)
-                .edit_screen(target, "<b>Error.</b>\nTry again.", Keyboards::main_menu())
+                .edit_screen(target, "<b>Error.</b>\nTry again.", keyboards::main_menu())
                 .await;
         }
     };
@@ -922,7 +922,7 @@ async fn handle_optional_step_skip(
             DEFAULT_CONTRACT_ADDRESS,
             OrderStatus::NeedXLink,
             "⏭ Contract skipped.\n✕ <b>6/8 X</b>\nSend X link or tap Skip.",
-            Keyboards::optional_step("x"),
+            keyboards::optional_step("x"),
         ),
         "x" => (
             OrderStatus::NeedXLink,
@@ -930,7 +930,7 @@ async fn handle_optional_step_skip(
             DEFAULT_X_URL,
             OrderStatus::NeedTme,
             "⏭ X skipped.\n💬 <b>7/8 Telegram</b>\nSend Telegram link or tap Skip.",
-            Keyboards::optional_step("telegram"),
+            keyboards::optional_step("telegram"),
         ),
         "telegram" => (
             OrderStatus::NeedTme,
@@ -938,12 +938,12 @@ async fn handle_optional_step_skip(
             DEFAULT_TELEGRAM_URL,
             OrderStatus::NeedDomain,
             "⏭ Telegram skipped.\n🌐 <b>8/8 Domain</b>\nExample: <code>pepe.xyz</code>",
-            Keyboards::cancel(),
+            keyboards::cancel(),
         ),
         other => {
             warn!(field = other, "unknown optional skip field");
             return Screens::new(bot)
-                .edit_screen(target, "<b>Unknown action.</b>", Keyboards::main_menu())
+                .edit_screen(target, "<b>Unknown action.</b>", keyboards::main_menu())
                 .await;
         }
     };
@@ -953,7 +953,7 @@ async fn handle_optional_step_skip(
             .edit_screen(
                 target,
                 "<b>This step is no longer active.</b>\nUse /continue.",
-                Keyboards::main_menu(),
+                keyboards::main_menu(),
             )
             .await;
     }
@@ -967,7 +967,7 @@ async fn handle_optional_step_skip(
             .edit_screen(
                 target,
                 "<b>Save failed.</b>\nPlease try again.",
-                Keyboards::cancel(),
+                keyboards::cancel(),
             )
             .await;
     }
@@ -986,7 +986,7 @@ async fn handle_token_chain_selection(
 ) -> ResponseResult<()> {
     let Some(chain) = TokenChain::from_db(value) else {
         return Screens::new(bot)
-            .edit_screen(target, "<b>Unknown chain.</b>", Keyboards::token_chain())
+            .edit_screen(target, "<b>Unknown chain.</b>", keyboards::token_chain())
             .await;
     };
     let order = match orders(pool).get_unpaid(user_id.0 as i64).await {
@@ -996,7 +996,7 @@ async fn handle_token_chain_selection(
                 .edit_screen(
                     target,
                     "<b>No active order.</b>\nUse /create.",
-                    Keyboards::main_menu(),
+                    keyboards::main_menu(),
                 )
                 .await;
         }
@@ -1006,7 +1006,7 @@ async fn handle_token_chain_selection(
             .edit_screen(
                 target,
                 "<b>This step is no longer active.</b>\nUse /continue.",
-                Keyboards::main_menu(),
+                keyboards::main_menu(),
             )
             .await;
     }
@@ -1021,7 +1021,7 @@ async fn handle_token_chain_selection(
     {
         warn!(?error, order_id = %order.id, "failed to save token chain");
         return Screens::new(bot)
-            .edit_screen(target, "<b>Save failed.</b>", Keyboards::cancel())
+            .edit_screen(target, "<b>Save failed.</b>", keyboards::cancel())
             .await;
     }
     Screens::new(bot)
@@ -1031,7 +1031,7 @@ async fn handle_token_chain_selection(
                 "✅ Chain saved: <b>{}</b>\n🖼 <b>2/8 Logo</b>\nUpload token logo.",
                 chain.display_label()
             ),
-            Keyboards::cancel(),
+            keyboards::cancel(),
         )
         .await
 }
@@ -1045,7 +1045,7 @@ async fn handle_edit_select(
 ) -> ResponseResult<()> {
     let Ok(order_id) = uuid::Uuid::parse_str(order_id) else {
         return Screens::new(bot)
-            .edit_screen(target, "<b>Invalid order.</b>", Keyboards::main_menu())
+            .edit_screen(target, "<b>Invalid order.</b>", keyboards::main_menu())
             .await;
     };
     let order = match orders(pool)
@@ -1055,7 +1055,7 @@ async fn handle_edit_select(
         Ok(Some(order)) => order,
         _ => {
             return Screens::new(bot)
-                .edit_screen(target, "<b>Website not found.</b>", Keyboards::main_menu())
+                .edit_screen(target, "<b>Website not found.</b>", keyboards::main_menu())
                 .await;
         }
     };
@@ -1064,7 +1064,7 @@ async fn handle_edit_select(
     {
         warn!(?error, %order_id, "failed to start edit draft");
         return Screens::new(bot)
-            .edit_screen(target, "<b>Edit failed.</b>", Keyboards::main_menu())
+            .edit_screen(target, "<b>Edit failed.</b>", keyboards::main_menu())
             .await;
     }
     let order = orders(pool)
@@ -1081,7 +1081,7 @@ async fn handle_edit_select(
         .edit_screen(
             target,
             Screens::edit_order_text(&order, free_used),
-            Keyboards::edit_menu(order_id),
+            keyboards::edit_menu(order_id),
         )
         .await
 }
@@ -1096,17 +1096,17 @@ async fn handle_edit_field_select(
     let mut parts = data.split(':');
     let Some(order_id) = parts.next().and_then(|v| uuid::Uuid::parse_str(v).ok()) else {
         return Screens::new(bot)
-            .edit_screen(target, "<b>Invalid order.</b>", Keyboards::main_menu())
+            .edit_screen(target, "<b>Invalid order.</b>", keyboards::main_menu())
             .await;
     };
     let Some(field) = parts.next() else {
         return Screens::new(bot)
-            .edit_screen(target, "<b>Invalid field.</b>", Keyboards::main_menu())
+            .edit_screen(target, "<b>Invalid field.</b>", keyboards::main_menu())
             .await;
     };
     if !matches!(field, "contract" | "x" | "telegram") {
         return Screens::new(bot)
-            .edit_screen(target, "<b>Invalid field.</b>", Keyboards::main_menu())
+            .edit_screen(target, "<b>Invalid field.</b>", keyboards::main_menu())
             .await;
     }
     match orders(pool)
@@ -1116,7 +1116,7 @@ async fn handle_edit_field_select(
         Ok(Some(_)) => {}
         _ => {
             return Screens::new(bot)
-                .edit_screen(target, "<b>Website not found.</b>", Keyboards::main_menu())
+                .edit_screen(target, "<b>Website not found.</b>", keyboards::main_menu())
                 .await;
         }
     }
@@ -1126,7 +1126,7 @@ async fn handle_edit_field_select(
     {
         warn!(?error, %order_id, field, "failed to select edit field");
         return Screens::new(bot)
-            .edit_screen(target, "<b>Edit failed.</b>", Keyboards::main_menu())
+            .edit_screen(target, "<b>Edit failed.</b>", keyboards::main_menu())
             .await;
     }
     let prompt = match field {
@@ -1139,7 +1139,7 @@ async fn handle_edit_field_select(
         .edit_screen(
             target,
             format!("✏️ <b>Edit</b>\n{prompt}"),
-            Keyboards::cancel(),
+            keyboards::cancel(),
         )
         .await
 }
@@ -1153,7 +1153,7 @@ async fn handle_edit_cancel(
 ) -> ResponseResult<()> {
     let Ok(order_id) = uuid::Uuid::parse_str(order_id) else {
         return Screens::new(bot)
-            .edit_screen(target, "<b>Invalid order.</b>", Keyboards::main_menu())
+            .edit_screen(target, "<b>Invalid order.</b>", keyboards::main_menu())
             .await;
     };
     if orders(pool)
@@ -1166,7 +1166,7 @@ async fn handle_edit_cancel(
         let _ = orders(pool).clear_edit_draft(order_id).await;
     }
     Screens::new(bot)
-        .edit_screen(target, "🛑 <b>Edit cancelled.</b>", Keyboards::main_menu())
+        .edit_screen(target, "🛑 <b>Edit cancelled.</b>", keyboards::main_menu())
         .await
 }
 
@@ -1180,7 +1180,7 @@ async fn handle_edit_apply(
 ) -> ResponseResult<()> {
     let Ok(order_id) = uuid::Uuid::parse_str(order_id) else {
         return Screens::new(bot)
-            .edit_screen(target, "<b>Invalid order.</b>", Keyboards::main_menu())
+            .edit_screen(target, "<b>Invalid order.</b>", keyboards::main_menu())
             .await;
     };
     let order = match orders(pool)
@@ -1190,7 +1190,7 @@ async fn handle_edit_apply(
         Ok(Some(order)) => order,
         _ => {
             return Screens::new(bot)
-                .edit_screen(target, "<b>Website not found.</b>", Keyboards::main_menu())
+                .edit_screen(target, "<b>Website not found.</b>", keyboards::main_menu())
                 .await;
         }
     };
@@ -1198,7 +1198,7 @@ async fn handle_edit_apply(
         Ok(0) => {
             let _ = orders(pool).clear_edit_draft(order_id).await;
             return Screens::new(bot)
-                .edit_screen(target, "<b>No changes.</b>", Keyboards::main_menu())
+                .edit_screen(target, "<b>No changes.</b>", keyboards::main_menu())
                 .await;
         }
         Ok(_) => {}
@@ -1209,7 +1209,7 @@ async fn handle_edit_apply(
                 .edit_screen(
                     target,
                     "<b>Edit needs manual review.</b>\nContact admin.",
-                    Keyboards::main_menu(),
+                    keyboards::main_menu(),
                 )
                 .await;
         }
@@ -1226,7 +1226,7 @@ async fn handle_edit_apply(
     if let Err(error) = orders(pool).mark_edit_need_pay(order_id).await {
         warn!(?error, %order_id, "failed to mark edit need pay");
         return Screens::new(bot)
-            .edit_screen(target, "<b>Edit failed.</b>", Keyboards::main_menu())
+            .edit_screen(target, "<b>Edit failed.</b>", keyboards::main_menu())
             .await;
     }
     Screens::new(bot).edit_screen(
@@ -1236,7 +1236,7 @@ async fn handle_edit_apply(
             free_used,
             db::EDIT_PRICE_USDT
         ),
-        Keyboards::payment_chain(),
+        keyboards::payment_chain(),
     )
     .await
 }
@@ -1301,7 +1301,7 @@ async fn handle_edit_message(
             .unwrap_or(0);
         bot.send_message(chat_id, Screens::edit_order_text(&order, free_used))
             .parse_mode(ParseMode::Html)
-            .reply_markup(Keyboards::edit_menu(order.id))
+            .reply_markup(keyboards::edit_menu(order.id))
             .await?;
         return Ok(true);
     }
@@ -1378,7 +1378,7 @@ async fn apply_edit_and_reply(
     if let Err(error) = orders(pool).mark_edit_applying(order.id).await {
         warn!(?error, order_id = %order.id, "failed to mark edit applying");
         return Screens::new(bot)
-            .edit_screen(target, "<b>Edit failed.</b>", Keyboards::main_menu())
+            .edit_screen(target, "<b>Edit failed.</b>", keyboards::main_menu())
             .await;
     }
     match apply_repo_edit(order, config, false).await {
@@ -1401,7 +1401,7 @@ async fn apply_edit_and_reply(
                     .edit_screen(
                         target,
                         "<b>Edit pushed, but DB update failed.</b>\nContact admin.",
-                        Keyboards::main_menu(),
+                        keyboards::main_menu(),
                     )
                     .await;
             }
@@ -1409,7 +1409,7 @@ async fn apply_edit_and_reply(
                 .edit_screen(
                     target,
                     "✅ <b>Edit pushed.</b>\nCloudflare Pages will update from GitHub.",
-                    Keyboards::main_menu(),
+                    keyboards::main_menu(),
                 )
                 .await
         }
@@ -1420,7 +1420,7 @@ async fn apply_edit_and_reply(
                 .edit_screen(
                     target,
                     "<b>Edit needs manual review.</b>\nContact admin.",
-                    Keyboards::main_menu(),
+                    keyboards::main_menu(),
                 )
                 .await
         }
@@ -1458,7 +1458,7 @@ async fn process_edit_payment_tx(
                     "<b>Payment window missing.</b>\nChoose chain again.",
                 )
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::payment_chain())
+                .reply_markup(keyboards::payment_chain())
                 .await
                 .map(|_| ());
         };
@@ -1535,7 +1535,7 @@ async fn apply_edit_and_send(
                         "<b>Edit pushed, DB update failed.</b>\nContact admin.",
                     )
                     .parse_mode(ParseMode::Html)
-                    .reply_markup(Keyboards::main_menu())
+                    .reply_markup(keyboards::main_menu())
                     .await
                     .map(|_| ());
             }
@@ -1544,7 +1544,7 @@ async fn apply_edit_and_send(
                 "✅ <b>Edit pushed.</b>\nCloudflare Pages will update from GitHub.",
             )
             .parse_mode(ParseMode::Html)
-            .reply_markup(Keyboards::main_menu())
+            .reply_markup(keyboards::main_menu())
             .await
             .map(|_| ())
         }
@@ -1553,7 +1553,7 @@ async fn apply_edit_and_send(
             let _ = orders(pool).mark_edit_manual_review(order.id).await;
             bot.send_message(chat_id, "<b>Edit needs manual review.</b>\nContact admin.")
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::main_menu())
+                .reply_markup(keyboards::main_menu())
                 .await
                 .map(|_| ())
         }
@@ -1619,7 +1619,7 @@ async fn handle_continue_command(
         Ok(None) => bot
             .send_message(chat_id, "<b>No active order.</b>\nUse /create.")
             .parse_mode(ParseMode::Html)
-            .reply_markup(Keyboards::main_menu())
+            .reply_markup(keyboards::main_menu())
             .await
             .map(|_| ()),
         Err(error) => {
@@ -1630,7 +1630,7 @@ async fn handle_continue_command(
             );
             bot.send_message(chat_id, "<b>Check failed.</b>\nTry later.")
                 .parse_mode(ParseMode::Html)
-                .reply_markup(Keyboards::main_menu())
+                .reply_markup(keyboards::main_menu())
                 .await
                 .map(|_| ())
         }
@@ -1653,7 +1653,7 @@ async fn edit_payment_chain_and_ask_tx(
                 .edit_screen(
                     target,
                     "<b>Payment address missing.</b>\nContact admin.",
-                    Keyboards::main_menu(),
+                    keyboards::main_menu(),
                 )
                 .await;
         }
@@ -1668,7 +1668,7 @@ async fn edit_payment_chain_and_ask_tx(
                     .edit_screen(
                         target,
                         "<b>Payment start failed.</b>\nPlease try again.",
-                        Keyboards::main_menu(),
+                        keyboards::main_menu(),
                     )
                     .await;
             }
@@ -1683,7 +1683,7 @@ async fn edit_payment_chain_and_ask_tx(
                     address,
                     &payment_window,
                 ),
-                Keyboards::cancel(),
+                keyboards::cancel(),
             )
             .await;
     }
@@ -1695,7 +1695,7 @@ async fn edit_payment_chain_and_ask_tx(
                 .edit_screen(
                     target,
                     "<b>No active order.</b>\nUse /create.",
-                    Keyboards::main_menu(),
+                    keyboards::main_menu(),
                 )
                 .await;
         }
@@ -1706,7 +1706,7 @@ async fn edit_payment_chain_and_ask_tx(
                 "failed to load order for payment chain"
             );
             return Screens::new(bot)
-                .edit_screen(target, "<b>Error.</b>\nTry again.", Keyboards::main_menu())
+                .edit_screen(target, "<b>Error.</b>\nTry again.", keyboards::main_menu())
                 .await;
         }
     };
@@ -1716,7 +1716,7 @@ async fn edit_payment_chain_and_ask_tx(
             .edit_screen(
                 target,
                 "<b>Payment not ready.</b>\nComplete all steps first.",
-                Keyboards::cancel(),
+                keyboards::cancel(),
             )
             .await;
     }
@@ -1726,7 +1726,7 @@ async fn edit_payment_chain_and_ask_tx(
             .edit_screen(
                 target,
                 "<b>Payment address missing.</b>\nContact admin.",
-                Keyboards::main_menu(),
+                keyboards::main_menu(),
             )
             .await;
     }
@@ -1752,7 +1752,7 @@ async fn edit_payment_chain_and_ask_tx(
                 .edit_screen(
                     target,
                     "<b>Payment start failed.</b>\nPlease try again.",
-                    Keyboards::main_menu(),
+                    keyboards::main_menu(),
                 )
                 .await;
         }
@@ -1762,7 +1762,7 @@ async fn edit_payment_chain_and_ask_tx(
         .edit_screen(
             target,
             Screens::payment_instruction(order_id, total, chain, address, &payment_window),
-            Keyboards::cancel(),
+            keyboards::cancel(),
         )
         .await
 }
@@ -1782,7 +1782,7 @@ async fn handle_alternative_domain_selection(
                 .edit_screen(
                     target,
                     "<b>No active order.</b>\nUse /create.",
-                    Keyboards::main_menu(),
+                    keyboards::main_menu(),
                 )
                 .await;
         }
@@ -1793,7 +1793,7 @@ async fn handle_alternative_domain_selection(
                 "failed to load order for alt domain"
             );
             return Screens::new(bot)
-                .edit_screen(target, "<b>Error.</b>\nTry again.", Keyboards::main_menu())
+                .edit_screen(target, "<b>Error.</b>\nTry again.", keyboards::main_menu())
                 .await;
         }
     };
@@ -1805,7 +1805,7 @@ async fn handle_alternative_domain_selection(
             .edit_screen(
                 target,
                 "<b>Domain expired.</b>\nSend a new domain.",
-                Keyboards::main_menu(),
+                keyboards::main_menu(),
             )
             .await;
     };
@@ -1822,7 +1822,7 @@ async fn handle_alternative_domain_selection(
             .edit_screen(
                 target,
                 "<b>Quote save failed.</b>\nPlease try again.",
-                Keyboards::main_menu(),
+                keyboards::main_menu(),
             )
             .await;
     }
@@ -1843,7 +1843,7 @@ async fn handle_alternative_domain_selection(
             "✅ <b>Domain selected</b>\n{domain}\nDomain: <b>{}</b> USDT\nWebsite: <b>{}</b> USDT\nTotal: <b>{}</b> USDT\n\nChoose payment chain.",
             quote.price_usd, order.site_price_usdt, total
         ),
-        Keyboards::payment_chain(),
+        keyboards::payment_chain(),
     )
     .await
 }
