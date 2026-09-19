@@ -81,6 +81,23 @@ Making `Config.database_url` non-optional removed the impossible startup branch
 and reduced the total to 11,694 lines. Other fixed metrics are unchanged; the
 full suite and `meme-bot` build pass. Retained: yes.
 
+### Batch 3 — dependency and visibility surface
+
+| Metric | Observed | Change from prior batch |
+|---|---:|---:|
+| Rust and migration lines | 11,654 | -40 |
+| Structs, enums, and traits | 72 | 0 |
+| Public symbols | 183 | -1 |
+| Direct dependencies | 22 | -1 |
+| Listed tests | 65 | 0 |
+
+Removed the direct `tower` dependency and the confirmed-dead
+`optional_uuid_from_row` and `domain_error_for_user` functions. `tower`
+remains available transitively where Axum needs it. Private root visibility for
+`payment` and `validation` was rejected because strict Clippy correctly exposed
+their otherwise external-facing APIs as dead; both public roots were restored.
+The complete suite, strict Clippy, and both binary builds pass. Retained: yes.
+
 ## Deployment
 
 Before deploying migration 0002, stop both binaries and copy `db.sqlite3` to

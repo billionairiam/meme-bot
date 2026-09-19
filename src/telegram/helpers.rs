@@ -69,29 +69,6 @@ pub(crate) fn payment_error_for_user(error: &crate::payment::PaymentVerification
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn domain_error_for_user(error: &crate::domain::DomainError) -> String {
-    use crate::domain::DomainError;
-    match error {
-        DomainError::MissingConfig(value) => {
-            format!("Namecheap configuration is missing: {value}")
-        }
-        DomainError::UnsupportedTld => {
-            "Unsupported TLD. Supported: .com, .net, .org, .xyz, .fun, .site, .online, .io, .co, .me, .cc, .app, .dev, .world, .space, .club, .store, .shop, .vip".to_string()
-        }
-        DomainError::Unavailable => "Domain is unavailable.".to_string(),
-        DomainError::AlreadyRegisteredToAccount => {
-            "Domain appears registered in the Namecheap account. Contact admin for reconciliation."
-                .to_string()
-        }
-        DomainError::PremiumRejected => "Premium/EAP domains require manual handling.".to_string(),
-        DomainError::Namecheap(value) => format!("Namecheap returned an error: {value}"),
-        DomainError::Http(value) => format!("Namecheap HTTP request failed: {value}"),
-        DomainError::Parse(value) => format!("Could not parse Namecheap response: {value}"),
-        DomainError::Cloudflare(value) => format!("Cloudflare DNS failed: {value}"),
-    }
-}
-
 pub(crate) async fn download_telegram_logo(
     bot: &Bot,
     file_id: &str,

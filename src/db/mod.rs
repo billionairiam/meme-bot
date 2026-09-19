@@ -49,23 +49,6 @@ fn uuid_from_row(row: &SqliteRow, column: &str) -> anyhow::Result<Uuid> {
     Ok(Uuid::from_slice(&bytes)?)
 }
 
-#[allow(dead_code)]
-fn optional_uuid_from_row(row: &SqliteRow, column: &str) -> anyhow::Result<Option<Uuid>> {
-    if let Ok(value) = row.try_get::<Option<String>, _>(column) {
-        return value
-            .as_deref()
-            .map(Uuid::parse_str)
-            .transpose()
-            .map_err(Into::into);
-    }
-    let bytes = row.try_get::<Option<Vec<u8>>, _>(column)?;
-    bytes
-        .as_deref()
-        .map(Uuid::from_slice)
-        .transpose()
-        .map_err(Into::into)
-}
-
 impl DbStores {
     pub async fn normalize_sqlite_uuid_storage(&self) -> anyhow::Result<()> {
         Self::normalize_sqlite_uuid_storage_with_pool(&self.users.pool).await
