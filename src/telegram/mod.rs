@@ -14,7 +14,7 @@ use tracing::info;
 
 use crate::config::Config;
 
-pub use types::{TelegramUiConfig, TemplateOption};
+pub use types::TelegramUiConfig;
 
 use handlers::{handle_callback, handle_message};
 use helpers::configured_proxy;

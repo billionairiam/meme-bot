@@ -2,9 +2,7 @@ use rust_decimal::Decimal;
 use teloxide::types::InlineKeyboardButton;
 use teloxide::types::InlineKeyboardMarkup;
 
-use super::types::TemplateOption;
-
-pub(crate) const TEMPLATE_PAGE_SIZE: usize = 12;
+use super::types::{TEMPLATE_PRICE_USDT, TEMPLATE_SITE_URL};
 
 pub(crate) struct Keyboards;
 
@@ -39,23 +37,10 @@ impl Keyboards {
         ])
     }
 
-    pub(crate) fn create_mode(
-        template_prices_usdt: &[Decimal],
-        ai_creation_price_usdt: Decimal,
-    ) -> InlineKeyboardMarkup {
-        let (min, max) = template_prices_usdt
-            .iter()
-            .fold((Decimal::MAX, Decimal::ZERO), |(min, max), &p| {
-                (min.min(p), max.max(p))
-            });
-        let template_label = if min == max {
-            format!("📦 Template Mode | {} USDT", min)
-        } else {
-            format!("📦 Template Mode | {}-{} USDT", min, max)
-        };
+    pub(crate) fn create_mode(ai_creation_price_usdt: Decimal) -> InlineKeyboardMarkup {
         InlineKeyboardMarkup::new(vec![
             vec![InlineKeyboardButton::callback(
-                template_label,
+                format!("📦 Template Mode | {TEMPLATE_PRICE_USDT} USDT"),
                 "template_mode",
             )],
             vec![InlineKeyboardButton::callback(
@@ -66,74 +51,15 @@ impl Keyboards {
         ])
     }
 
-    pub(crate) fn template(options: &[TemplateOption], prices: &[Decimal]) -> InlineKeyboardMarkup {
-        Self::template_page(options, prices, 0)
-    }
-
-    pub(crate) fn template_page(
-        options: &[TemplateOption],
-        prices: &[Decimal],
-        page: usize,
-    ) -> InlineKeyboardMarkup {
-        let mut rows = Vec::new();
-        let page_count = options.len().div_ceil(TEMPLATE_PAGE_SIZE).max(1);
-        let page = page.min(page_count - 1);
-        let start = page * TEMPLATE_PAGE_SIZE;
-        let end = (start + TEMPLATE_PAGE_SIZE).min(options.len());
-
-        for chunk in options[start..end].chunks(2) {
-            let mut row = Vec::new();
-            for template in chunk {
-                let price = template.price(prices);
-                row.push(InlineKeyboardButton::callback(
-                    format!("{} · {}U", template.name, price),
-                    format!("select_tpl:{}", template.id),
-                ));
-            }
-            rows.push(row);
-        }
-
-        if page_count > 1 {
-            let mut nav = Vec::new();
-            if page > 0 {
-                nav.push(InlineKeyboardButton::callback(
-                    "⬅ Prev",
-                    format!("tpl_page:{}", page - 1),
-                ));
-            }
-            nav.push(InlineKeyboardButton::callback(
-                format!("{}/{}", page + 1, page_count),
-                format!("tpl_page:{page}"),
-            ));
-            if page + 1 < page_count {
-                nav.push(InlineKeyboardButton::callback(
-                    "Next ➡",
-                    format!("tpl_page:{}", page + 1),
-                ));
-            }
-            rows.push(nav);
-        }
-
-        rows.push(vec![InlineKeyboardButton::callback("⬅ Back", "create")]);
-        InlineKeyboardMarkup::new(rows)
-    }
-
-    pub(crate) fn template_confirmation(
-        template_id: &str,
-        preview_url: &str,
-    ) -> InlineKeyboardMarkup {
+    pub(crate) fn template_contact() -> InlineKeyboardMarkup {
         InlineKeyboardMarkup::new(vec![
-            vec![InlineKeyboardButton::callback(
-                "✅ Confirm Template",
-                format!("confirm_tpl:{template_id}"),
-            )],
             vec![InlineKeyboardButton::url(
-                "🔗 Preview Template",
-                url::Url::parse(preview_url).expect("valid preview url"),
+                "🌐 View Templates",
+                url::Url::parse(TEMPLATE_SITE_URL).expect("valid template website url"),
             )],
             vec![InlineKeyboardButton::callback(
-                "📦 Choose Another",
-                "template_mode",
+                "👤 Contact Admin",
+                "contact_admin",
             )],
             vec![InlineKeyboardButton::callback("⬅ Back", "create")],
         ])
@@ -233,5 +159,69 @@ impl Keyboards {
                 format!("edit_cancel:{order_id}"),
             )],
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal::Decimal;
+    use teloxide::types::InlineKeyboardButtonKind;
+
+    use super::Keyboards;
+
+    #[test]
+    fn create_menu_shows_fixed_200_usdt_template_price() {
+        let keyboard = Keyboards::create_mode(Decimal::new(50, 0));
+
+        assert_eq!(
+            keyboard.inline_keyboard[0][0].text,
+            "📦 Template Mode | 200 USDT"
+        );
+    }
+
+    #[test]
+    fn template_mode_links_to_store_and_admin_instead_of_template_checkout() {
+        let keyboard = Keyboards::template_contact();
+
+        assert_eq!(keyboard.inline_keyboard.len(), 3);
+        assert_eq!(keyboard.inline_keyboard[0][0].text, "🌐 View Templates");
+        assert!(matches!(
+            &keyboard.inline_keyboard[0][0].kind,
+            InlineKeyboardButtonKind::Url(url) if url.as_str() == "https://memewebs.store/"
+        ));
+        assert_eq!(keyboard.inline_keyboard[1][0].text, "👤 Contact Admin");
+        assert_eq!(
+            keyboard.inline_keyboard[1][0].kind,
+            InlineKeyboardButtonKind::CallbackData("contact_admin".to_string())
+        );
+        assert_eq!(
+            keyboard.inline_keyboard[2][0].kind,
+            InlineKeyboardButtonKind::CallbackData("create".to_string())
+        );
+    }
+
+    #[test]
+    fn template_contact_cannot_start_template_checkout() {
+        let keyboard = Keyboards::template_contact();
+        let callbacks: Vec<&str> = keyboard
+            .inline_keyboard
+            .iter()
+            .flatten()
+            .filter_map(|button| match &button.kind {
+                InlineKeyboardButtonKind::CallbackData(data) => Some(data.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(callbacks, ["contact_admin", "create"]);
+        assert!(
+            !callbacks
+                .iter()
+                .any(|data| data.starts_with("confirm_tpl:"))
+        );
+        assert!(matches!(
+            &keyboard.inline_keyboard[0][0].kind,
+            InlineKeyboardButtonKind::Url(url) if url.as_str() == "https://memewebs.store/"
+        ));
     }
 }

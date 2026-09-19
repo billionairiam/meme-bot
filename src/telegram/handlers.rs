@@ -33,6 +33,12 @@ fn orders(pool: &SqlitePool) -> db::OrderStore {
     db::OrderStore::new(pool.clone())
 }
 
+fn is_legacy_template_callback(data: &str) -> bool {
+    data.starts_with("tpl_page:")
+        || data.starts_with("select_tpl:")
+        || data.starts_with("confirm_tpl:")
+}
+
 pub(crate) async fn handle_message(
     bot: Bot,
     msg: Message,
@@ -70,9 +76,9 @@ pub(crate) async fn handle_message(
     expire_stale_orders_for_user(&pool, user_id).await;
 
     if let Some(text) = msg.text() {
-        if let Some(template_id) = parse_template_deep_link(text) {
+        if parse_template_deep_link(text).is_some() {
             return Screens::new(&bot)
-                .show_template_confirmation(msg.chat.id, template_id, &config)
+                .show_template_mode(msg.chat.id, &config)
                 .await;
         }
 
@@ -84,11 +90,7 @@ pub(crate) async fn handle_message(
             }
             "/create" => {
                 return Screens::new(&bot)
-                    .show_create_menu(
-                        msg.chat.id,
-                        &config.template_prices_usdt,
-                        config.ai_creation_price_usdt,
-                    )
+                    .show_create_menu(msg.chat.id, config.ai_creation_price_usdt)
                     .await;
             }
             "/status" => {
@@ -171,22 +173,12 @@ pub(crate) async fn handle_callback(
         Some("main") => Screens::new(&bot).edit_main_menu(target, &config).await,
         Some("create") => {
             Screens::new(&bot)
-                .edit_create_menu(
-                    target,
-                    &config.template_prices_usdt,
-                    config.ai_creation_price_usdt,
-                )
+                .edit_create_menu(target, config.ai_creation_price_usdt)
                 .await
         }
         Some("template_mode") => Screens::new(&bot).edit_template_mode(target, &config).await,
-        Some(data) if data.starts_with("tpl_page:") => {
-            let page = data
-                .trim_start_matches("tpl_page:")
-                .parse::<usize>()
-                .unwrap_or(0);
-            Screens::new(&bot)
-                .edit_template_mode_page(target, &config, page)
-                .await
+        Some(data) if is_legacy_template_callback(data) => {
+            Screens::new(&bot).edit_template_mode(target, &config).await
         }
         Some("ai_mode") => {
             Screens::new(&bot).clear_screen_keyboard(target).await?;
@@ -282,84 +274,6 @@ pub(crate) async fn handle_callback(
                 &pool,
             )
             .await
-        }
-        Some(data) if data.starts_with("select_tpl:") => {
-            let template_id = data.trim_start_matches("select_tpl:");
-            Screens::new(&bot)
-                .edit_template_confirmation(target, template_id, &config)
-                .await
-        }
-        Some(data) if data.starts_with("confirm_tpl:") => {
-            match TemplateOption::find(
-                &config.template_options,
-                data.trim_start_matches("confirm_tpl:"),
-            ) {
-                Some(template) => {
-                    Screens::new(&bot).clear_screen_keyboard(target).await?;
-                    let price = TemplateOption::price_by_id(
-                        &config.template_options,
-                        &template.id,
-                        &config.template_prices_usdt,
-                    );
-                    match start_new_order(
-                        &pool,
-                        query.from.id,
-                        query.from.username.as_deref(),
-                        Some(query.from.first_name.as_str()),
-                        query.from.last_name.as_deref(),
-                        BuildMode::Template,
-                        Some(&template.id),
-                        price,
-                    )
-                    .await
-                    {
-                        Ok(order_id) => {
-                            info!(
-                                user_id = query.from.id.0 as i64,
-                                order_id = %order_id,
-                                template_id = template.id,
-                                build_mode = "template",
-                                "new template order created"
-                            );
-                            Screens::new(&bot).edit_choose_chain(target).await
-                        }
-                        Err(error) => {
-                            let msg = if error.to_string().contains("pending order") {
-                                warn!(
-                                    ?error,
-                                    user_id = query.from.id.0 as i64,
-                                    template_id = template.id,
-                                    "blocked template order: pending order exists"
-                                );
-                                "⚠️ <b>Unfinished order.</b>\nUse /continue or /cancel first."
-                            } else {
-                                warn!(
-                                    ?error,
-                                    user_id = query.from.id.0 as i64,
-                                    template_id = template.id,
-                                    "failed to start template order"
-                                );
-                                "<b>Start failed.</b>\nPlease try again."
-                            };
-                            Screens::new(&bot)
-                                .edit_screen(target, msg, Keyboards::main_menu())
-                                .await
-                        }
-                    }
-                }
-                None => {
-                    Screens::new(&bot)
-                        .edit_screen(
-                            target,
-                            "<b>Template not found.</b>\nChoose again.",
-                            Keyboards::template(
-                                &config.template_options,
-                                &config.template_prices_usdt,
-                            ),
-                        )
-                        .await
-                }
-            }
         }
         Some(data) if data.starts_with("alt_domain:") => {
             let domain = data.trim_start_matches("alt_domain:");
@@ -1954,4 +1868,39 @@ async fn handle_alternative_domain_selection(
         Keyboards::payment_chain(),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_legacy_template_callback, parse_template_deep_link};
+
+    #[test]
+    fn legacy_template_callbacks_route_to_contact_screen() {
+        for callback in [
+            "tpl_page:1",
+            "select_tpl:template_01",
+            "confirm_tpl:template_01",
+        ] {
+            assert!(
+                is_legacy_template_callback(callback),
+                "{callback} must not reach template checkout"
+            );
+        }
+
+        assert!(!is_legacy_template_callback("ai_mode"));
+        assert!(!is_legacy_template_callback("template_mode"));
+    }
+
+    #[test]
+    fn legacy_template_deep_links_are_recognized_for_contact_redirect() {
+        assert_eq!(
+            parse_template_deep_link("/start tpl_template_01"),
+            Some("template_01")
+        );
+        assert_eq!(
+            parse_template_deep_link("/start=tpl_template_01"),
+            Some("template_01")
+        );
+        assert_eq!(parse_template_deep_link("/start"), None);
+    }
 }

@@ -9,7 +9,7 @@ use crate::models::{Order, OrderStatus, PaymentChain};
 
 use super::helpers::{html_escape, is_message_not_modified};
 use super::keyboards::Keyboards;
-use super::types::{TelegramUiConfig, TemplateOption, UiMessage};
+use super::types::{TEMPLATE_PRICE_USDT, TEMPLATE_SITE_URL, TelegramUiConfig, UiMessage};
 
 pub(crate) struct Screens<'a> {
     bot: &'a Bot,
@@ -66,10 +66,10 @@ impl<'a> Screens<'a> {
     }
 }
 
-fn main_menu_text(config: &TelegramUiConfig) -> String {
+fn main_menu_text(_config: &TelegramUiConfig) -> String {
     format!(
         "🚀 <b>Auto Meme Web Bot</b>\nCreate meme websites.\n\nTemplates: {}",
-        html_escape(&config.template_preview_base_url)
+        html_escape(TEMPLATE_SITE_URL)
     )
 }
 
@@ -77,19 +77,10 @@ fn create_menu_text() -> &'static str {
     "🧩 <b>Create Website</b>\nChoose a mode."
 }
 
-fn template_mode_text() -> &'static str {
-    "📦 <b>Template Mode</b>\nChoose a template."
-}
-
-fn template_confirmation_text(
-    template: &super::types::TemplateOption,
-    price_usdt: Decimal,
-) -> String {
+fn template_mode_text(admin_contact: &str) -> String {
     format!(
-        "📦 <b>{}</b>\nPrice: <b>{}</b> USDT\n🔗 <a href=\"{}\">Preview template</a>",
-        html_escape(&template.name),
-        price_usdt,
-        &template.preview_url,
+        "📦 <b>Template Mode</b>\n\nPrice: <b>{TEMPLATE_PRICE_USDT} USDT</b>\nTemplates: {TEMPLATE_SITE_URL}\nAdmin: <code>{}</code>\n\nChoose a template on the website, then contact the admin to create your website.",
+        html_escape(admin_contact)
     )
 }
 
@@ -226,13 +217,12 @@ impl<'a> Screens<'a> {
     pub(crate) async fn show_create_menu(
         &self,
         chat_id: ChatId,
-        template_prices_usdt: &[Decimal],
         ai_creation_price_usdt: Decimal,
     ) -> ResponseResult<()> {
         self.send_screen(
             chat_id,
             create_menu_text(),
-            Keyboards::create_mode(template_prices_usdt, ai_creation_price_usdt),
+            Keyboards::create_mode(ai_creation_price_usdt),
         )
         .await
     }
@@ -240,13 +230,12 @@ impl<'a> Screens<'a> {
     pub(crate) async fn edit_create_menu(
         &self,
         target: UiMessage,
-        template_prices_usdt: &[Decimal],
         ai_creation_price_usdt: Decimal,
     ) -> ResponseResult<()> {
         self.edit_screen(
             target,
             create_menu_text(),
-            Keyboards::create_mode(template_prices_usdt, ai_creation_price_usdt),
+            Keyboards::create_mode(ai_creation_price_usdt),
         )
         .await
     }
@@ -256,77 +245,23 @@ impl<'a> Screens<'a> {
         target: UiMessage,
         config: &TelegramUiConfig,
     ) -> ResponseResult<()> {
-        self.edit_template_mode_page(target, config, 0).await
-    }
-
-    pub(crate) async fn edit_template_mode_page(
-        &self,
-        target: UiMessage,
-        config: &TelegramUiConfig,
-        page: usize,
-    ) -> ResponseResult<()> {
         self.edit_screen(
             target,
-            template_mode_text(),
-            Keyboards::template_page(&config.template_options, &config.template_prices_usdt, page),
+            template_mode_text(&config.admin_contact),
+            Keyboards::template_contact(),
         )
         .await
     }
 
-    pub(crate) async fn show_template_confirmation(
+    pub(crate) async fn show_template_mode(
         &self,
         chat_id: ChatId,
-        template_id: &str,
         config: &TelegramUiConfig,
     ) -> ResponseResult<()> {
-        let Some(template) = TemplateOption::find(&config.template_options, template_id) else {
-            return self
-                .send_screen(
-                    chat_id,
-                    "<b>Template not found.</b>\nChoose again.",
-                    Keyboards::template(&config.template_options, &config.template_prices_usdt),
-                )
-                .await;
-        };
-        let price = TemplateOption::price_by_id(
-            &config.template_options,
-            template_id,
-            &config.template_prices_usdt,
-        );
-
         self.send_screen(
             chat_id,
-            template_confirmation_text(&template, price),
-            Keyboards::template_confirmation(template_id, &template.preview_url),
-        )
-        .await
-    }
-
-    pub(crate) async fn edit_template_confirmation(
-        &self,
-        target: UiMessage,
-        template_id: &str,
-        config: &TelegramUiConfig,
-    ) -> ResponseResult<()> {
-        let Some(template) = TemplateOption::find(&config.template_options, template_id) else {
-            return self
-                .edit_screen(
-                    target,
-                    "<b>Template not found.</b>\nChoose again.",
-                    Keyboards::template(&config.template_options, &config.template_prices_usdt),
-                )
-                .await;
-        };
-        let price = TemplateOption::price_by_id(
-            &config.template_options,
-            template_id,
-            &config.template_prices_usdt,
-        );
-
-        self.edit_screen(
-            target,
-            template_confirmation_text(&template, price),
-            Keyboards::template_confirmation(template_id, &template.preview_url),
+            template_mode_text(&config.admin_contact),
+            Keyboards::template_contact(),
         )
         .await
     }
@@ -634,5 +569,19 @@ impl<'a> Screens<'a> {
                 .await
                 .map(|_| ()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::template_mode_text;
+
+    #[test]
+    fn template_mode_directs_users_to_store_and_admin_at_200_usdt() {
+        let text = template_mode_text("@configured_admin");
+
+        assert!(text.contains("https://memewebs.store"));
+        assert!(text.contains("200 USDT"));
+        assert!(text.contains("@configured_admin"));
     }
 }

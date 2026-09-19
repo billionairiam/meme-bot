@@ -111,7 +111,7 @@ impl Config {
             template_preview_domain: env::var("TEMPLATE_PREVIEW_DOMAIN")
                 .unwrap_or_else(|_| "web".to_string()),
             template_preview_base_url: env::var("TEMPLATE_PREVIEW_BASE_URL")
-                .unwrap_or_else(|_| "https://memewebs.xyz".to_string()),
+                .unwrap_or_else(|_| "https://memewebs.store".to_string()),
             admin_contact: env::var("ADMIN_CONTACT").unwrap_or_else(|_| "@admin".to_string()),
             template_prices_usdt: parse_template_prices(
                 &env::var("TEMPLATE_PRICES_USDT").unwrap_or_default(),
@@ -214,7 +214,7 @@ fn parse_provider(value: &str) -> Result<GenerationProviderName> {
     }
 }
 
-const DEFAULT_TEMPLATE_PRICES: &[i64] = &[30, 30, 30, 40, 40, 40, 50, 50, 50, 60, 60, 60];
+const DEFAULT_TEMPLATE_PRICES: &[i64] = &[200; 12];
 
 fn parse_template_prices(value: &str) -> Result<Vec<Decimal>> {
     let trimmed = value.trim();

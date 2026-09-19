@@ -1,6 +1,6 @@
 # Meme Bot
 
-Rust Telegram bot for selling meme coin websites. Users choose a template or AI-generated site, provide the required token basics, pay USDT on-chain, and the system generates a static website, pushes it to GitHub, deploys it with Cloudflare Pages, and optionally registers/configures a custom domain through Namecheap and Cloudflare.
+Rust Telegram bot for selling meme coin websites. Template customers browse `memewebs.store` and contact the admin for manual fulfillment; AI-site customers provide the required token basics, pay USDT on-chain, and the system generates a static website, pushes it to GitHub, deploys it with Cloudflare Pages, and optionally registers/configures a custom domain through Namecheap and Cloudflare.
 
 ## What Runs
 
@@ -85,7 +85,7 @@ The order lifecycle is represented by one `orders.status` value, such as `need_c
 
 ## Bot Workflow
 
-Creation supports template and AI modes. The required website inputs are chain (`ETH`, `BSC`, `SOL`, or `TON`), logo, token ticker, token name, and website domain. Contract address, X URL, and Telegram URL can be skipped; skipped values are stored as text placeholders:
+Creation supports template and AI modes. Template mode directs users to [memewebs.store](https://memewebs.store) and the configured admin contact; template websites have a fixed price of `200` USDT and are handled manually. AI mode continues through the automated bot workflow. Its required website inputs are chain (`ETH`, `BSC`, `SOL`, or `TON`), logo, token ticker, token name, and website domain. Contract address, X URL, and Telegram URL can be skipped; skipped values are stored as text placeholders:
 
 - Contract: `0x0000000000000000000000000000000000000000`
 - X: `https://x.com`
@@ -162,9 +162,9 @@ Important variables in `.env.meme-bot`:
 |----------|-------|
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token |
 | `TELEGRAM_REQUIRED_GROUP_ID` | Group/channel membership gate |
-| `TEMPLATE_PRICES_USDT` | 12 comma-separated template prices |
-| `TEMPLATE_PREVIEW_DOMAIN` | Suffix for numbered preview domains |
-| `TEMPLATE_PREVIEW_BASE_URL` | Base URL for preview links |
+| `TEMPLATE_PRICES_USDT` | Legacy internal catalog pricing; public template service is fixed at 200 USDT |
+| `TEMPLATE_PREVIEW_DOMAIN` | Legacy numbered preview suffix used by catalog synchronization |
+| `TEMPLATE_PREVIEW_BASE_URL` | Legacy catalog preview base URL; Telegram always links to `memewebs.store` |
 | `AI_CREATION_PRICE_USDT` | AI-generated site price |
 | `USDT_ERC20_ADDRESS` / `USDT_TRON_ADDRESS` / `USDT_SOL_ADDRESS` | Receiving addresses |
 | `USDT_ERC20_RPC_URL` / `TRON_GRID_BASE_URL` / `SOLANA_RPC_URL` | Payment verification providers |
@@ -254,8 +254,8 @@ Error responses use this shape:
 ## Fulfillment Flow
 
 1. User starts the Telegram wizard with `/start` or `/create`.
-2. User chooses template mode or AI creation mode.
-3. Bot collects logo, ticker, token name, contract, X link, Telegram link, and domain.
+2. User chooses template mode or AI creation mode. Template mode redirects to `memewebs.store` and the admin contact for manual fulfillment.
+3. For AI mode, the bot collects logo, ticker, token name, contract, X link, Telegram link, and domain.
 4. Bot quotes/registers the domain when configured.
 5. User selects payment chain and submits a transaction hash.
 6. Payment service verifies recipient, amount, confirmations, and transaction time.
