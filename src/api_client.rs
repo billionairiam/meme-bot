@@ -18,8 +18,6 @@ use crate::domain::{
 const PAGES_DEPLOY_TIMEOUT: Duration = Duration::from_secs(1800);
 const MAX_DEPLOY_RETRIES: u32 = 3;
 
-// ---- Shared helpers ----
-
 async fn map_http_error(response: reqwest::Response) -> DomainError {
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
@@ -38,8 +36,6 @@ async fn map_http_error(response: reqwest::Response) -> DomainError {
         Err(_) => DomainError::Http(format!("{status}: {body}")),
     }
 }
-
-// ---- HttpClientDomainRegistrar ----
 
 pub struct HttpClientDomainRegistrar {
     base_url: String,
@@ -104,8 +100,6 @@ impl DomainRegistrar for HttpClientDomainRegistrar {
         }
     }
 }
-
-// ---- HttpClientPagesDeployer ----
 
 #[derive(Debug, Deserialize)]
 struct PagesDeployResponse {

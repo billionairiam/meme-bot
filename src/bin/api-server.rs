@@ -91,8 +91,6 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-// ---- Auth middleware ----
-
 async fn auth_middleware(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -122,13 +120,9 @@ async fn auth_middleware(
     next.run(request).await
 }
 
-// ---- Health ----
-
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
 }
-
-// ---- Domain ----
 
 async fn domain_quote(
     State(state): State<Arc<AppState>>,
@@ -161,8 +155,6 @@ async fn domain_purchase(
             ApiError(e)
         })
 }
-
-// ---- DNS ----
 
 #[derive(Deserialize)]
 struct CreateZoneRequest {
@@ -233,8 +225,6 @@ async fn dns_set_nameservers(
         })
 }
 
-// ---- Cloudflare Pages (Git integration) ----
-
 async fn pages_deploy(
     State(state): State<Arc<AppState>>,
     Json(request): Json<PagesDeployRequest>,
@@ -249,8 +239,6 @@ async fn pages_deploy(
         ApiError(DomainError::from(e))
     })
 }
-
-// ---- ApiError ----
 
 struct ApiError(DomainError);
 
@@ -295,8 +283,6 @@ fn api_error_body(error: &str, message: &str) -> Json<ApiErrorResponse> {
         message: message.to_string(),
     })
 }
-
-// ---- Config from env ----
 
 fn namecheap_config_from_env() -> NamecheapConfig {
     let first_name = env::var("NAMECHEAP_CONTACT_FIRST_NAME").unwrap_or_default();

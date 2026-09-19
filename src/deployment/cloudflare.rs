@@ -16,8 +16,6 @@ pub const PAGES_DOMAIN_POLL_INTERVAL: Duration = Duration::from_secs(10);
 pub const ZONE_POLL_ATTEMPTS: usize = 40; // 40 * 30s = 20 min
 pub const ZONE_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
-// ---- Request types ----
-
 #[derive(Deserialize)]
 pub struct PagesDeployRequest {
     pub project_name: String,
@@ -35,8 +33,6 @@ pub struct PagesDeployRequest {
 fn default_pages_publish_dir() -> String {
     "/".to_string()
 }
-
-// ---- Pages deployment helpers ----
 
 #[derive(Debug)]
 pub struct PagesDeploymentStatus {
@@ -202,8 +198,6 @@ fn parse_zone_from_result(result: &serde_json::Value) -> Result<CloudflareZoneRe
     })
 }
 
-// ---- CloudflarePagesClient ----
-
 pub struct CloudflarePagesClient {
     client: Client,
     account_id: String,
@@ -222,8 +216,6 @@ impl CloudflarePagesClient {
             api_token,
         }
     }
-
-    // ---- Zone operations ----
 
     /// Returns (zone_id, zone_status) if the zone exists.
     pub async fn get_zone_info(
@@ -369,8 +361,6 @@ impl CloudflarePagesClient {
 
         parse_zone_from_result(result)
     }
-
-    // ---- Pages operations ----
 
     /// Trigger a new Pages deployment for the given project.
     pub async fn trigger_deployment(

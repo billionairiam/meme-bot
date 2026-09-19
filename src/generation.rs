@@ -70,6 +70,14 @@ pub struct GenerationRouter {
     providers: Vec<CliProvider>,
 }
 
+#[async_trait::async_trait]
+pub trait SiteGenerationProvider: Send + Sync {
+    async fn generate(
+        &self,
+        request: &SiteGenerationRequest,
+    ) -> Result<SiteGenerationResult, GenerationError>;
+}
+
 impl GenerationRouter {
     pub fn from_config(config: &Config) -> Self {
         let timeout = Duration::from_secs(config.agent_timeout_seconds);
@@ -98,8 +106,11 @@ impl GenerationRouter {
         };
         Self { providers }
     }
+}
 
-    pub async fn generate(
+#[async_trait::async_trait]
+impl SiteGenerationProvider for GenerationRouter {
+    async fn generate(
         &self,
         request: &SiteGenerationRequest,
     ) -> Result<SiteGenerationResult, GenerationError> {
@@ -514,6 +525,20 @@ mod tests {
 
     use super::*;
 
+    struct StaticTemplateProvider;
+
+    #[async_trait::async_trait]
+    impl SiteGenerationProvider for StaticTemplateProvider {
+        async fn generate(
+            &self,
+            _request: &SiteGenerationRequest,
+        ) -> Result<SiteGenerationResult, GenerationError> {
+            Ok(SiteGenerationResult {
+                provider_name: "static".to_string(),
+            })
+        }
+    }
+
     fn test_request(output_dir: PathBuf) -> SiteGenerationRequest {
         SiteGenerationRequest {
             order_id: Uuid::new_v4(),
@@ -529,6 +554,17 @@ mod tests {
             },
             output_dir,
         }
+    }
+
+    #[tokio::test]
+    async fn generation_provider_boundary_accepts_static_stub() {
+        let dir = tempdir().unwrap();
+        let provider: &dyn SiteGenerationProvider = &StaticTemplateProvider;
+        let result = provider
+            .generate(&test_request(dir.path().to_path_buf()))
+            .await
+            .unwrap();
+        assert_eq!(result.provider_name, "static");
     }
 
     #[test]

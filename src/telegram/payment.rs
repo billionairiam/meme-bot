@@ -10,7 +10,7 @@ use crate::{
     models::PaymentChain,
     payment::{
         ChainPaymentVerifier, PaymentVerificationError, PaymentVerificationOutcome,
-        PaymentVerificationRequest,
+        PaymentVerificationRequest, PaymentVerifier,
     },
 };
 
@@ -267,7 +267,7 @@ impl<'a> PaymentTxProcess<'a> {
 }
 
 pub(crate) async fn verify_payment_with_retries(
-    verifier: &ChainPaymentVerifier,
+    verifier: &dyn PaymentVerifier,
     request: PaymentVerificationRequest,
 ) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
     let mut last_error = None;

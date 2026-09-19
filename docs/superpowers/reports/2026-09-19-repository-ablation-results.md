@@ -102,25 +102,28 @@ The complete suite, strict Clippy, and both binary builds pass. Retained: yes.
 
 | Metric | Baseline | Batch 1 | Batch 2 | Batch 3 | Final |
 |---|---:|---:|---:|---:|---:|
-| Rust and migration lines | 11,623 | 11,645 | 11,694 | 11,654 | 11,616 |
-| Structs, enums, and traits | 78 | 75 | 72 | 72 | 72 |
-| Public symbols | 200 | 192 | 184 | 183 | 183 |
+| Rust and migration lines | 11,623 | 11,645 | 11,694 | 11,654 | 11,610 |
+| Structs, enums, and traits | 78 | 75 | 72 | 72 | 76 |
+| Public symbols | 200 | 192 | 184 | 183 | 185 |
 | Direct dependencies | 23 | 23 | 23 | 22 | 22 |
-| Listed tests | 65 | 62 | 65 | 65 | 65 |
+| Listed tests | 65 | 62 | 65 | 65 | 67 |
 
 Retained candidates: complete legacy-template subsystem removal and migration;
 direct queue wiring without `App` or `GenerationQueueConfig`; keyboard and
 domain-flow module functions; removal of the unread generation result field;
 non-optional database URL configuration; removal of confirmed dead helpers;
-and removal of the direct `tower` dependency. The final pass compacted only
-test-fixture formatting and redundant section separators, preserving every
-migration assertion and behavior test.
+and removal of the direct `tower` dependency. Final review restored the
+required `PaymentVerifier` and `SiteGenerationProvider` seams with
+credential-free test doubles, corrected repository guidance, and limited
+Tokio's paused-time support to test builds. The final compacting pass removed
+only redundant fixture formatting, dead no-op logic, and decorative section
+separators, preserving every migration assertion and behavior test.
 
 Reverted candidates: private root visibility for `payment` and `validation`,
 because strict Clippy showed that their public APIs would become dead internal
 surface. Both roots remain public.
 
-Final verification: 58 tests passed and 7 credentialed integration tests were
+Final verification: 60 tests passed and 7 credentialed integration tests were
 ignored; formatting, strict Clippy, both binaries, migration preservation and
 rollback, retired-identifier audits, and the supported 200 USDT manual-template
 flow all passed. Migration `0002` requires the documented pre-deployment copy

@@ -88,21 +88,20 @@ pub struct ChainPaymentVerifier {
     client: Client,
 }
 
+#[async_trait::async_trait]
+pub trait PaymentVerifier: Send + Sync {
+    async fn verify_tx(
+        &self,
+        request: &PaymentVerificationRequest,
+    ) -> Result<PaymentVerificationOutcome, PaymentVerificationError>;
+}
+
 impl ChainPaymentVerifier {
     pub fn new(config: Arc<Config>) -> Self {
         Self {
             config,
             client: Client::new(),
         }
-    }
-
-    /// Full verification: chain-specific check + payment invariants.
-    pub async fn verify_tx(
-        &self,
-        request: &PaymentVerificationRequest,
-    ) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
-        let outcome = self.verify_chain(request).await?;
-        validate_outcome(outcome, request)
     }
 
     async fn verify_chain(
@@ -404,6 +403,17 @@ impl ChainPaymentVerifier {
     }
 }
 
+#[async_trait::async_trait]
+impl PaymentVerifier for ChainPaymentVerifier {
+    async fn verify_tx(
+        &self,
+        request: &PaymentVerificationRequest,
+    ) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
+        let outcome = self.verify_chain(request).await?;
+        validate_outcome(outcome, request)
+    }
+}
+
 struct Erc20Transfer {
     to: String,
     amount: Decimal,
@@ -597,6 +607,18 @@ mod tests {
 
     use super::*;
 
+    struct StubPaymentVerifier;
+
+    #[async_trait::async_trait]
+    impl PaymentVerifier for StubPaymentVerifier {
+        async fn verify_tx(
+            &self,
+            request: &PaymentVerificationRequest,
+        ) -> Result<PaymentVerificationOutcome, PaymentVerificationError> {
+            Ok(make_outcome(request, request.submitted_at))
+        }
+    }
+
     fn make_outcome(
         request: &PaymentVerificationRequest,
         confirmed_at: DateTime<Utc>,
@@ -609,34 +631,46 @@ mod tests {
         }
     }
 
-    #[test]
-    fn allows_overpayment_or_exact_payment() {
-        let request = PaymentVerificationRequest {
+    fn request(chain: PaymentChain) -> PaymentVerificationRequest {
+        let submitted_at = Utc::now();
+        PaymentVerificationRequest {
             order_id: Uuid::new_v4(),
-            chain: PaymentChain::Erc20,
-            tx_hash: "valid_0xabc".to_string(),
+            chain,
+            tx_hash: "stub-tx".to_string(),
             expected_to_address: "0x1111111111111111111111111111111111111111".to_string(),
             required_amount_usdt: Decimal::new(50, 0),
-            payment_started_at: Utc::now() - Duration::minutes(1),
-            submitted_at: Utc::now(),
-            expires_at: Utc::now() + Duration::minutes(29),
-        };
+            payment_started_at: submitted_at - Duration::minutes(1),
+            submitted_at,
+            expires_at: submitted_at + Duration::minutes(29),
+        }
+    }
+
+    #[tokio::test]
+    async fn payment_verifier_boundary_accepts_credential_free_stub() {
+        let request = request(PaymentChain::Erc20);
+        let verifier: &dyn PaymentVerifier = &StubPaymentVerifier;
+        assert_eq!(
+            verifier
+                .verify_tx(&request)
+                .await
+                .unwrap()
+                .observed_amount_usdt,
+            Decimal::new(50, 0)
+        );
+    }
+
+    #[test]
+    fn allows_overpayment_or_exact_payment() {
+        let request = request(PaymentChain::Erc20);
         let outcome = make_outcome(&request, request.submitted_at);
         assert!(validate_outcome(outcome, &request).is_ok());
     }
 
     #[test]
     fn rejects_expired_orders() {
-        let request = PaymentVerificationRequest {
-            order_id: Uuid::new_v4(),
-            chain: PaymentChain::Tron,
-            tx_hash: "valid_tx".to_string(),
-            expected_to_address: "T111111111111111111111111111111111".to_string(),
-            required_amount_usdt: Decimal::new(30, 0),
-            payment_started_at: Utc::now() - Duration::hours(1),
-            submitted_at: Utc::now(),
-            expires_at: Utc::now() - Duration::minutes(1),
-        };
+        let mut request = request(PaymentChain::Tron);
+        request.payment_started_at = Utc::now() - Duration::hours(1);
+        request.expires_at = Utc::now() - Duration::minutes(1);
         let outcome = make_outcome(&request, request.submitted_at);
         assert_eq!(
             validate_outcome(outcome, &request).unwrap_err(),
@@ -646,18 +680,8 @@ mod tests {
 
     #[test]
     fn rejects_transactions_before_payment_window_started() {
-        let payment_started_at = Utc::now();
-        let request = PaymentVerificationRequest {
-            order_id: Uuid::new_v4(),
-            chain: PaymentChain::Erc20,
-            tx_hash: "valid_0xabc".to_string(),
-            expected_to_address: "0x1111111111111111111111111111111111111111".to_string(),
-            required_amount_usdt: Decimal::new(50, 0),
-            payment_started_at,
-            submitted_at: payment_started_at + Duration::minutes(1),
-            expires_at: payment_started_at + Duration::minutes(30),
-        };
-        let outcome = make_outcome(&request, payment_started_at - Duration::seconds(1));
+        let request = request(PaymentChain::Erc20);
+        let outcome = make_outcome(&request, request.payment_started_at - Duration::seconds(1));
         assert_eq!(
             validate_outcome(outcome, &request).unwrap_err(),
             PaymentVerificationError::OldTransaction
@@ -666,18 +690,8 @@ mod tests {
 
     #[test]
     fn rejects_transactions_confirmed_well_after_user_submission() {
-        let submitted_at = Utc::now();
-        let request = PaymentVerificationRequest {
-            order_id: Uuid::new_v4(),
-            chain: PaymentChain::Erc20,
-            tx_hash: "valid_0xabc".to_string(),
-            expected_to_address: "0x1111111111111111111111111111111111111111".to_string(),
-            required_amount_usdt: Decimal::new(50, 0),
-            payment_started_at: submitted_at - Duration::minutes(1),
-            submitted_at,
-            expires_at: submitted_at + Duration::minutes(29),
-        };
-        let outcome = make_outcome(&request, submitted_at + Duration::minutes(3));
+        let request = request(PaymentChain::Erc20);
+        let outcome = make_outcome(&request, request.submitted_at + Duration::minutes(3));
         assert_eq!(
             validate_outcome(outcome, &request).unwrap_err(),
             PaymentVerificationError::TransactionAfterSubmission
@@ -686,18 +700,8 @@ mod tests {
 
     #[test]
     fn allows_transactions_within_clock_skew_tolerance() {
-        let submitted_at = Utc::now();
-        let request = PaymentVerificationRequest {
-            order_id: Uuid::new_v4(),
-            chain: PaymentChain::Erc20,
-            tx_hash: "valid_0xabc".to_string(),
-            expected_to_address: "0x1111111111111111111111111111111111111111".to_string(),
-            required_amount_usdt: Decimal::new(50, 0),
-            payment_started_at: submitted_at - Duration::minutes(1),
-            submitted_at,
-            expires_at: submitted_at + Duration::minutes(29),
-        };
-        let outcome = make_outcome(&request, submitted_at + Duration::seconds(30));
+        let request = request(PaymentChain::Erc20);
+        let outcome = make_outcome(&request, request.submitted_at + Duration::seconds(30));
         assert!(validate_outcome(outcome, &request).is_ok());
     }
 }

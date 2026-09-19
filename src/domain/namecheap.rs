@@ -18,8 +18,6 @@ pub(super) fn icann_fee() -> Decimal {
     Decimal::new(20, 2)
 }
 
-// ---- Shared Namecheap API transport ----
-
 pub(super) struct NamecheapApiClient {
     pub(super) config: Arc<NamecheapConfig>,
     client: Client,
@@ -100,8 +98,6 @@ impl NamecheapApiClient {
         Ok(body)
     }
 }
-
-// ---- NamecheapRegistrar ----
 
 pub struct NamecheapRegistrar {
     api: NamecheapApiClient,
@@ -312,8 +308,6 @@ impl DomainRegistrar for NamecheapRegistrar {
         })
     }
 }
-
-// HttpClientDomainRegistrar and HttpClientDnsProvisioner live in api_client module
 
 #[derive(Debug)]
 struct NamecheapCheckResult {

@@ -416,12 +416,6 @@ async fn handle_order_step(
     let order = match orders(pool).get_unpaid(user_id.0 as i64).await {
         Ok(Some(order)) => order,
         Ok(None) => {
-            // No active order — check if it's a TX hash for NeedPay order
-            if let Some(text) = msg.text().map(str::trim)
-                && looks_like_tx_hash(text)
-            {
-                // Already checked above via get_unpaid_order, no match
-            }
             return Screens::new(&bot)
                 .show_main_menu(msg.chat.id, &config)
                 .await;

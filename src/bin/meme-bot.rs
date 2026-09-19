@@ -5,7 +5,7 @@ use anyhow::Context;
 use meme_bot::api_client::HttpClientPagesDeployer;
 use meme_bot::config::{Config, load_env_file};
 use meme_bot::deployment::SiteDeployer;
-use meme_bot::generation::GenerationRouter;
+use meme_bot::generation::{GenerationRouter, SiteGenerationProvider};
 use meme_bot::logging::init_logging;
 use meme_bot::queue::GenerationQueue;
 use meme_bot::telegram::run_bot;
@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     let (notification_tx, mut notification_rx) =
         mpsc::unbounded_channel::<meme_bot::queue::UserNotification>();
 
-    let router = Arc::new(GenerationRouter::from_config(&config));
+    let router: Arc<dyn SiteGenerationProvider> = Arc::new(GenerationRouter::from_config(&config));
     let deployer: Option<Arc<dyn SiteDeployer>> = match (
         config.api_service_base_url.as_deref(),
         config.api_service_api_key.as_deref(),

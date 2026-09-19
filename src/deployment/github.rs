@@ -11,8 +11,6 @@ use tokio::process::Command;
 
 use super::{DeploymentError, DeploymentRequest};
 
-// ---- Git helpers ----
-
 pub(crate) async fn run_git(
     dir: impl AsRef<Path>,
     args: &[&str],
@@ -73,8 +71,6 @@ pub(crate) async fn git_output(
         ))
     }
 }
-
-// ---- GitHub API helpers ----
 
 pub(crate) fn github_request(
     builder: reqwest::RequestBuilder,

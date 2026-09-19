@@ -9,7 +9,7 @@ use crate::{
     config::Config,
     db::{OrderStore, WebsiteStore},
     deployment::{DeploymentRequest, SiteDeployer},
-    generation::{GenerationError, GenerationRouter, SiteGenerationRequest},
+    generation::{GenerationError, SiteGenerationProvider, SiteGenerationRequest},
     models::{Order, OrderStatus, WebsiteInput},
 };
 
@@ -26,7 +26,7 @@ pub struct GenerationQueue {
     pool: SqlitePool,
     orders: OrderStore,
     websites: WebsiteStore,
-    router: Arc<GenerationRouter>,
+    router: Arc<dyn SiteGenerationProvider>,
     deployer: Option<Arc<dyn SiteDeployer>>,
     config: Arc<Config>,
     semaphore: Arc<Semaphore>,
@@ -38,7 +38,7 @@ pub struct GenerationQueue {
 impl GenerationQueue {
     pub fn new(
         pool: SqlitePool,
-        router: Arc<GenerationRouter>,
+        router: Arc<dyn SiteGenerationProvider>,
         deployer: Option<Arc<dyn SiteDeployer>>,
         config: Arc<Config>,
         worker_id: String,

@@ -31,7 +31,7 @@ The crate builds:
 Important module responsibilities:
 
 - `config`: flat environment config via `Config::from_env()`.
-- `models`: shared domain types such as `WebsiteInput`, `BuildMode`, `OrderType`, `PaymentChain`, `Order`, and `Template`.
+- `models`: shared domain types such as `WebsiteInput`, `PaymentChain`, and `Order`.
 - `validation`: regex validation for structured user inputs; user-provided prompt text is not accepted.
 - `db`: raw SQLx queries and SQLite helpers.
 - `payment`: `PaymentVerifier` boundary plus ERC20/TRON/SOL USDT verification and payment invariants.
@@ -40,11 +40,10 @@ Important module responsibilities:
 - `deployment`: `SiteDeployer` boundary plus GitHub/Cloudflare Pages logic.
 - `domain`: `DomainRegistrar` and `DnsProvisioner` boundaries for Namecheap/Cloudflare DNS.
 - `telegram`: teloxide/dptree handlers, inline keyboards, sessions, payment/domain flows, and template deep links.
-- `app`: wires generation providers, queue config, and optional API-service deployer.
 
 ## Codebase conventions
 
-- External integrations go behind traits with `#[async_trait]`, real implementations, and test stubs/dry-runs where possible. Existing boundaries: `PaymentVerifier`, `SiteGenerationProvider`, `SiteDeployer`, `DomainRegistrar`, and `DnsProvisioner`. Wire new service boundaries in `src/app.rs` with `Arc<dyn Trait>` when shared.
+- External integrations go behind traits with `#[async_trait]`, real implementations, and credential-free test stubs/dry-runs. Existing boundaries: `PaymentVerifier`, `SiteGenerationProvider`, `SiteDeployer`, `DomainRegistrar`, and `DnsProvisioner`. Wire shared implementations at the binary entry point with `Arc<dyn Trait>`.
 - Use `anyhow::Result<T>` with `.context()` / `.with_context()` for general propagation. Use `thiserror` enums when callers need to match domain-specific failures, such as payment, generation, deployment, or domain errors.
 - Generation failover is intentional: `GenerationRouter` tries the configured primary provider first and only falls back on recoverable provider errors (`QuotaExhausted`, `RateLimited`, `ProviderUnavailable`, invalid output).
 - Configuration is environment-only. When adding a setting, update `Config`, read it in `Config::from_env()`, and document it in the matching `.env.*.example` file.
