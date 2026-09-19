@@ -73,6 +73,10 @@ alternative characterization tests. Handler code now calls the two module
 functions directly, and all 58 runnable tests pass with 7 ignored. Retained:
 yes.
 
+Removing the unread `SiteGenerationResult.output_dir` field reduced the total
+to 11,699 lines while leaving type, public-symbol, dependency, and test counts
+unchanged. Generation, queue, and full-suite tests pass. Retained: yes.
+
 ## Deployment
 
 Before deploying migration 0002, stop both binaries and copy `db.sqlite3` to

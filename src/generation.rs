@@ -29,7 +29,6 @@ pub struct SiteGenerationRequest {
 #[derive(Clone, Debug)]
 pub struct SiteGenerationResult {
     pub provider_name: String,
-    pub output_dir: PathBuf,
 }
 
 #[derive(Debug, Error)]
@@ -200,7 +199,6 @@ async fn run_cli_provider(
         validate_agent_output(request, provider.name, &done_file)?;
         Ok(SiteGenerationResult {
             provider_name: provider.name.to_string(),
-            output_dir: request.output_dir.clone(),
         })
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
