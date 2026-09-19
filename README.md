@@ -54,7 +54,6 @@ mem-bot/
 │   │   ├── meme-bot.rs      # Telegram bot + queue worker
 │   │   └── api-server.rs    # REST API server
 │   ├── api_client.rs        # API-server client implementations
-│   ├── app.rs               # App wiring
 │   ├── config.rs            # Env configuration
 │   ├── db.rs                # SQLite queries
 │   ├── deployment/          # GitHub + Cloudflare Pages deployment

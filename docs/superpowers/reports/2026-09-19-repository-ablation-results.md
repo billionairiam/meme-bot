@@ -46,6 +46,20 @@ suite passes with 55 passed and 7 ignored; strict Clippy and both binary builds
 pass. The intentional line increase comes from explicit migration preservation
 coverage. Retained: yes.
 
+### Batch 2 — forwarding abstractions
+
+| Metric | Observed | Change from Batch 1 |
+|---|---:|---:|
+| Rust and migration lines | 11,600 | -45 |
+| Structs, enums, and traits | 73 | -2 |
+| Public symbols | 187 | -5 |
+| Direct dependencies | 23 | 0 |
+| Listed tests | 62 | 0 |
+
+Removed `App` and `GenerationQueueConfig`. Queue construction now has one fewer
+forwarding call layer: `main` calls `GenerationQueue::new` directly. The full
+test suite and the `meme-bot` build pass. Retained: yes.
+
 ## Deployment
 
 Before deploying migration 0002, stop both binaries and copy `db.sqlite3` to

@@ -22,11 +22,6 @@ pub struct UserNotification {
     pub message: String,
 }
 
-pub struct GenerationQueueConfig {
-    pub config: Arc<Config>,
-    pub worker_id: String,
-}
-
 pub struct GenerationQueue {
     pool: SqlitePool,
     orders: OrderStore,
@@ -45,7 +40,8 @@ impl GenerationQueue {
         pool: SqlitePool,
         router: Arc<GenerationRouter>,
         deployer: Option<Arc<dyn SiteDeployer>>,
-        queue_config: GenerationQueueConfig,
+        config: Arc<Config>,
+        worker_id: String,
         notification_tx: Option<mpsc::UnboundedSender<UserNotification>>,
     ) -> Self {
         Self {
@@ -54,12 +50,10 @@ impl GenerationQueue {
             pool,
             router,
             deployer,
-            semaphore: Arc::new(Semaphore::new(
-                queue_config.config.generation_max_concurrency.max(1),
-            )),
+            semaphore: Arc::new(Semaphore::new(config.generation_max_concurrency.max(1))),
             lock_mutex: Arc::new(Mutex::new(())),
-            config: queue_config.config,
-            worker_id: queue_config.worker_id,
+            config,
+            worker_id,
             notification_tx,
         }
     }

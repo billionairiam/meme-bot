@@ -2,9 +2,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use meme_bot::app::App;
+use meme_bot::api_client::HttpClientPagesDeployer;
 use meme_bot::config::{Config, load_env_file};
+use meme_bot::deployment::SiteDeployer;
+use meme_bot::generation::GenerationRouter;
 use meme_bot::logging::init_logging;
+use meme_bot::queue::GenerationQueue;
 use meme_bot::telegram::run_bot;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
@@ -68,8 +71,30 @@ async fn main() -> anyhow::Result<()> {
     let (notification_tx, mut notification_rx) =
         mpsc::unbounded_channel::<meme_bot::queue::UserNotification>();
 
-    let app = App::new(Arc::clone(&config), pool.clone());
-    let queue = app.build_queue(Some(notification_tx));
+    let router = Arc::new(GenerationRouter::from_config(&config));
+    let deployer: Option<Arc<dyn SiteDeployer>> = match (
+        config.api_service_base_url.as_deref(),
+        config.api_service_api_key.as_deref(),
+    ) {
+        (Some(base_url), Some(api_key)) => Some(Arc::new(HttpClientPagesDeployer::new(
+            base_url.to_string(),
+            api_key.to_string(),
+        ))),
+        _ => None,
+    };
+    info!(
+        max_concurrency = config.generation_max_concurrency,
+        primary_provider = config.generation_primary_provider.as_str(),
+        "generation queue configured"
+    );
+    let queue = GenerationQueue::new(
+        pool.clone(),
+        router,
+        deployer,
+        Arc::clone(&config),
+        "worker-1".to_string(),
+        Some(notification_tx),
+    );
 
     let notify_bot = if config.telegram_bot_token.trim().is_empty() {
         None
