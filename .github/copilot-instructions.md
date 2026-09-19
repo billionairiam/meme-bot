@@ -39,7 +39,7 @@ Important module responsibilities:
 - `queue`: SQLite-backed generation job locking, retries, status transitions, deployment handoff, and user notifications.
 - `deployment`: `SiteDeployer` boundary plus GitHub/Cloudflare Pages logic.
 - `domain`: `DomainRegistrar` and `DnsProvisioner` boundaries for Namecheap/Cloudflare DNS.
-- `telegram`: teloxide/dptree handlers, inline keyboards, sessions, payment/domain flows, and template deep links.
+- `telegram`: teloxide/dptree handlers, inline keyboards, payment/domain flows, and the manual template contact screen.
 
 ## Codebase conventions
 
@@ -47,7 +47,7 @@ Important module responsibilities:
 - Use `anyhow::Result<T>` with `.context()` / `.with_context()` for general propagation. Use `thiserror` enums when callers need to match domain-specific failures, such as payment, generation, deployment, or domain errors.
 - Generation failover is intentional: `GenerationRouter` tries the configured primary provider first and only falls back on recoverable provider errors (`QuotaExhausted`, `RateLimited`, `ProviderUnavailable`, invalid output).
 - Configuration is environment-only. When adding a setting, update `Config`, read it in `Config::from_env()`, and document it in the matching `.env.*.example` file.
-- SQLite uses `sqlx::SqlitePool` with `max_connections(1)`. Both binaries run migrations with `sqlx::migrate!()`. Queue job locking is guarded by a `tokio::sync::Mutex` around SELECT+UPDATE.
+- SQLite uses `sqlx::SqlitePool` with `max_connections(1)`. Only `meme-bot` opens the database and runs migrations. Queue locking uses a `tokio::sync::Mutex` around `lock_next_generation`'s SELECT+UPDATE flow.
 - IDs are UUID v4 stored as `TEXT`; money uses `rust_decimal::Decimal` and is stored as text in SQLite; timestamps use `chrono::DateTime<Utc>` / ISO 8601 text.
 - Schema changes belong in new files under `migrations/` (for example `0002_*.sql`). Keep `PRAGMA foreign_keys = ON`, status `CHECK` constraints, and indexes for queried columns. Follow `.github/instructions/migrations.instructions.md`.
 - Tests are colocated in module `#[cfg(test)]` blocks. Use sync `#[test]` or async `#[tokio::test]`; use stubs/dry-runs and `tempfile` rather than real external credentials.

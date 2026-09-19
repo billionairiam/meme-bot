@@ -94,8 +94,8 @@ Telegram user → /create → AI wizard → select payment chain
 | `payment` | `PaymentVerifier` boundary and ERC20/TRON/SOL USDT chain verifier. |
 | `generation` | `SiteGenerationProvider` boundary and `GenerationRouter` CLI failover. |
 | `queue` | `GenerationQueue` with SQLite-backed job locking (mutex-guarded SELECT + UPDATE). One `tick()` picks a queued job, generates, optionally deploys. Uses a `tokio::sync::Semaphore` for concurrency control. |
-| `api_client` | `HttpClient*` structs that proxy to the API server. `HttpClientDomainRegistrar` implements `DomainRegistrar` (quote + purchase via `POST /api/v1/domain/*`). `HttpClientDnsProvisioner` (inherent methods: `create_zone`, `set_namecheap_nameservers`, `set_dns_records`; also implements the `DnsProvisioner` trait). `HttpClientPagesDeployer` implements `SiteDeployer` (creates GitHub repo, pushes site, calls `POST /api/v1/pages/deploy`). All use `X-API-Key` auth. |
-| `deployment` | `src/deployment/{mod.rs, github.rs, cloudflare.rs}`. `SiteDeployer` trait + `CloudflarePagesDeployer` (direct Cloudflare API). `github.rs` handles repo creation and git push. `cloudflare.rs` has `create_cloudflare_zone()` (calls Cloudflare `POST /zones`), Pages project creation, deployment triggering, and domain binding. |
+| `api_client` | `HttpClientDomainRegistrar` implements `DomainRegistrar`; `HttpClientPagesDeployer` implements `SiteDeployer` and exposes API-server-backed zone/nameserver operations. Both use `X-API-Key`. |
+| `deployment` | `SiteDeployer`, GitHub helpers, and `CloudflarePagesClient` for direct Cloudflare zone/Pages operations used by `api-server`. |
 | `domain` | `src/domain/{mod.rs, registrar.rs, namecheap.rs, dns.rs, namecheap_xml.rs}`. `DomainRegistrar` trait with `NamecheapRegistrar` impl (check → getPricing → create). `DnsProvisioner` trait (single method: `set_namecheap_nameservers`) with `NamecheapDnsProvisioner` impl. `SUGGESTED_TLDS` in `registrar.rs` lists 19 TLDs for alternative-domain suggestions. |
 | `telegram` | teloxide handlers, screens, keyboards, payment/domain flows, and helpers. |
 
@@ -104,6 +104,6 @@ Telegram user → /create → AI wizard → select payment chain
 - **Traits for external boundaries**: `PaymentVerifier`, `SiteGenerationProvider`, `SiteDeployer`, `DomainRegistrar`, and `DnsProvisioner`, with credential-free test doubles.
 - **Generation provider failover**: `GenerationRouter` iterates providers in configured order. Recoverable errors (`QuotaExhausted`, `RateLimited`, `ProviderUnavailable`) trigger failover; non-recoverable errors stop immediately.
 - **Config is flat env vars**: No config files. `Config::from_env()` reads everything. See `.env.meme-bot.example` and `.env.api-server.example` for all supported vars.
-- **SQLite pool is single-connection** (`max_connections(1)`). The mutex in `lock_next_job` provides an additional guard, but the single connection ensures SQLite never sees concurrent writes.
+- **SQLite pool is single-connection** (`max_connections(1)`). The queue mutex guards `lock_next_generation`'s SELECT+UPDATE flow.
 - **API server proxy mode**: Production domain, DNS, and Pages operations use the authenticated API-server clients when `API_SERVICE_BASE_URL` and `API_SERVICE_API_KEY` are configured.
-- **SQLite schema** is the ordered migration set under `migrations/`. Both binaries run pending SQLx migrations automatically; migration 0002 requires the documented database backup before deployment.
+- **SQLite schema** is the ordered migration set under `migrations/`. Only `meme-bot` runs pending migrations; migration 0002 requires the documented database backup before deployment.
