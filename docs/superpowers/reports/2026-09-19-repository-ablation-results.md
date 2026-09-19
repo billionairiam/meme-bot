@@ -77,6 +77,10 @@ Removing the unread `SiteGenerationResult.output_dir` field reduced the total
 to 11,699 lines while leaving type, public-symbol, dependency, and test counts
 unchanged. Generation, queue, and full-suite tests pass. Retained: yes.
 
+Making `Config.database_url` non-optional removed the impossible startup branch
+and reduced the total to 11,694 lines. Other fixed metrics are unchanged; the
+full suite and `meme-bot` build pass. Retained: yes.
+
 ## Deployment
 
 Before deploying migration 0002, stop both binaries and copy `db.sqlite3` to

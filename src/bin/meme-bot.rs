@@ -37,11 +37,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let database_url = config
-        .database_url
-        .as_deref()
-        .context("DATABASE_URL is required")?;
-    let connect_opts = SqliteConnectOptions::from_str(database_url)?
+    let connect_opts = SqliteConnectOptions::from_str(&config.database_url)?
         .pragma("foreign_keys", "ON")
         .create_if_missing(true);
     let pool = SqlitePoolOptions::new()
