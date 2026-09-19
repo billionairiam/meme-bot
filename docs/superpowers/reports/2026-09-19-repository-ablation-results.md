@@ -65,6 +65,14 @@ functions reduced the batch totals to 11,595 lines, 72 declared types, and 186
 public symbols, with dependency and test counts unchanged. All keyboard,
 screen, and full-suite tests pass. Retained: yes.
 
+The domain-flow wrapper candidate passed with 11,701 lines, 72 declared types,
+184 public symbols, 23 direct dependencies, and 65 listed tests. The raw type
+count stayed flat because the test registrar stub replaced the deleted
+production `DomainFlow` type; the line increase is the three new retry/error/
+alternative characterization tests. Handler code now calls the two module
+functions directly, and all 58 runnable tests pass with 7 ignored. Retained:
+yes.
+
 ## Deployment
 
 Before deploying migration 0002, stop both binaries and copy `db.sqlite3` to

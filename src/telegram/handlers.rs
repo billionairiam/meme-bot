@@ -18,7 +18,7 @@ use crate::{
     },
 };
 
-use super::domain_flow::DomainFlow;
+use super::domain_flow;
 use super::helpers::*;
 use super::keyboards;
 use super::payment::PaymentTxProcess;
@@ -809,10 +809,7 @@ async fn handle_domain_step(
         base_url.to_string(),
         api_key.to_string(),
     ));
-    match DomainFlow::new(registrar.as_ref())
-        .quote_with_retries(domain)
-        .await
-    {
+    match domain_flow::quote_with_retries(registrar.as_ref(), domain).await {
         Ok(quote) if quote.available && !quote.is_premium => {
             let total = order.site_price_usdt + quote.price_usd;
             if let Err(e) = orders(pool)
@@ -856,9 +853,8 @@ async fn handle_domain_step(
                 .rsplit_once('.')
                 .map(|(name, _)| name)
                 .unwrap_or(domain);
-            let alternatives = DomainFlow::new(registrar.as_ref())
-                .check_alternatives(base_name, tld)
-                .await;
+            let alternatives =
+                domain_flow::check_alternatives(registrar.as_ref(), base_name, tld).await;
 
             if alternatives.is_empty() {
                 bot.send_message(chat_id, "<b>Domain unavailable.</b>\nSend another domain.")
